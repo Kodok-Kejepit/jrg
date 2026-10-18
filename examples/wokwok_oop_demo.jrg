@@ -1,0 +1,107 @@
+package main
+
+// ============================================================================
+// wokwok_oop_demo.jrg — contoh: inheritance, polymorphism, encapsulation …
+
+// ── INHERITANCE: `struct Dog: Animal` mewarisi field + method ──
+struct Animal {
+    pub name: str = "tanpa nama",
+    nyawa: int = 3,   // private — cuma bisa dibaca dari dalam method Animal/turunannya
+}
+
+impl Animal {
+    fn describe(self) -> str { return "Aku " + self.name + ", makhluk hidup biasa" }
+    fn is_alive(self) -> bool { return self.nyawa > 0 }
+}
+
+struct Dog: Animal {
+    pub breed: str = "kampung",
+}
+
+impl Dog {
+    fn bark(self) -> str { return self.name + " (" + self.breed + ") bilang: Guk guk!" }
+    fn describe(self) -> str { return "Aku " + self.name + ", seekor anjing " + self.breed } // override
+}
+
+// ── POLYMORPHISM: trait dengan default method ──
+trait Shape {
+    fn area(self) -> f64 { return 0.0 }   // tiap impl wajib override ini
+    fn label(self) -> str { return "sebuah bentuk" }  // default — boleh tidak di-override
+}
+
+struct Circle { pub r: f64 }
+impl Shape for Circle {
+    fn area(self) -> f64 { return 3.14159265 * self.r * self.r }
+    fn label(self) -> str { return "lingkaran" }
+}
+
+struct Square { pub side: f64 }
+impl Shape for Square {
+    fn area(self) -> f64 { return self.side * self.side }
+    // label() TIDAK di-override -> otomatis pakai default trait
+}
+
+fn print_shape(s: Shape) { wok("-", s.label(), "| luas:", s.area()) }
+
+// ── ENCAPSULATION: field tanpa `pub` = private ──
+struct BankAccount {
+    pub owner: str,
+    saldo: int = 0,
+}
+impl BankAccount {
+    fn deposit(self, jumlah: int) -> BankAccount { return BankAccount { saldo: self.saldo + jumlah, ...self } }
+    fn balance(self) -> int { return self.saldo }   // boleh, dari dalam method sendiri
+}
+
+pub fn main() {
+    wok("=== INHERITANCE ===")
+    let d = Dog { name: "Rex", breed: "Herder" }
+    wok(d.describe())               // override Dog menang
+    wok(d.bark())
+    wok("is_alive (method warisan dari Animal):", d.is_alive())
+    let d2 = Dog { name: "Tanpa Ras" }  // breed & nyawa pakai default warisan
+    wok("default breed:", d2.breed, "| default nyawa->is_alive:", d2.is_alive())
+
+    wok("")
+    wok("=== POLYMORPHISM ===")
+    let bentuk = [Circle { r: 2.0 }, Square { side: 3.0 }]
+    for i in bentuk { print_shape(bentuk[i]) }   // for-in di bahasa ini iterasi INDEX, bukan value
+
+    wok("")
+    wok("=== ENCAPSULATION ===")
+    let rek = BankAccount { owner: "Saiii" }.deposit(50000)
+    wok("owner (pub):", rek.owner, "| balance() (lewat method):", rek.balance())
+    // rek.saldo langsung dari sini -> error "private" (dicoba di komentar biar demo tetap jalan mulus):
+    // wok(rek.saldo)
+
+    wok("")
+    wok("=== arr:: full power (spot check) ===")
+    let data = [5, 3, 8, 1, 9, 2]
+    wok("sort:", data.sort(), "| sort_desc:", data.sort_desc())
+    wok("partition genap/ganjil:", data.partition(|x: int| x % 2 == 0))
+    wok("group_by mod3:", data.group_by(|x: int| x % 3))
+    wok("zip_with (+):", [1,2,3].zip_with([10,20,30], |a: int, b: int| a + b))
+    wok("union/intersect/difference:", [1,2,3].union([2,3,4]), [1,2,3].intersect([2,3,4]), [1,2,3].difference([2,3,4]))
+
+    wok("")
+    wok("=== crypto:: ===")
+    wok("sha256('halo'):", crypto::sha256("halo"))
+    let key = crypto::aes_gen_key()
+    let iv = crypto::aes_gen_iv()
+    let enc = crypto::aes_encrypt("pesan rahasia", key, iv)?
+    wok("aes_decrypt(aes_encrypt(x)) == x?", crypto::aes_decrypt(enc, key, iv)? == "pesan rahasia")
+
+    wok("")
+    wok("=== ptr:: referensi sungguhan (shared mutable state) ===")
+    let counter = ptr::new(0)
+    let selesai = make_chan(bool)
+    spawn {
+        for i in [1,2,3,4,5] { ptr::update(counter, |n: int| n + 1) }
+        selesai <- true
+    }
+    <-selesai
+    wok("counter setelah 5x update dari goroutine lain:", ptr::get(counter))
+
+    wok("")
+    wok("SEMUA DEMO SELESAI")
+}

@@ -1,0 +1,74 @@
+package main
+
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Empty,
+}
+
+fn area(s: Shape) -> f64 {
+    match s {
+        Shape::Circle(r) => math::PI * r * r,
+        Shape::Rectangle(w, h) => w * h,
+        Shape::Empty => 0.0,
+    }
+}
+
+fn classify(n: int) -> string {
+    match n {
+        0 => "nol",
+        1 | 2 | 3 => "kecil",
+        4..=10 => "sedang",
+        _ => "besar",
+    }
+}
+
+fn safe_div(a: f64, b: f64) -> Result<f64, string> {
+    if b == 0.0 {
+        return Err("pembagi nol")
+    }
+    Ok(a / b)
+}
+
+fn compute(a: f64, b: f64) -> Result<f64, string> {
+    let hasil: f64 = safe_div(a, b)?
+    Ok(hasil * 2.0)
+}
+
+fn find_even(data: array) -> Option<int> {
+    for _, x in data {
+        if x % 2 == 0 {
+            return Some(x)
+        }
+    }
+    None
+}
+
+pub fn main() {
+    let shapes: [3]Shape = [Shape::Circle(2.0), Shape::Rectangle(3.0, 4.0), Shape::Empty]
+    for _, s in shapes {
+        wok("area =", area(s))
+    }
+
+    wok(classify(0), classify(2), classify(7), classify(99))
+
+    match compute(10.0, 2.0) {
+        Ok(v) => wok("compute ok:", v),
+        Err(e) => wok("compute error:", e),
+    }
+    match compute(10.0, 0.0) {
+        Ok(v) => wok("compute ok:", v),
+        Err(e) => wok("compute error:", e),
+    }
+
+    let nums: [6]int = [1, 3, 5, 8, 9, 11]
+    match find_even(nums) {
+        Some(v) => wok("genap ditemukan:", v),
+        None => wok("tidak ada genap"),
+    }
+
+    let x: Option<int> = Some(42)
+    wok("unwrap_or None:", x.unwrap_or(0))
+    let y: Option<int> = None
+    wok("unwrap_or default:", y.unwrap_or(-1))
+}

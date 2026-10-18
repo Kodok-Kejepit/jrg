@@ -1,0 +1,126 @@
+package main
+
+// Konformansi: aturan index dan slice.
+
+struct Titik { pub x: int, pub y: int }
+struct Ent { pub nama: string, pub pos: Titik }
+
+pub fn main() {
+    let xs = [10, 20, 30, 40, 50]
+
+    // ── index positif ───────────────────────────────────────────────────
+    assert_eq(xs[0], 10)
+    assert_eq(xs[4], 50)
+
+    // ── index negatif: -1 adalah elemen terakhir ────────────────────────
+    assert_eq(xs[-1], 50)
+    assert_eq(xs[-2], 40)
+    assert_eq(xs[-5], 10)                // batas terjauh yang masih sah
+
+    // ── tulis memakai aturan yang sama dengan baca ──────────────────────
+    var ys = [1, 2, 3]
+    ys[0] = 100
+    assert_eq(ys[0], 100)
+    ys[-1] = 300
+    assert_eq(ys[2], 300)
+    assert_eq(ys[-1], 300)
+    ys[-3] = 111
+    assert_eq(ys[0], 111)
+
+    // operator gabungan juga
+    var zs = [1, 2, 3]
+    zs[0] += 10
+    assert_eq(zs[0], 11)
+    zs[-1] *= 5
+    assert_eq(zs[2], 15)
+
+    // ── slice ───────────────────────────────────────────────────────────
+    assert_eq(xs[0:2], [10, 20])
+    assert_eq(xs[2:5], [30, 40, 50])
+    assert_eq(xs[0:5], [10, 20, 30, 40, 50])
+    assert_eq(xs[2:2], [])               // kosong yang sah: awal == akhir
+    assert_eq(xs[5:5], [])               // di ujung, masih sah
+
+    // batas yang dihilangkan
+    assert_eq(xs[:2], [10, 20])
+    assert_eq(xs[3:], [40, 50])
+    assert_eq(xs[:], [10, 20, 30, 40, 50])
+
+    // slice menyalin, tidak mengalias
+    let asli = [1, 2, 3]
+    var potong = asli[0:2]
+    potong[0] = 99
+    assert_eq(asli[0], 1)                // yang asli tidak ikut berubah
+
+    // ── tuple: index angka lewat `.` maupun `[]` ────────────────────────
+    let t = (1, "dua", true)
+    assert_eq(t.0, 1)
+    assert_eq(t.1, "dua")
+    assert_eq(t.2, true)
+    assert_eq(t[0], 1)
+    assert_eq(t[2], true)
+    assert_eq(t[-1], true)               // aturan negatif yang sama
+    assert_eq(t[-3], 1)
+
+    // ── dict: key string ────────────────────────────────────────────────
+    var d = { "a": 1, "b": 2 }
+    assert_eq(d["a"], 1)
+    d["a"] = 10
+    assert_eq(d["a"], 10)
+    d["c"] = 3                           // key baru boleh ditambahkan
+    assert_eq(d["c"], 3)
+
+    // ── struct: field lewat `.` ─────────────────────────────────────────
+    let p = Titik { x: 1, y: 2 }
+    assert_eq(p.x, 1)
+    assert_eq(p.y, 2)
+
+    // ── index dari ekspresi, bukan cuma literal ─────────────────────────
+    let i = 2
+    assert_eq(xs[i], 30)
+    assert_eq(xs[i - 1], 20)
+    assert_eq(xs[xs.len() - 1], 50)
+
+    // ── array bersarang ─────────────────────────────────────────────────
+    var grid = [[1, 2], [3, 4]]
+    assert_eq(grid[0][1], 2)
+    assert_eq(grid[1][0], 3)
+    assert_eq(grid[-1][-1], 4)
+
+    // ── menulis ke jalur bersarang ──────────────────────────────────────
+    grid[0][0] = 9
+    assert_eq(grid[0][0], 9)
+    grid[1][-1] = 40
+    assert_eq(grid[1][1], 40)
+    grid[0][1] += 100
+    assert_eq(grid[0][1], 102)
+
+    var e = Ent { nama: "a", pos: Titik { x: 1, y: 2 } }
+    e.pos.x = 50
+    assert_eq(e.pos.x, 50)
+    e.pos.y += 8
+    assert_eq(e.pos.y, 10)
+
+    var dd = { "a": [1, 2, 3] }
+    dd["a"][1] = 20
+    assert_eq(dd["a"][1], 20)
+
+    var ents = [Ent { nama: "p", pos: Titik { x: 0, y: 0 } }]
+    ents[0].pos.x = 7
+    ents[0].nama = "q"
+    assert_eq(ents[0].pos.x, 7)
+    assert_eq(ents[0].nama, "q")
+
+    // ekspresi index dievaluasi sekali, dari kiri ke kanan
+    var n = [0, 0, 0]
+    let k = 1
+    n[k] += 5
+    assert_eq(n, [0, 5, 0])
+
+    // ── string: sudah diuji per karakter di strings.jrg, di sini
+    //    cuma dipastikan aturan negatifnya sama dengan array ────────────
+    assert_eq("halo"[-1], 'o')
+    assert_eq("halo"[0:2], "ha")
+
+    wok("indexing: ok")
+}

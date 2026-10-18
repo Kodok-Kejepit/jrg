@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="id">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,interactive-widget=resizes-content">
+<title>Konsol</title>
+<style>
+  :root { --latar: #0b1020; --teks: #d8e1ff; --redup: #7d8bb3; --galat: #ff8a8a; --aksen: #8fb3ff; }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; margin: 0; background: var(--latar); color: var(--teks); }
+  body { display: flex; flex-direction: column; font: 14px/1.45 ui-monospace, "JetBrains Mono", Menlo, monospace; }
+  #layar { flex: 1 1 auto; margin: 0; padding: 12px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+  .g { color: var(--galat); } .m { color: var(--aksen); } .k { color: var(--redup); }
+  form { display: flex; gap: 6px; padding: 8px; border-top: 1px solid #1f2a48; background: #0e1530; }
+  textarea { flex: 1 1 auto; min-width: 0; height: 38px; max-height: 140px; padding: 9px; resize: none; border: 1px solid #2a3760;
+    border-radius: 8px; background: #0b1020; color: inherit; font: inherit; line-height: 18px; }
+  button { flex: 0 0 auto; padding: 0 12px; border: 0; border-radius: 8px; background: #22305a; color: inherit; font: inherit; }
+  button.utama { background: var(--aksen); color: #0b1020; font-weight: 600; }
+</style>
+</head>
+<body>
+<pre id="layar" aria-live="polite"></pre>
+<form id="baris">
+  <textarea id="masuk" rows="1" autocapitalize="off" autocomplete="off" spellcheck="false" enterkeyhint="send" aria-label="Masukan untuk program"></textarea>
+  <button class="utama" type="submit">Kirim</button>
+  <button type="button" id="ulang">Ulangi</button>
+</form>
+<script>
+  var layar = document.getElementById('layar'), masuk = document.getElementById('masuk');
+  var jalan = false, menunggu = false;
+  function bersih(t) { return String(t || '').replace(/\x1b\[[0-9;?]*[A-Za-z]/g, ''); }
+  function tulis(t, kelas) {
+    if (!t) return;
+    var dekat = layar.scrollHeight - layar.scrollTop - layar.clientHeight < 40;
+    var s = document.createElement('span');
+    if (kelas) s.className = kelas;
+    s.textContent = bersih(t);
+    layar.appendChild(s);
+    if (dekat) layar.scrollTop = layar.scrollHeight;
+  }
+  function kirim(alamat, isi) { return fetch(alamat, { method: 'POST', body: isi || '' }).then(function (r) { return r.json(); }); }
+  function baca() {
+    if (menunggu) return;
+    menunggu = true;
+    fetch('/baca').then(function (r) { return r.json(); }).then(function (h) {
+      menunggu = false;
+      tulis(h.keluaran); tulis(h.galat, 'g');
+      if (h.selesai && jalan) { jalan = false; tulis('\n[program selesai, kode ' + h.kode + ']\n', 'k'); }
+    }, function () { menunggu = false; });
+  }
+  function mulai() {
+    layar.textContent = '';
+    kirim('/mulai').then(function (h) {
+      if (h.ok) jalan = true; else tulis('Program tidak bisa dimulai: ' + h.galat + '\n', 'g');
+    });
+  }
+  /* Masukan bisa banyak baris (tempelan): semuanya dikirim, tiap baris diakhiri baris baru. */
+  function kirimMasukan() {
+    var t = masuk.value.replace(/\r\n?/g, '\n');
+    masuk.value = ''; tinggi();
+    if (!jalan) return;
+    tulis(t + '\n', 'm');
+    kirim('/tulis', t + '\n');
+  }
+  function tinggi() { masuk.style.height = ''; if (masuk.value.indexOf('\n') >= 0) masuk.style.height = Math.min(masuk.scrollHeight + 2, 140) + 'px'; }
+  document.getElementById('baris').addEventListener('submit', function (e) { e.preventDefault(); kirimMasukan(); masuk.focus(); });
+  masuk.addEventListener('keydown', function (e) { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); kirimMasukan(); } });
+  masuk.addEventListener('input', tinggi);
+  document.getElementById('ulang').addEventListener('click', function () { kirim('/henti').then(mulai); });
+  mulai();
+  setInterval(baca, 120);
+</script>
+</body>
+</html>

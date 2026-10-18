@@ -1,0 +1,147 @@
+package sunting_keadaan
+
+// Keadaan seluruh editor sebagai satu nilai: berkas-berkas yang terbuka, ukuran layar,
+// pesan, papan tempel, pencarian terakhir, dan dialog atau daftar yang sedang terbuka.
+import "sunting/penyangga"
+import "sunting/aksara"
+import "sunting/dialog"
+import "sunting/daftar"
+
+pub struct Ed {
+    pub berkas: array,
+    pub aktif: int = 0,
+    pub lebar: int = 80,
+    pub tinggi: int = 24,
+    pub pesan: string = "",
+    pub pesan_galat: bool = false,
+    pub papan: string = "",
+    pub papan_baris: bool = false,
+    pub cari: string = "",
+    pub sorot_cari: bool = false,
+    pub ganti: string = "",
+    pub galat: array = [],
+    pub galat_ke: int = -1,
+    pub selesai: bool = false,
+    pub dialog: Dialog,
+    pub daftar: Daftar,
+    pub lengkap: array = [],
+    pub lengkap_ke: int = 0,
+    pub lengkap_dari: int = 0,
+    pub riwayat: dict,
+    pub tetikus: bool = true,
+    pub jangkar: array = [],
+    pub klik_ms: int = 0,
+    pub klik_n: int = 0,
+    pub klik_br: int = -1,
+    pub klik_kol: int = -1,
+    pub asal: array = [],
+    pub paksa: bool = true,
+    pub mesin_vm: bool = false,
+    pub tunda: string = "",
+    pub bawaan: array = [],
+    pub menandai: bool = false,
+    pub kirim: string = "",
+    pub cari_lama: string = "",
+    pub ganti_sisa: int = 0,
+    pub ganti_n: int = 0,
+}
+
+pub fn baru(berkas) {
+    return Ed { berkas: berkas, dialog: Dialog {}, daftar: Daftar {}, riwayat: dict::new() }
+}
+
+/// Penyangga yang sedang disunting.
+pub fn kini(e) { return e.berkas[e.aktif] }
+
+/// Editor yang sama dengan penyangga aktifnya diganti `p`.
+pub fn ganti(e, p) {
+    var x = e
+    x.berkas[x.aktif] = p
+    return x
+}
+
+pub fn kabar(e, teks) {
+    var x = e
+    x.pesan = teks
+    x.pesan_galat = false
+    return x
+}
+
+pub fn keluhan(e, teks) {
+    var x = e
+    x.pesan = teks
+    x.pesan_galat = true
+    return x
+}
+
+/// Baris pintasan di bawah: dua kalau layarnya cukup tinggi, lalu satu, lalu tidak ada.
+pub fn baris_pintasan(e) {
+    if e.tinggi >= 14 { return 2 }
+    if e.tinggi >= 8 { return 1 }
+    return 0
+}
+
+/// Tinggi area teks: layar dikurangi baris judul, baris pesan, dan baris pintasan.
+pub fn tinggi_teks(e) {
+    return math::max(e.tinggi - 2 - baris_pintasan(e), 1)
+}
+
+/// Lebar kolom nomor baris: satu penanda, angka terlebar (paling sedikit tiga digit),
+/// satu spasi.
+pub fn lebar_nomor(p) {
+    return math::max(str::len(str::to_string(len(p.baris))), 3) + 2
+}
+
+/// Lebar area teks di kanan kolom nomor.
+pub fn lebar_teks(e, p) {
+    return math::max(e.lebar - lebar_nomor(p), 4)
+}
+
+/// Gulung penyangga supaya kursornya tampil, dengan sedikit ruang di atas-bawah dan
+/// kiri-kanannya.
+pub fn gulung(e, p) {
+    var x = p
+    let t = tinggi_teks(e)
+    let tepi = math::min(3, (t - 1) / 2)
+    if x.br < x.atas + tepi { x.atas = x.br - tepi }
+    if x.br >= x.atas + t - tepi { x.atas = x.br - t + tepi + 1 }
+    if x.atas > len(x.baris) - t { x.atas = len(x.baris) - t }
+    if x.atas < 0 { x.atas = 0 }
+    let w = lebar_teks(e, x)
+    let kx = aksara::ke_tampil(x.baris[x.br], x.kol)
+    let samping = math::min(6, (w - 1) / 2)
+    if kx < x.kiri + samping { x.kiri = kx - samping }
+    if kx >= x.kiri + w - samping { x.kiri = kx - w + samping + 1 }
+    if x.kiri < 0 { x.kiri = 0 }
+    return x
+}
+
+/// Seperti `gulung`, tapi tampilan yang sengaja digulung menjauh dari kursor (roda
+/// tetikus) dibiarkan; cuma gulungan yang menunjuk ke luar isi yang dijepit.
+pub fn gulung_bila_perlu(e, p) {
+    return jepit_gulung(e, p)
+}
+
+/// Jepit gulungan bebas (roda tetikus) ke dalam isi, tanpa memindahkan kursor.
+pub fn jepit_gulung(e, p) {
+    var x = p
+    let maks = math::max(len(x.baris) - 1, 0)
+    if x.atas > maks { x.atas = maks }
+    if x.atas < 0 { x.atas = 0 }
+    return x
+}
+
+/// Arti satu huruf pilihan di baris tanya.
+pub fn arti_pilihan(h) {
+    if h == "y" { return "Ya" }
+    if h == "t" { return "Tidak" }
+    if h == "b" { return "Batal" }
+    if h == "s" { return "Semua" }
+    if h == "l" { return "Lewati" }
+    return h
+}
+
+/// Riwayat masukan untuk dialog berjenis `jenis`.
+pub fn riwayat(e, jenis) {
+    return dict::get_or(e.riwayat, jenis, [])
+}

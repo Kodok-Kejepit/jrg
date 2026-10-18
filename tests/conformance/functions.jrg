@@ -1,0 +1,261 @@
+package main
+
+// Konformansi: fungsi, closure, dan pemanggilan.
+
+fn tambah(a: int, b: int) -> int {
+    return a + b
+}
+
+fn tanpa_return_eksplisit(a: int) -> int {
+    a * 2
+}
+
+fn dengan_default(a: int, b: int = 10) -> int {
+    return a + b
+}
+
+fn rekursif(n: int) -> int {
+    if n <= 1 { return 1 }
+    return n * rekursif(n - 1)
+}
+
+fn fib(n: int) -> int {
+    if n < 2 { return n }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn banyak_nilai() -> (int, str) {
+    return (7, "tujuh")
+}
+
+fn terapkan(f, x: int) -> int {
+    return f(x)
+}
+
+fn hitung_turun(n: int) -> int {
+    if n == 0 { return 0 }
+    return 1 + hitung_turun(n - 1)
+}
+
+fn kali_dua(x: int) -> int { return x * 2 }
+
+fn jumlahkan(xs: array) -> int {
+    var t: int = 0
+    for i in 0..len(xs) { t = t + xs[i] }
+    return t
+}
+
+struct Titik { pub x: int, pub y: int }
+
+impl Titik {
+    fn jumlah(self) -> int { return self.x + self.y }
+    fn geser(self, d: int) -> Titik { return Titik { x: self.x + d, y: self.y + d } }
+    fn nol() -> Titik { return Titik { x: 0, y: 0 } }
+}
+
+pub fn main() {
+    // `defer` LANGSUNG di badan `main()` — bukan di fungsi lain yang dipanggil
+    // dari `main()`.
+    defer _catat("main selesai")
+
+    // ── pemanggilan dasar ───────────────────────────────────────────────
+    assert_eq(tambah(2, 3), 5)
+    assert_eq(tanpa_return_eksplisit(4), 8)
+
+    // ── argumen default ─────────────────────────────────────────────────
+    assert_eq(dengan_default(5), 15)
+    assert_eq(dengan_default(5, 1), 6)
+
+    // ── rekursi ─────────────────────────────────────────────────────────
+    assert_eq(rekursif(5), 120)
+    assert_eq(fib(10), 55)
+
+    // rekursi dalam (memastikan tidak ada batas kedalaman yang aneh)
+    assert_eq(hitung_turun(200), 200)
+
+    // ── panggilan bersarang ─────────────────────────────────────────────
+    assert_eq(tambah(tambah(1, 2), tambah(3, 4)), 10)
+
+    // ── multi-return lewat tuple ────────────────────────────────────────
+    let pasangan = banyak_nilai()
+    assert_eq(len(pasangan), 2)
+
+    // ── fungsi sebagai nilai (first-class) ──────────────────────────────
+    let f = tambah
+    assert_eq(f(2, 3), 5)
+
+    assert_eq(terapkan(kali_dua, 21), 42)
+
+    // ── closure ─────────────────────────────────────────────────────────
+    let tambah_satu = |x| x + 1
+    assert_eq(tambah_satu(9), 10)
+
+    // closure menangkap variabel dari lingkungannya
+    let basis = 100
+    let tambah_basis = |x| x + basis
+    assert_eq(tambah_basis(5), 105)
+
+    // closure dioper ke higher-order function
+    assert_eq([1, 2, 3].map(|x| x + basis), [101, 102, 103])
+
+    // ── pemulihan pemanggilan tanpa kurung ──────────────────────────────
+    // argumennya HARUS ikut, bukan dibuang
+    let hasil = kali_dua 21
+    assert_eq(hasil, 42)
+
+    let dua_arg = tambah 3, 4
+    assert_eq(dua_arg, 7)
+
+    // ── method ──────────────────────────────────────────────────────────
+    let p = Titik { x: 3, y: 4 }
+    assert_eq(p.jumlah(), 7)
+
+    // method mengembalikan nilai baru (value semantics)
+    let q = p.geser(10)
+    assert_eq(q.x, 13)
+    assert_eq(p.x, 3)          // yang asli tidak berubah
+
+    // method statis
+    let o = Titik::nol()
+    assert_eq(o.x, 0)
+
+    // rantai method
+    assert_eq(p.geser(1).geser(1).jumlah(), 11)
+
+    // ── fungsi berinteraksi dengan koleksi ──────────────────────────────
+    assert_eq(jumlahkan([1, 2, 3, 4]), 10)
+    assert_eq(jumlahkan([]), 0)
+
+    // ── `fn` bernama di dalam fungsi ────────────────────────────────────
+    fn lipat_tiga(n: int) -> int { return n * 3 }
+    assert_eq(lipat_tiga(5), 15)
+
+    // fungsi bersarang bisa memanggil dirinya sendiri
+    fn faktorial(n: int) -> int {
+        if n <= 1 { return 1 }
+        return n * faktorial(n - 1)
+    }
+    assert_eq(faktorial(5), 120)
+    assert_eq(faktorial(0), 1)
+
+    // ...dan bisa saling memanggil selama urutannya sudah dideklarasikan
+    fn genap(n: int) -> bool {
+        if n == 0 { return true }
+        return ganjil(n - 1)
+    }
+    fn ganjil(n: int) -> bool {
+        if n == 0 { return false }
+        return genap(n - 1)
+    }
+    assert_eq(genap(10), true)
+    assert_eq(ganjil(7), true)
+
+    // bisa dipakai sebagai nilai, sama seperti fungsi top-level
+    let f = lipat_tiga
+    assert_eq(f(4), 12)
+    assert_eq([1, 2, 3].map(lipat_tiga), [3, 6, 9])
+
+    // fungsi bersarang melihat fungsi top-level
+    fn pakai_top(n: int) -> int { return kali_dua(n) + 1 }
+    assert_eq(pakai_top(10), 21)
+
+    // rekursi dalam yang sah tetap jalan (batas kedalaman jauh di atas ini)
+    fn turun(n: int) -> int {
+        if n <= 0 { return 0 }
+        return 1 + turun(n - 1)
+    }
+    assert_eq(turun(2000), 2000)
+
+    // ── `defer` ────────────────────────────────────────────────────────
+    _jejak = []
+    jalankan_defer_dasar()
+    assert_eq(_jejak, ["B-body", "D-body2", "C-defer2", "A-defer"])
+
+    // nilai yang dibekukan `defer` adalah nilai SAAT BARIS `defer`
+    // dibaca, bukan nilai fungsinya saat defer itu benar-benar jalan.
+    _jejak = []
+    jalankan_defer_bekukan_nilai()
+    assert_eq(_jejak, [1])
+
+    // defer tetap jalan lewat jalur `return` lebih awal
+    _jejak = []
+    assert_eq(jalankan_defer_dengan_return_awal(), 42)
+    assert_eq(_jejak, ["sebelum return", "defer"])
+
+    // defer boleh berupa pemanggilan method, bukan cuma fungsi biasa
+    _jejak = []
+    jalankan_defer_method()
+    assert_eq(_jejak, ["sebelum", "method:x"])
+
+    // ── `return` di dalam closure berhenti di closure itu ────────────────
+    let langsung = || { return 42 }
+    assert_eq(langsung(), 42)
+
+    let bercabang = |x| {
+        if x > 0 { return "positif" }
+        return "nol atau negatif"
+    }
+    assert_eq(bercabang(5), "positif")
+    assert_eq(bercabang(-1), "nol atau negatif")
+
+    // closure berbadan ekspresi (tanpa `return`) tetap seperti semula
+    assert_eq((|| 7)(), 7)
+    assert_eq((|x| x * 2)(4), 8)
+
+    // closure yang mengembalikan closure, dua-duanya pakai `return`
+    let luar = |a| { return |b| { return a + b } }
+    assert_eq(luar(3)(4), 7)
+
+    // closure menangkap variabel dan tetap hidup setelah fungsinya selesai
+    assert_eq(hitung_naik()(), 1)
+
+    // ── `?` bisa dipakai langsung pada variabel ──────────────────────────
+    assert_eq(lewat_variabel(Ok(21)), Ok(42))
+    assert_eq(lewat_variabel(Err("gagal")), Err("gagal"))
+
+    wok("functions OK")
+}
+
+fn hitung_naik() {
+    var n = 0
+    return || { n = n + 1; return n }
+}
+
+fn lewat_variabel(r) {
+    let v = r?
+    return Ok(v * 2)
+}
+
+var _jejak = []
+fn _catat(s) { _jejak = arr::push(_jejak, s) }
+
+fn jalankan_defer_dasar() {
+    defer _catat("A-defer")
+    _catat("B-body")
+    defer _catat("C-defer2")
+    _catat("D-body2")
+}
+
+fn jalankan_defer_bekukan_nilai() {
+    var n = 1
+    defer _catat(n)
+    n = 99
+}
+
+fn jalankan_defer_dengan_return_awal() -> int {
+    defer _catat("defer")
+    _catat("sebelum return")
+    return 42
+}
+
+struct Pencatat { pub nama: string }
+
+impl Pencatat {
+    fn tandai(self) { _catat("method:" + self.nama) }
+}
+
+fn jalankan_defer_method() {
+    let p = Pencatat { nama: "x" }
+    defer p.tandai()
+    _catat("sebelum")
+}

@@ -1,0 +1,417 @@
+// ============================================================================
+// JawaRustGo++ — stdlib/iterator.jrg
+package std_iterator
+
+// Penjaga argumen. Tanpa ini sebuah `iterator::map([1], 5)` DITERIMA dan baru gagal waktu
+// hasilnya dipanggil — dengan caret di dalam berkas ini, menunjuk baris yang
+// tidak salah, di berkas yang pembacanya tidak pernah buka.
+fn _wajib_fungsi(nama, ke, v) {
+    let t = typeof(v)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str::to_string(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+    return true
+}
+
+/// Potong jadi beberapa bagian berisi paling banyak `n` elemen.
+///
+/// Bagian terakhir boleh lebih pendek. `n` harus positif.
+pub fn chunk(daftar, n) {
+    if n <= 0 {
+        return Err("chunk: ukuran bagian harus lebih dari 0, dapat " + str(n))
+    }
+    var keluar = []
+    var bagian = []
+    for i in daftar {
+        bagian = arr::push(bagian, daftar[i])
+        if bagian.len() == n {
+            keluar = arr::push(keluar, bagian)
+            bagian = []
+        }
+    }
+    if bagian.len() > 0 { keluar = arr::push(keluar, bagian) }
+    return Ok(keluar)
+}
+
+/// Semua jendela berurutan selebar `n` (`[1,2,3]` lebar 2 -> `[[1,2],[2,3]]`).
+///
+/// Array yang lebih pendek dari `n` menghasilkan daftar kosong.
+pub fn window(daftar, n) {
+    if n <= 0 {
+        return Err("window: lebar jendela harus lebih dari 0, dapat " + str(n))
+    }
+    var keluar = []
+    if daftar.len() < n { return Ok(keluar) }
+    let batas = daftar.len() - n
+    for i in 0..batas + 1 {
+        keluar = arr::push(keluar, daftar[i:i + n])
+    }
+    return Ok(keluar)
+}
+
+/// Pasangkan dua array jadi array tuple. Berhenti di yang lebih pendek.
+pub fn zip(a, b) {
+    let n = if a.len() < b.len() { a.len() } else { b.len() }
+    var keluar = []
+    for i in 0..n { keluar = arr::push(keluar, (a[i], b[i])) }
+    return keluar
+}
+
+/// Kebalikan `zip`: array tuple jadi tuple dua array.
+pub fn unzip(pasangan) {
+    var kiri = []
+    var kanan = []
+    for i in pasangan {
+        let p = pasangan[i]
+        kiri = arr::push(kiri, p.0)
+        kanan = arr::push(kanan, p.1)
+    }
+    return (kiri, kanan)
+}
+
+/// `[(0, isi0), (1, isi1), ...]` — index bersama isinya.
+pub fn enumerate(daftar) {
+    var keluar = []
+    for i in daftar { keluar = arr::push(keluar, (i, daftar[i])) }
+    return keluar
+}
+
+/// Ambil dari depan selama `pred` masih benar, berhenti di yang pertama gagal.
+pub fn take_while(daftar, pred) {
+    _wajib_fungsi("iterator::take_while", 2, pred)
+    var keluar = []
+    for i in daftar {
+        if !pred(daftar[i]) { return keluar }
+        keluar = arr::push(keluar, daftar[i])
+    }
+    return keluar
+}
+
+/// Buang dari depan selama `pred` masih benar, sisanya diambil semua.
+pub fn drop_while(daftar, pred) {
+    _wajib_fungsi("iterator::drop_while", 2, pred)
+    var mulai = 0
+    var masih = true
+    for i in daftar {
+        if masih {
+            if pred(daftar[i]) { mulai = i + 1 } else { masih = false }
+        }
+    }
+    return daftar[mulai:]
+}
+
+/// Kelompokkan berdasarkan kunci dari `kunci_fn`, hasilnya dict.
+pub fn group_by(daftar, kunci_fn) {
+    _wajib_fungsi("iterator::group_by", 2, kunci_fn)
+    var keluar = dict::new()
+    for i in daftar {
+        let isi = daftar[i]
+        let k = str(kunci_fn(isi))
+        match keluar.get(k) {
+            Some(sudah) => { keluar[k] = arr::push(sudah, isi) }
+            None        => { keluar[k] = [isi] }
+        }
+    }
+    return keluar
+}
+
+/// Hitung berapa kali tiap nilai muncul, hasilnya dict `nilai -> jumlah`.
+pub fn tally(daftar) {
+    var keluar = dict::new()
+    for i in daftar {
+        let k = str(daftar[i])
+        keluar[k] = keluar.get_or(k, 0) + 1
+    }
+    return keluar
+}
+
+/// Hasil antara dari `reduce` — `[init, f(init,x0), f(...,x1), ...]`.
+pub fn scan(daftar, f, awal) {
+    _wajib_fungsi("iterator::scan", 2, f)
+    var akum = awal
+    var keluar = [awal]
+    for i in daftar {
+        akum = f(akum, daftar[i])
+        keluar = arr::push(keluar, akum)
+    }
+    return keluar
+}
+
+/// Sisipkan `pemisah` di antara tiap elemen.
+pub fn intersperse(daftar, pemisah) {
+    var keluar = []
+    for i in daftar {
+        if i > 0 { keluar = arr::push(keluar, pemisah) }
+        keluar = arr::push(keluar, daftar[i])
+    }
+    return keluar
+}
+
+/// Elemen pertama yang lolos `pred`, sebagai `Option`.
+pub fn find(daftar, pred) {
+    _wajib_fungsi("iterator::find", 2, pred)
+    for i in daftar {
+        if pred(daftar[i]) { return Some(daftar[i]) }
+    }
+    return None
+}
+
+/// Index pertama yang lolos `pred`, sebagai `Option`.
+pub fn position(daftar, pred) {
+    _wajib_fungsi("iterator::position", 2, pred)
+    for i in daftar {
+        if pred(daftar[i]) { return Some(i) }
+    }
+    return None
+}
+
+/// Apakah semua elemen lolos `pred`? Array kosong dianggap lolos.
+pub fn all(daftar, pred) {
+    _wajib_fungsi("iterator::all", 2, pred)
+    for i in daftar {
+        if !pred(daftar[i]) { return false }
+    }
+    return true
+}
+
+/// Apakah ada satu saja yang lolos `pred`? Array kosong dianggap tidak.
+pub fn any(daftar, pred) {
+    _wajib_fungsi("iterator::any", 2, pred)
+    for i in daftar {
+        if pred(daftar[i]) { return true }
+    }
+    return false
+}
+
+/// Ratakan array-of-array jadi satu lapis (satu tingkat saja).
+pub fn flatten(daftar) {
+    var keluar = []
+    for i in daftar {
+        let dalam = daftar[i]
+        for j in dalam { keluar = arr::push(keluar, dalam[j]) }
+    }
+    return keluar
+}
+
+/// `map` lalu `flatten` dalam satu langkah.
+pub fn flat_map(daftar, f) {
+    _wajib_fungsi("iterator::flat_map", 2, f)
+    var keluar = []
+    for i in daftar {
+        let dalam = f(daftar[i])
+        for j in dalam { keluar = arr::push(keluar, dalam[j]) }
+    }
+    return keluar
+}
+
+// ─── Inti ───────────────────────────────────────────────────────────────
+// Empat ini ada di `arr::` juga, dan ADA di sini dengan sengaja: modul ini …
+
+/// Ubah tiap elemen lewat `f`.
+pub fn map(daftar, f) {
+    _wajib_fungsi("iterator::map", 2, f)
+    var keluar = []
+    for _, x in daftar { keluar = arr::push(keluar, f(x)) }
+    return keluar
+}
+
+/// Sisakan elemen yang membuat `pred` benar.
+pub fn filter(daftar, pred) {
+    _wajib_fungsi("iterator::filter", 2, pred)
+    var keluar = []
+    for _, x in daftar { if pred(x) { keluar = arr::push(keluar, x) } }
+    return keluar
+}
+
+/// `map` lalu buang yang `None` — satu lintasan, bukan dua.
+pub fn filter_map(daftar, f) {
+    _wajib_fungsi("iterator::filter_map", 2, f)
+    var keluar = []
+    for _, x in daftar {
+        match f(x) {
+            Some(v) => { keluar = arr::push(keluar, v) }
+            None => {}
+        }
+    }
+    return keluar
+}
+
+/// Lipat jadi satu nilai, mulai dari `awal`.
+pub fn reduce(daftar, f, awal) {
+    _wajib_fungsi("iterator::reduce", 2, f)
+    var akum = awal
+    for _, x in daftar { akum = f(akum, x) }
+    return akum
+}
+
+/// Sama dengan `reduce`, nama yang dipakai bahasa lain.
+pub fn fold(daftar, f, awal) {
+    _wajib_fungsi("iterator::fold", 2, f)
+    return reduce(daftar, f, awal) }
+
+/// Jalankan `f` untuk tiap elemen; hasilnya dibuang.
+pub fn each(daftar, f) {
+    _wajib_fungsi("iterator::each", 2, f)
+    for _, x in daftar { f(x) }
+    return ()
+}
+
+/// Ambil tiap elemen ke-`n`, mulai dari yang pertama.
+///
+/// Tidak ada padanannya di `arr::`.
+pub fn step_by(daftar, n) {
+    if n <= 0 {
+        return Err("step_by: langkah harus lebih dari 0, dapat " + str::to_string(n))
+    }
+    var keluar = []
+    for i, x in daftar { if i % n == 0 { keluar = arr::push(keluar, x) } }
+    return keluar
+}
+
+/// Sambung dua array jadi satu.
+pub fn chain(a, b) {
+    var keluar = []
+    for _, x in a { keluar = arr::push(keluar, x) }
+    for _, x in b { keluar = arr::push(keluar, x) }
+    return keluar
+}
+
+/// Sambung SEMUA array di dalam satu array.
+pub fn chain_all(daftar_dari_daftar) {
+    var keluar = []
+    for _, satu in daftar_dari_daftar {
+        for _, x in satu { keluar = arr::push(keluar, x) }
+    }
+    return keluar
+}
+
+/// Berapa elemen yang membuat `pred` benar.
+pub fn count(daftar, pred) {
+    _wajib_fungsi("iterator::count", 2, pred)
+    var n = 0
+    for _, x in daftar { if pred(x) { n = n + 1 } }
+    return n
+}
+
+/// Elemen terakhir yang memenuhi `pred`, sebagai `Option`.
+pub fn find_last(daftar, pred) {
+    _wajib_fungsi("iterator::find_last", 2, pred)
+    var hasil = Option::None
+    for _, x in daftar { if pred(x) { hasil = Option::Some(x) } }
+    return hasil
+}
+
+/// Jumlah `f(x)` untuk tiap elemen. `f` boleh mengambil bagian dari struct.
+pub fn sum_by(daftar, f) {
+    _wajib_fungsi("iterator::sum_by", 2, f)
+    var total = 0
+    for _, x in daftar { total = total + f(x) }
+    return total
+}
+
+/// `n` elemen pertama. Kurang dari `n` elemen berarti seluruhnya.
+pub fn take(daftar, n) {
+    var keluar = []
+    for i, x in daftar { if i < n { keluar = arr::push(keluar, x) } }
+    return keluar
+}
+
+/// Buang `n` elemen pertama.
+pub fn skip(daftar, n) {
+    var keluar = []
+    for i, x in daftar { if i >= n { keluar = arr::push(keluar, x) } }
+    return keluar
+}
+
+/// Array sepanjang `n` yang isinya `f(0)`, `f(1)`, … `f(n-1)`.
+pub fn tabulate(n, f) {
+    _wajib_fungsi("iterator::tabulate", 2, f)
+    if n < 0 { return Err("tabulate: panjang tidak boleh negatif, dapat " + str::to_string(n)) }
+    var keluar = []
+    // `for x in arr` memberi INDEKS; bentuk dua-nama memberi nilainya.
+    for _, i in range(0, n) { keluar = arr::push(keluar, f(i)) }
+    return keluar
+}
+
+/// Pisah jadi `[yang_benar, yang_salah]`.
+pub fn partition(daftar, pred) {
+    _wajib_fungsi("iterator::partition", 2, pred)
+    var ya = []
+    var tidak = []
+    for _, x in daftar {
+        if pred(x) { ya = arr::push(ya, x) } else { tidak = arr::push(tidak, x) }
+    }
+    return [ya, tidak]
+}
+
+/// Buang duplikat, urutan kemunculan pertama dipertahankan.
+pub fn unique(daftar) {
+    var keluar = []
+    for _, x in daftar {
+        if !arr::contains(keluar, x) { keluar = arr::push(keluar, x) }
+    }
+    return keluar
+}
+
+/// Balik urutannya.
+pub fn reverse(daftar) {
+    var keluar = []
+    for _, i in range(0, len(daftar)) { keluar = arr::push(keluar, daftar[len(daftar) - 1 - i]) }
+    return keluar
+}
+
+/// Elemen terkecil menurut `f`, sebagai `Option`.
+pub fn min_by(daftar, f) {
+    _wajib_fungsi("iterator::min_by", 2, f)
+    if len(daftar) == 0 { return Option::None }
+    var terbaik = daftar[0]
+    for _, x in daftar { if f(x) < f(terbaik) { terbaik = x } }
+    return Option::Some(terbaik)
+}
+
+/// Elemen terbesar menurut `f`, sebagai `Option`.
+pub fn max_by(daftar, f) {
+    _wajib_fungsi("iterator::max_by", 2, f)
+    if len(daftar) == 0 { return Option::None }
+    var terbaik = daftar[0]
+    for _, x in daftar { if f(x) > f(terbaik) { terbaik = x } }
+    return Option::Some(terbaik)
+}
+
+/// Elemen pertama, sebagai `Option`.
+pub fn first(daftar) {
+    if len(daftar) == 0 { return Option::None }
+    return Option::Some(daftar[0])
+}
+
+/// Elemen terakhir, sebagai `Option`.
+pub fn last(daftar) {
+    if len(daftar) == 0 { return Option::None }
+    return Option::Some(daftar[len(daftar) - 1])
+}
+
+/// Apakah kosong.
+pub fn is_empty(daftar) { return len(daftar) == 0 }
+
+/// Berapa elemennya.
+pub fn count_all(daftar) { return len(daftar) }
+
+/// Kelompokkan elemen BERURUTAN yang `f`-nya sama, jadi array-of-array.
+pub fn chunk_by(daftar, f) {
+    _wajib_fungsi("iterator::chunk_by", 2, f)
+    if len(daftar) == 0 { return [] }
+    var keluar = []
+    var runtun = [daftar[0]]
+    var kunci = f(daftar[0])
+    for _, i in range(1, len(daftar)) {
+        let k = f(daftar[i])
+        if k == kunci {
+            runtun = arr::push(runtun, daftar[i])
+        } else {
+            keluar = arr::push(keluar, runtun)
+            runtun = [daftar[i]]
+            kunci = k
+        }
+    }
+    return arr::push(keluar, runtun)
+}

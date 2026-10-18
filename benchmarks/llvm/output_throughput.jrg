@@ -1,0 +1,8 @@
+package main
+
+pub fn main() {
+    for i in 0..250000 {
+        wok(i, i + 1, i + 2)
+    }
+    wok_("done")
+}

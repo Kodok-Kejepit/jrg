@@ -1,0 +1,330 @@
+package std_teks
+
+// `teks` — satu pustaka untuk dua hal yang bagi pemula memang satu hal:
+// daftar isi.
+
+/// Kumpulan berurutan: array apa pun, atau teks yang dipecah jadi huruf.
+/// `dari_teks` menentukan bagaimana ia dirakit kembali jadi tulisan.
+pub struct Teks {
+    pub isi: array,
+    pub dari_teks: bool,
+}
+
+// ── Membuat ───────────────────────────────────────────────────────────────
+
+/// Bungkus apa saja jadi `Teks`.
+pub fn dari(x) {
+    let t = typeof(x)
+    if t == "array" { return Teks { isi: x, dari_teks: false } }
+    if t == "string" { return Teks { isi: str::chars(x), dari_teks: true } }
+    if t == "struct:Teks" { return x }
+    return Teks { isi: [x], dari_teks: false }
+}
+
+/// Kumpulan kosong.
+pub fn kosong() { return Teks { isi: [], dari_teks: false } }
+
+/// Teks kosong — `.jadi_teks()`-nya `""`, bukan `[]`.
+pub fn teks_kosong() { return Teks { isi: [], dari_teks: true } }
+
+/// Angka berurutan dari `awal` sampai SEBELUM `akhir`.
+/// `teks::angka(1, 5)` menjawab `[1, 2, 3, 4]`.
+pub fn angka(awal, akhir) {
+    var keluar = []
+    var n = awal
+    while n < akhir { keluar = arr::push(keluar, n)  n = n + 1 }
+    return Teks { isi: keluar, dari_teks: false }
+}
+
+/// Satu nilai diulang `n` kali.
+pub fn ulang(nilai, n) {
+    if n < 0 { panik("teks::ulang: jumlahnya tidak boleh negatif, dapat " + str(n)) }
+    return Teks { isi: arr::fill(nilai, n), dari_teks: false }
+}
+
+// ── Kalimat galat, satu definisi ──────────────────────────────────────────
+
+fn _pesan_indeks(siapa, i, panjang) {
+    if panjang == 0 {
+        return siapa + ": kumpulannya masih kosong, jadi belum ada elemen ke-" + str(i)
+    }
+    return siapa + ": tidak ada elemen ke-" + str(i) + ", isinya cuma " + str(panjang)
+        + " (yang sah: 0 sampai " + str(panjang - 1)
+        + ", atau -1 sampai -" + str(panjang) + " dihitung dari belakang)"
+}
+
+fn _harus_fungsi(siapa, f) {
+    let t = typeof(f)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(siapa + ": butuh sebuah fungsi, dapat `" + t + "` — tulis mis. `|x| x > 2`")
+    }
+}
+
+/// Indeks negatif dihitung dari belakang; di luar jangkauan menjawab -1.
+fn _normal(i, panjang) {
+    if i < 0 {
+        let j = panjang + i
+        if j < 0 { return 0 - 1 }
+        return j
+    }
+    if i >= panjang { return 0 - 1 }
+    return i
+}
+
+impl Teks {
+    // ── Melihat ───────────────────────────────────────────────────────────
+
+    /// Berapa isinya. Untuk teks: jumlah HURUF.
+    pub fn panjang(self) { return len(self.isi) }
+
+    /// Benar kalau belum ada isinya sama sekali.
+    pub fn kosong(self) { return len(self.isi) == 0 }
+
+    /// Array mentahnya, buat diserahkan ke fungsi lain.
+    pub fn daftar(self) { return self.isi }
+
+    /// Elemen ke-`i`, dihitung dari belakang kalau negatif.
+    /// Menjawab `Option` karena elemennya mungkin memang tidak ada —
+    /// bukan `nil`, yang tidak bisa dibedakan dari isi yang memang `nil`.
+    pub fn ambil(self, i) {
+        let j = _normal(i, len(self.isi))
+        if j < 0 { return Option::None }
+        return Option::Some(self.isi[j])
+    }
+
+    /// Elemen ke-`i`, atau `cadangan` kalau tidak ada. Buat yang tidak ingin
+    /// membongkar `Option` dulu.
+    pub fn ambil_atau(self, i, cadangan) {
+        let j = _normal(i, len(self.isi))
+        if j < 0 { return cadangan }
+        return self.isi[j]
+    }
+
+    /// Isi paling depan, `Option` karena kumpulan kosong tidak punya.
+    pub fn pertama(self) { return self.ambil(0) }
+    /// Isi paling belakang, `Option` karena kumpulan kosong tidak punya.
+    pub fn terakhir(self) { return self.ambil(0 - 1) }
+
+    /// Posisi pertama `x`, atau `None`. Bukan `-1`: di JRG `-1` indeks yang SAH.
+    pub fn cari(self, x) { return arr::index_of(self.isi, x) }
+
+    /// Benar kalau `x` ada di dalamnya.
+    pub fn punya(self, x) { return arr::contains(self.isi, x) }
+
+    /// Berapa yang memenuhi syarat.
+    pub fn hitung(self, f) {
+        _harus_fungsi("teks.hitung", f)
+        return arr::count_if(self.isi, f)
+    }
+
+    /// Benar kalau ADA yang memenuhi syarat.
+    pub fn ada_yang(self, f) { _harus_fungsi("teks.ada_yang", f)  return arr::any(self.isi, f) }
+
+    /// Benar kalau SEMUA memenuhi syarat.
+    pub fn semua(self, f) { _harus_fungsi("teks.semua", f)  return arr::all(self.isi, f) }
+
+    // ── Mengubah: berantai, selalu menjawab `Teks` baru ───────────────────
+
+    /// Tambah satu di belakang.
+    pub fn tambah(self, x) {
+        return Teks { isi: arr::push(self.isi, x), dari_teks: self.dari_teks }
+    }
+
+    /// Tambah satu di depan.
+    pub fn tambah_depan(self, x) {
+        return Teks { isi: arr::concat([x], self.isi), dari_teks: self.dari_teks }
+    }
+
+    /// Sambung dengan kumpulan lain (array, teks, atau `Teks`).
+    pub fn gabung(self, lain) {
+        let l = dari(lain)
+        return Teks { isi: arr::concat(self.isi, l.isi), dari_teks: self.dari_teks }
+    }
+
+    /// Sisipkan di posisi `i`.
+    pub fn sisip(self, i, x) {
+        let n = len(self.isi)
+        if i == n { return self.tambah(x) }
+        let j = _normal(i, n)
+        if j < 0 { panik(_pesan_indeks("teks.sisip", i, n)) }
+        return Teks { isi: arr::insert(self.isi, j, x), dari_teks: self.dari_teks }
+    }
+
+    /// Buang elemen ke-`i`. Di luar jangkauan DILAPORKAN, bukan didiamkan:
+    /// sebuah pembuangan yang tidak terjadi dan tidak berkata apa-apa adalah
+    /// bug yang baru terlihat jauh belakangan.
+    pub fn buang(self, i) {
+        let n = len(self.isi)
+        let j = _normal(i, n)
+        if j < 0 { panik(_pesan_indeks("teks.buang", i, n)) }
+        let pasangan = arr::remove(self.isi, j)
+        return Teks { isi: pasangan[0], dari_teks: self.dari_teks }
+    }
+
+    /// Buang semua yang nilainya sama dengan `x`.
+    pub fn buang_nilai(self, x) {
+        return Teks { isi: arr::filter(self.isi, |v| v != x), dari_teks: self.dari_teks }
+    }
+
+    /// Simpan yang memenuhi syarat.
+    pub fn saring(self, f) {
+        _harus_fungsi("teks.saring", f)
+        return Teks { isi: arr::filter(self.isi, f), dari_teks: self.dari_teks }
+    }
+
+    /// Buang yang memenuhi syarat — kebalikan `saring`.
+    pub fn buang_jika(self, f) {
+        _harus_fungsi("teks.buang_jika", f)
+        return Teks { isi: arr::filter(self.isi, |x| !f(x)), dari_teks: self.dari_teks }
+    }
+
+    /// Ubah tiap elemen.
+    pub fn peta(self, f) {
+        _harus_fungsi("teks.peta", f)
+        return Teks { isi: arr::map(self.isi, f), dari_teks: self.dari_teks }
+    }
+
+    /// Urut menaik. Elemen yang tidak sebanding dilaporkan, bukan dianggap sama.
+    pub fn urut(self) {
+        return Teks { isi: arr::sort(self.isi), dari_teks: self.dari_teks }
+    }
+
+    /// Urut menurun.
+    pub fn urut_turun(self) {
+        return Teks { isi: arr::sort_desc(self.isi), dari_teks: self.dari_teks }
+    }
+
+    /// Urut menurut kunci: `.urut_pakai(|x| x.umur)`.
+    pub fn urut_pakai(self, kunci) {
+        _harus_fungsi("teks.urut_pakai", kunci)
+        return Teks { isi: arr::sort_by_key(self.isi, kunci), dari_teks: self.dari_teks }
+    }
+
+    /// Balik urutannya.
+    pub fn balik(self) {
+        return Teks { isi: arr::reverse(self.isi), dari_teks: self.dari_teks }
+    }
+
+    /// Buang yang kembar, urutan yang pertama dipertahankan.
+    pub fn unik(self) {
+        return Teks { isi: arr::unique(self.isi), dari_teks: self.dari_teks }
+    }
+
+    /// `n` pertama. Lebih dari isinya berarti seluruhnya — bukan galat.
+    pub fn ambil_awal(self, n) {
+        if n < 0 { panik("teks.ambil_awal: jumlahnya tidak boleh negatif, dapat " + str(n)) }
+        return Teks { isi: arr::take(self.isi, n), dari_teks: self.dari_teks }
+    }
+
+    /// Lewati `n` pertama.
+    pub fn lewati(self, n) {
+        if n < 0 { panik("teks.lewati: jumlahnya tidak boleh negatif, dapat " + str(n)) }
+        return Teks { isi: arr::skip(self.isi, n), dari_teks: self.dari_teks }
+    }
+
+    /// Potongan dari `a` sampai SEBELUM `b`, indeks negatif boleh.
+    pub fn potong(self, a, b) {
+        let n = len(self.isi)
+        var i = a
+        var j = b
+        if i < 0 { i = n + i }
+        if j < 0 { j = n + j }
+        if i < 0 { i = 0 }
+        if j > n { j = n }
+        if i >= j { return Teks { isi: [], dari_teks: self.dari_teks } }
+        return Teks { isi: self.isi[i:j], dari_teks: self.dari_teks }
+    }
+
+    /// Ratakan satu tingkat: `[[1,2],[3]]` jadi `[1,2,3]`.
+    pub fn ratakan(self) {
+        var keluar = []
+        for _, x in self.isi {
+            if typeof(x) == "array" { keluar = arr::concat(keluar, x) }
+            else { keluar = arr::push(keluar, x) }
+        }
+        return Teks { isi: keluar, dari_teks: self.dari_teks }
+    }
+
+    // ── Meringkas ─────────────────────────────────────────────────────────
+
+    /// Jumlah semua isinya. Kumpulan kosong menjawab 0.
+    pub fn jumlah(self) {
+        if len(self.isi) == 0 { return 0 }
+        return arr::sum(self.isi)
+    }
+
+    /// Rata-rata. Kumpulan kosong dilaporkan — rata-rata dari nol nilai bukan
+    /// nol, melainkan pertanyaan yang tidak punya jawaban.
+    pub fn rata(self) {
+        if len(self.isi) == 0 {
+            panik("teks.rata: kumpulannya kosong, jadi tidak ada rata-rata — cek dulu dengan `.kosong()`")
+        }
+        return arr::mean(self.isi)
+    }
+
+    /// Terkecil / terbesar, `Option` karena kumpulan kosong tidak punya.
+    pub fn terkecil(self) {
+        if len(self.isi) == 0 { return Option::None }
+        return Option::Some(arr::min(self.isi))
+    }
+    /// Nilai terbesar, `Option` karena kumpulan kosong tidak punya.
+    pub fn terbesar(self) {
+        if len(self.isi) == 0 { return Option::None }
+        return Option::Some(arr::max(self.isi))
+    }
+
+    /// Lipat jadi satu nilai: `.lipat(0, |a, b| a + b)`.
+    pub fn lipat(self, awal, f) {
+        _harus_fungsi("teks.lipat", f)
+        return arr::fold(self.isi, awal, f)
+    }
+
+    // ── Khusus teks ───────────────────────────────────────────────────────
+
+    /// Rakit jadi tulisan. Tanpa pemisah kalau asalnya memang teks.
+    pub fn jadi_teks(self) {
+        if self.dari_teks { return str::join(self.isi, "") }
+        return "[" + str::join(arr::map(self.isi, |x| str(x)), ", ") + "]"
+    }
+
+    /// Rakit jadi tulisan dengan pemisah sendiri.
+    pub fn sambung(self, pemisah) {
+        return str::join(arr::map(self.isi, |x| str(x)), pemisah)
+    }
+
+    /// Pecah tulisan jadi bagian-bagian. `teks::dari("a,b").pisah(",")`
+    /// menjawab kumpulan berisi dua teks.
+    pub fn pisah(self, pemisah) {
+        let s = self.jadi_teks()
+        return Teks { isi: str::split(s, pemisah), dari_teks: false }
+    }
+
+    /// Pecah jadi kata-kata, spasi berlebih diabaikan.
+    pub fn kata(self) {
+        return Teks { isi: str::words(self.jadi_teks()), dari_teks: false }
+    }
+
+    /// Buang spasi di kedua ujung.
+    pub fn rapikan(self) { return dari(str::trim(self.jadi_teks())) }
+
+    /// Semua jadi huruf besar / kecil.
+    pub fn besar(self) { return dari(str::upper(self.jadi_teks())) }
+    /// Semua jadi huruf kecil.
+    pub fn kecil(self) { return dari(str::lower(self.jadi_teks())) }
+
+    /// Ganti semua kemunculan.
+    pub fn ganti(self, dari_teks, jadi) {
+        return dari(str::replace(self.jadi_teks(), dari_teks, jadi))
+    }
+
+    /// Benar kalau tulisannya diawali/diakhiri sesuatu.
+    pub fn mulai_dengan(self, awalan) { return str::starts_with(self.jadi_teks(), awalan) }
+    /// Benar kalau tulisannya diakhiri potongan itu.
+    pub fn akhir_dengan(self, akhiran) { return str::ends_with(self.jadi_teks(), akhiran) }
+
+    /// Benar kalau tulisannya memuat potongan itu.
+    pub fn memuat(self, potongan) { return str::contains(self.jadi_teks(), potongan) }
+
+    /// Bentuk tampilannya — dipakai `wok` dan teman-temannya.
+    pub fn to_string(self) { return self.jadi_teks() }
+}

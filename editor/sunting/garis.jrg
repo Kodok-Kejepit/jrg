@@ -1,0 +1,46 @@
+package sunting_garis
+
+// Garis besar sebuah berkas JRG: deklarasi tingkat atas dan method di dalam `impl`,
+// dibaca dari teksnya — berkas yang sedang rusak sintaksnya tetap punya garis besar.
+import "sunting/aksara"
+
+const KATA = ["fn", "struct", "enum", "trait", "impl", "const", "var", "let", "extern"]
+
+/// Kata pembuka deklarasi di awal `t` (sesudah `pub`), atau "".
+fn pembuka(t) {
+    var s = t
+    if str::starts_with(s, "pub ") { s = str::trim_start(str::slice(s, 4)) }
+    for _, k in KATA {
+        if str::starts_with(s, k + " ") { return k }
+    }
+    return ""
+}
+
+/// Butir garis besar sebagai `[label, nomor_baris]` (nomor dari 1). Deklarasi di dalam
+/// blok lain — method sebuah `impl` — dijorokkan; isi badan fungsi tidak ikut.
+pub fn besar(baris) {
+    var keluar = []
+    var i = 0
+    for _, b in baris {
+        i = i + 1
+        let t = str::trim(b)
+        let k = pembuka(t)
+        if k != "" {
+            let n = aksara::indentasi(b)
+            // Tingkat atas, atau satu tingkat di dalam `impl`/`trait`; `let`/`var`/`const`
+            // yang menjorok adalah isi fungsi, bukan deklarasi.
+            let berkas = n == 0
+            let anggota = n > 0 && n <= aksara::TAB && k == "fn"
+            if berkas || anggota {
+                var label = t
+                match str::find(label, "{") {
+                    Option::Some(p) => { label = str::trim_end(str::slice(label, 0, p)) }
+                    Option::None => {}
+                }
+                if anggota { label = "    " + label }
+                keluar = keluar + [[label, i]]
+            }
+        }
+    }
+    return keluar
+}

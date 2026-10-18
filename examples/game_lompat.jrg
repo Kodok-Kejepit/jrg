@@ -1,0 +1,107 @@
+// Lompat Koin — platformer di atas `std/mesin`: tabrakan petak, gravitasi, koin,
+// kamera. Dengan jendela: panah kiri/kanan, Spasi melompat. Tanpa jendela: diputar
+// dengan rekaman masukan, lalu bingkai terakhirnya disimpan ke PNG.
+package main
+
+import "std/mesin"
+import "std/mesin/vek"
+import "std/mesin/warna"
+import "std/mesin/fisika"
+import "std/mesin/peta"
+import "std/mesin/kamera"
+import "std/mesin/ui"
+
+const PETAK = 8
+const LAYAR_W = 96
+const LAYAR_H = 64
+const GRAVITASI = 400.0
+const LOMPAT = 170.0
+
+struct Main {
+    pub dunia: peta::Peta, pub pemain: fisika::Kotak, pub vy: float,
+    pub di_tanah: bool, pub skor: int, pub kamera: kamera::Kamera,
+}
+
+fn awal() {
+    let dunia = peta::dari_teks([
+        "########################",
+        "#......................#",
+        "#..........o...........#",
+        "#.........###.....o....#",
+        "#...o............###...#",
+        "#..###.....o...........#",
+        "#.........###......o...#",
+        "#..................##..#",
+        "########################",
+    ], PETAK, {"#": 1, ".": 0, "o": 2})
+    let p = fisika::kotak(12.0, 40.0, 6.0, 8.0)
+    return Main { dunia: dunia, pemain: p, vy: 0.0, di_tanah: false, skor: 0,
+                  kamera: kamera::baru(LAYAR_W, LAYAR_H, p.pusat()) }
+}
+
+fn perbarui(k, m, dt) {
+    var s = k
+    if (m.tekan("Space") || m.tekan("Up")) && k.di_tanah { s.vy = -LOMPAT }
+    s.vy = s.vy + GRAVITASI * dt
+    let geser = vek::baru(m.arah("Left", "Right", "Up", "Down").x * 60.0 * dt, s.vy * dt)
+    let hasil = k.dunia.gerak(k.pemain, geser, [1])
+    s.pemain = hasil[0]
+    let sentuh = hasil[1]
+    s.di_tanah = sentuh.bawah
+    if sentuh.bawah || sentuh.atas { s.vy = 0.0 }
+    // Koin: petak bernilai 2 yang tersentuh pemain berubah jadi kosong.
+    let t = s.dunia.petak_di(s.pemain.pusat())
+    match s.dunia.di(t[0], t[1]) {
+        Option::Some(2) => {
+            s.dunia = s.dunia.atur(t[0], t[1], 0)
+            s.skor = s.skor + 1
+        }
+        _ => {}
+    }
+    let lebar_dunia = s.dunia.lebar * PETAK
+    let tinggi_dunia = s.dunia.tinggi * PETAK
+    s.kamera = k.kamera.ikuti(s.pemain.pusat(), 0.2).batasi(lebar_dunia, tinggi_dunia)
+    return s
+}
+
+fn warna_petak(v) {
+    if v == 1 { return warna::ABU }
+    if v == 2 { return warna::KUNING }
+    return nil
+}
+
+fn gambar(c, k) {
+    k.kamera.pasang(c)
+    k.dunia.gambar(c, warna_petak)
+    let p = k.pemain
+    canvas::fill_rect(c, p.x, p.y, p.w, p.h, warna::MERAH)
+    k.kamera.lepas(c)
+    ui::label(c, 2, 2, "KOIN " + str(k.skor), 1, warna::PUTIH)
+}
+
+pub fn main() {
+    let g = mesin::baru("Lompat Koin", LAYAR_W, LAYAR_H, awal(), perbarui, gambar)
+        .dengan_latar(warna::rgb(20, 24, 40))
+        .dengan_tombol(["Left", "Right", "Up", "Space", "Escape"])
+    if canvas::punya_jendela() {
+        let akhir = g.jalankan()
+        wok("koin:", akhir.keadaan.skor)
+        return
+    }
+    // Tanpa jendela: jalan ke kanan, melompat tiap 40 langkah.
+    var rekaman = []
+    for i in range(0, 600) {
+        var tombol = ["Right"]
+        if i % 40 == 0 { tombol = ["Right", "Space"] }
+        rekaman = rekaman + [tombol]
+    }
+    let h = g.simulasi(rekaman)
+    let p = h.keadaan.pemain
+    wok("langkah:", h.langkah_ke, "koin:", h.keadaan.skor, "pemain:", math::round(p.x), math::round(p.y),
+        "di tanah:", h.keadaan.di_tanah)
+    let c = Canvas::new(LAYAR_W, LAYAR_H)
+    h.gambar_ke(c)
+    let berkas = fs::temp_dir() + "/lompat_koin.png"
+    canvas::save_png(c, berkas)
+    wok("bingkai terakhir:", fs::exists(berkas))
+}

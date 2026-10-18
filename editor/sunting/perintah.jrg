@@ -1,0 +1,1010 @@
+package sunting_perintah
+
+// Tiap tombol jadi perubahan keadaan editor. Tidak ada yang menulis ke layar di sini: yang
+// butuh terminal (menjalankan program) dititipkan lewat `e.tunda`, dan yang harus ditulis
+// mentah (papan tempel sistem) lewat `e.kirim` — putaran utama yang mengerjakannya.
+import "sunting/aksara"
+import "sunting/penyangga"
+import "sunting/keadaan"
+import "sunting/dialog"
+import "sunting/daftar"
+import "sunting/cari"
+import "sunting/berkas"
+import "sunting/tombol"
+import "sunting/lengkap"
+import "sunting/jalan"
+import "sunting/garis"
+import "sunting/tema"
+
+// Perintah gerak: `[arah, memilih]`.
+const GERAK = {
+    "kiri": ["kiri", false], "kanan": ["kanan", false], "atas": ["atas", false], "bawah": ["bawah", false],
+    "home": ["home", false], "end": ["end", false], "pgup": ["pgup", false], "pgdn": ["pgdn", false],
+    "kata_kiri": ["kata_kiri", false], "kata_kanan": ["kata_kanan", false],
+    "awal": ["awal", false], "akhir": ["akhir", false],
+    "pilih_kiri": ["kiri", true], "pilih_kanan": ["kanan", true],
+    "pilih_atas": ["atas", true], "pilih_bawah": ["bawah", true],
+    "pilih_home": ["home", true], "pilih_end": ["end", true],
+    "pilih_pgup": ["pgup", true], "pilih_pgdn": ["pgdn", true],
+    "pilih_kata_kiri": ["kata_kiri", true], "pilih_kata_kanan": ["kata_kanan", true],
+    "pilih_awal": ["awal", true], "pilih_akhir": ["akhir", true],
+}
+
+const MAKS_PAPAN_SISTEM = 100000
+const JEDA_KLIK_GANDA = 400
+
+fn pasang(e, p) { return keadaan::ganti(e, keadaan::gulung(e, p)) }
+
+fn angka(n) { return str::to_string(n) }
+
+/// Terapkan suntingan `f` ke penyangga aktif, kecuali berkasnya cuma boleh dibaca.
+fn sunting(e, f) {
+    let p = keadaan::kini(e)
+    if p.hanya_baca { return keadaan::keluhan(e, "berkas ini cuma bisa dibaca") }
+    var x = pasang(e, f(p))
+    x.menandai = false
+    return x
+}
+
+/// Tutup dialog, daftar, dan kotak pelengkapan.
+fn tutup_semua(e) {
+    var x = e
+    x.dialog = Dialog {}
+    x.daftar = Daftar {}
+    x.lengkap = []
+    return x
+}
+
+fn buka_dialog(e, jenis, label, awal) {
+    var x = tutup_semua(e)
+    x.dialog = dialog::teks(jenis, label, awal, keadaan::riwayat(e, jenis))
+    return x
+}
+
+fn tanya(e, jenis, label, pilihan) {
+    var x = tutup_semua(e)
+    x.dialog = dialog::tanya(jenis, label, pilihan)
+    return x
+}
+
+fn ingat(e, jenis, isi) {
+    var x = e
+    x.riwayat[jenis] = dialog::ingat(keadaan::riwayat(e, jenis), isi)
+    return x
+}
+
+/// Teks seleksi kalau cuma satu baris — isi awal yang wajar untuk dialog cari.
+fn seleksi_sebaris(p) {
+    let s = penyangga::teks_seleksi(p)
+    if str::contains(s, "\n") { return "" }
+    return s
+}
+
+// ── Papan tempel ────────────────────────────────────────────────────────
+
+/// Urutan OSC 52 yang menaruh `teks` di papan tempel SISTEM lewat terminalnya.
+fn ke_papan_sistem(teks) {
+    if teks == "" || str::len(teks) > MAKS_PAPAN_SISTEM { return "" }
+    return "\u001b]52;c;" + crypto::base64_encode(teks) + "\u0007"
+}
+
+fn salin(e, potong) {
+    let p = keadaan::kini(e)
+    var teks = penyangga::teks_seleksi(p)
+    let sebaris = teks == ""
+    if sebaris { teks = p.baris[p.br] }
+    var x = e
+    x.papan = teks
+    x.papan_baris = sebaris
+    x.kirim = e.kirim + ke_papan_sistem(sebaris $ teks + "\n" : teks)
+    x.menandai = false
+    let jumlah = sebaris $ "1 baris" : angka(str::len(teks)) + " karakter"
+    if !potong {
+        return keadaan::kabar(keadaan::ganti(x, penyangga::lepas_tanda(p)), jumlah + " disalin")
+    }
+    if p.hanya_baca { return keadaan::keluhan(x, "berkas ini cuma bisa dibaca") }
+    if sebaris { return keadaan::kabar(pasang(x, penyangga::hapus_baris(p)), jumlah + " dipotong") }
+    return keadaan::kabar(pasang(x, penyangga::hapus_kiri(p)), jumlah + " dipotong")
+}
+
+fn tempel(e) {
+    if e.papan == "" { return keadaan::keluhan(e, "papan tempel kosong — salin dulu dengan ^C") }
+    if e.papan_baris {
+        // Baris utuh ditempel sebagai baris utuh, di atas baris kursor.
+        return sunting(e, |p| {
+            let q = penyangga::sisip(penyangga::ke(p, p.br, 0), e.papan + "\n")
+            return penyangga::ke(q, p.br, p.kol)
+        })
+    }
+    return sunting(e, |p| penyangga::sisip(p, e.papan))
+}
+
+// ── Berkas ──────────────────────────────────────────────────────────────
+
+fn perluas(nama) {
+    let t = str::trim(nama)
+    if t == "~" || str::starts_with(t, "~/") {
+        match env::get("HOME") {
+            Option::Some(h) => { return h + str::slice(t, 1) }
+            Option::None => {}
+        }
+    }
+    return t
+}
+
+/// Buka `nama` di penyangga baru, atau pindah ke penyangganya kalau sudah terbuka.
+pub fn buka_berkas(e, nama) {
+    let path = fs::abs(perluas(nama))
+    var i = 0
+    for _, b in e.berkas {
+        if b.nama == path {
+            var y = tutup_semua(e)
+            y.aktif = i
+            return keadaan::kabar(y, "sudah terbuka: " + fs::basename(path))
+        }
+        i = i + 1
+    }
+    match berkas::buka(path) {
+        Result::Err(pesan) => { return keadaan::keluhan(tutup_semua(e), pesan) }
+        Result::Ok(p) => {
+            var x = tutup_semua(e)
+            let lama = keadaan::kini(e)
+            // Penyangga kosong tak bernama yang belum disentuh digantikan, bukan ditumpuk.
+            if len(e.berkas) == 1 && lama.nama == "" && !lama.kotor && lama.baris == [""] {
+                x.berkas = [p]
+                x.aktif = 0
+            } else {
+                x.berkas = e.berkas + [p]
+                x.aktif = len(e.berkas)
+            }
+            let ada = file::exists(path)
+            let ket = ada $ angka(len(p.baris)) + " baris" : "berkas baru"
+            return keadaan::kabar(x, fs::basename(path) + " — " + ket)
+        }
+    }
+}
+
+fn simpan(e) {
+    let p = keadaan::kini(e)
+    if p.nama == "" { return buka_dialog(e, "simpan_sebagai", "Simpan sebagai", "") }
+    match berkas::simpan(p) {
+        Result::Ok(q) => {
+            return keadaan::kabar(keadaan::ganti(e, q), "tersimpan: " + fs::basename(q.nama) + " (" + angka(len(q.baris)) + " baris)")
+        }
+        Result::Err(pesan) => { return keadaan::keluhan(e, pesan) }
+    }
+}
+
+fn simpan_sebagai(e, nama) {
+    if str::trim(nama) == "" { return keadaan::keluhan(e, "nama berkasnya kosong, tidak jadi disimpan") }
+    let path = fs::abs(perluas(nama))
+    var p = keadaan::kini(e)
+    let lama = p.nama
+    p.nama = path
+    p.bersorot = str::ends_with(path, ".jrg")
+    p.ubah_dari = 0
+    match berkas::simpan(p) {
+        Result::Ok(q) => {
+            return keadaan::kabar(keadaan::ganti(e, q), "tersimpan: " + fs::basename(path) + " (" + angka(len(q.baris)) + " baris)")
+        }
+        Result::Err(pesan) => {
+            // Gagal menyimpan: nama lamanya tetap, isinya tetap utuh.
+            var asli = keadaan::kini(e)
+            asli.nama = lama
+            return keadaan::keluhan(keadaan::ganti(e, asli), pesan)
+        }
+    }
+}
+
+/// Buang penyangga aktif; yang terakhir digantikan penyangga kosong.
+fn buang_penyangga(e) {
+    var x = e
+    if len(e.berkas) <= 1 {
+        x.berkas = [penyangga::baru("", [])]
+        x.aktif = 0
+        return x
+    }
+    x.berkas = e.berkas[:e.aktif] + e.berkas[e.aktif + 1:]
+    if x.aktif >= len(x.berkas) { x.aktif = len(x.berkas) - 1 }
+    return x
+}
+
+fn tutup(e) {
+    let p = keadaan::kini(e)
+    if p.kotor {
+        return tanya(e, "tutup_tanya", berkas::ringkas(p.nama) + " belum tersimpan. Simpan dulu?", "ytb")
+    }
+    return keadaan::kabar(buang_penyangga(e), "ditutup")
+}
+
+fn jumlah_kotor(e) {
+    var n = 0
+    for _, b in e.berkas { if b.kotor { n = n + 1 } }
+    return n
+}
+
+fn keluar(e) {
+    let n = jumlah_kotor(e)
+    if n == 0 {
+        var x = e
+        x.selesai = true
+        return x
+    }
+    let apa = n == 1 $ berkas::ringkas(keadaan::kini(e).nama) : angka(n) + " berkas"
+    var x = e
+    // Yang ditanyakan berkas yang BELUM TERSIMPAN; pindah ke sana supaya terlihat.
+    if !keadaan::kini(e).kotor {
+        var i = 0
+        for _, b in e.berkas {
+            if b.kotor { x.aktif = i }
+            i = i + 1
+        }
+    }
+    let label = n == 1 $ berkas::ringkas(keadaan::kini(x).nama) + " BELUM TERSIMPAN. Simpan sebelum keluar?" : apa + " BELUM TERSIMPAN. Simpan semuanya sebelum keluar?"
+    return tanya(x, "keluar_tanya", label, "ytb")
+}
+
+/// Simpan semua penyangga yang berubah. Menjawab `[editor, berhasil]`.
+fn simpan_semua(e) {
+    var x = e
+    var i = 0
+    for _, b in e.berkas {
+        if b.kotor {
+            if b.nama == "" {
+                x.aktif = i
+                return [keadaan::keluhan(x, "berkas ini belum bernama — simpan dulu dengan Alt-S"), false]
+            }
+            match berkas::simpan(b) {
+                Result::Ok(q) => { x.berkas[i] = q }
+                Result::Err(pesan) => {
+                    x.aktif = i
+                    return [keadaan::keluhan(x, pesan), false]
+                }
+            }
+        }
+        i = i + 1
+    }
+    return [x, true]
+}
+
+/// Buka daftar isi direktori `dir` untuk dipilih.
+pub fn jelajah(e, dir) {
+    match berkas::isi_direktori(dir) {
+        Result::Err(pesan) => { return keadaan::keluhan(tutup_semua(e), "tidak bisa membaca `" + dir + "`: " + pesan) }
+        Result::Ok(isi) => {
+            var butir = []
+            for _, b in isi { butir = butir + [[b[0], b[1]]] }
+            var x = tutup_semua(e)
+            x.daftar = daftar::baru("jelajah", "Buka dari " + berkas::ringkas(fs::abs(dir)), butir)
+            return x
+        }
+    }
+}
+
+fn direktori_kini(e) {
+    let p = keadaan::kini(e)
+    if p.nama == "" { return fs::cwd() }
+    let d = fs::dirname(p.nama)
+    if d == "" { return fs::cwd() }
+    return d
+}
+
+fn daftar_berkas(e) {
+    var butir = []
+    var i = 0
+    for _, b in e.berkas {
+        let tanda = b.kotor $ " [+]" : ""
+        butir = butir + [[berkas::ringkas(b.nama) + tanda, i]]
+        i = i + 1
+    }
+    var x = tutup_semua(e)
+    x.daftar = daftar::sorot_nilai(daftar::baru("berkas", "Berkas yang terbuka", butir), e.aktif)
+    return x
+}
+
+fn pindah_berkas(e, arah) {
+    let n = len(e.berkas)
+    if n <= 1 { return keadaan::kabar(e, "cuma satu berkas yang terbuka") }
+    var x = e
+    x.aktif = ((e.aktif + arah) % n + n) % n
+    x.menandai = false
+    return keadaan::kabar(x, berkas::ringkas(keadaan::kini(x).nama))
+}
+
+// ── Cari dan ganti ──────────────────────────────────────────────────────
+
+fn lapor_cari(e) {
+    let p = keadaan::kini(e)
+    let h = cari::hitung(p, e.cari, p.br, p.kol)
+    return keadaan::kabar(e, "ketemu di baris " + angka(p.br + 1) + " (" + angka(h[0]) + " dari " + angka(h[1]) + ")")
+}
+
+fn kembali_ke_asal(e) {
+    if len(e.asal) < 4 { return e }
+    var p = penyangga::ke(keadaan::kini(e), e.asal[0], e.asal[1])
+    p.atas = e.asal[2]
+    p.kiri = e.asal[3]
+    return keadaan::ganti(e, p)
+}
+
+/// Lompat ke kemunculan `pola` pertama di atau sesudah tempat pencarian dimulai.
+/// Menjawab `[editor, ketemu]`; tanpa hasil kursornya kembali ke tempat semula.
+fn cari_dari_asal(e, pola) {
+    let p = keadaan::kini(e)
+    var br = p.br
+    var kol = p.kol
+    if len(e.asal) >= 2 {
+        br = e.asal[0]
+        kol = e.asal[1]
+    }
+    match cari::dari(p, pola, br, kol) {
+        Option::Some(h) => { return [pasang(e, penyangga::ke(p, h[0], h[1])), true] }
+        Option::None => { return [kembali_ke_asal(e), false] }
+    }
+}
+
+/// Label dialog dengan isi bawaannya di dalam kurung siku: Enter tanpa mengetik memakainya.
+fn label_bawaan(label, bawaan) {
+    if bawaan == "" { return label }
+    return label + " [" + bawaan + "]"
+}
+
+/// Yang dicari kalau dialognya langsung di-Enter: seleksi satu baris, atau pola terakhir.
+fn pola_bawaan(e) {
+    let s = seleksi_sebaris(keadaan::kini(e))
+    if s != "" { return s }
+    return e.cari
+}
+
+fn mulai_cari(e) {
+    let p = keadaan::kini(e)
+    let bawaan = pola_bawaan(e)
+    var x = buka_dialog(e, "cari", label_bawaan("Cari", bawaan), "")
+    x.asal = [p.br, p.kol, p.atas, p.kiri]
+    x.cari_lama = bawaan
+    x.cari = bawaan
+    x.sorot_cari = true
+    return x
+}
+
+fn cari_lagi(e, maju) {
+    if e.cari == "" { return mulai_cari(e) }
+    let p = keadaan::kini(e)
+    let h = maju $ cari::maju(p, e.cari) : cari::mundur(p, e.cari)
+    match h {
+        Option::Some(k) => {
+            var x = pasang(e, penyangga::ke(p, k[0], k[1]))
+            x.sorot_cari = true
+            return lapor_cari(x)
+        }
+        Option::None => { return keadaan::keluhan(e, "tidak ketemu: " + e.cari) }
+    }
+}
+
+/// Tanyakan kemunculan berikutnya dalam sesi ganti, atau tutup sesinya kalau habis.
+fn ganti_berikut(e) {
+    let p = keadaan::kini(e)
+    if e.ganti_sisa <= 0 { return ganti_selesai(e) }
+    match cari::dari(p, e.cari, p.br, p.kol) {
+        Option::None => { return ganti_selesai(e) }
+        Option::Some(h) => {
+            var x = pasang(e, penyangga::taruh(p, h[0], h[1]))
+            return tanya(x, "ganti_tanya", "Ganti yang ini? (tersisa " + angka(e.ganti_sisa) + ")", "ytsb")
+        }
+    }
+}
+
+fn ganti_selesai(e) {
+    var x = tutup_semua(e)
+    x = keadaan::ganti(x, penyangga::putus(keadaan::kini(x)))
+    x.ganti_sisa = 0
+    x.sorot_cari = false
+    return keadaan::kabar(x, angka(e.ganti_n) + " diganti")
+}
+
+/// Satu keputusan di sesi ganti: `ganti` mengganti kemunculan di kursor, lalu maju.
+fn ganti_langkah(e, ganti) {
+    let p = keadaan::kini(e)
+    var x = e
+    x.ganti_sisa = e.ganti_sisa - 1
+    let np = str::len(e.cari)
+    if ganti {
+        let q = penyangga::ganti_rentang(p, [p.br, p.kol, p.br, p.kol + np], e.ganti, "ganti")
+        x = keadaan::ganti(x, q)
+        x.ganti_n = e.ganti_n + 1
+    } else {
+        // Dilewati: kursor maju melewatinya supaya pencarian berikutnya tidak berhenti di sini.
+        x = keadaan::ganti(x, penyangga::taruh(p, p.br, p.kol + math::max(np, 1)))
+    }
+    return x
+}
+
+fn ganti_semua_sisa(e) {
+    var x = e
+    // Belum ada yang dilewati atau diganti: satu operasi atas seluruh berkas.
+    if e.ganti_n == 0 && e.ganti_sisa == cari::hitung(keadaan::kini(e), e.cari, -1, -1)[1] {
+        let h = cari::ganti_semua(keadaan::kini(e), e.cari, e.ganti)
+        x = pasang(e, h[0])
+        x.ganti_n = h[1]
+        return ganti_selesai(x)
+    }
+    while x.ganti_sisa > 0 {
+        let p = keadaan::kini(x)
+        match cari::dari(p, x.cari, p.br, p.kol) {
+            Option::None => { x.ganti_sisa = 0 }
+            Option::Some(h) => {
+                x = keadaan::ganti(x, penyangga::taruh(p, h[0], h[1]))
+                x = ganti_langkah(x, true)
+            }
+        }
+    }
+    return ganti_selesai(pasang(x, keadaan::kini(x)))
+}
+
+fn ke_baris(e, isi) {
+    let bagian = str::split(str::trim(isi), ":")
+    let p = keadaan::kini(e)
+    if len(bagian) == 0 || !re::test("^[0-9]+$", str::trim(bagian[0])) {
+        return keadaan::keluhan(e, "`" + isi + "` bukan nomor baris — tulis mis. 120 atau 120:8")
+    }
+    let br = str::to_int(str::trim(bagian[0]))
+    var kol = 1
+    if len(bagian) > 1 && re::test("^[0-9]+$", str::trim(bagian[1])) { kol = str::to_int(str::trim(bagian[1])) }
+    let n = len(p.baris)
+    if br < 1 || br > n {
+        return keadaan::keluhan(e, "baris " + angka(br) + " tidak ada — berkas ini " + angka(n) + " baris")
+    }
+    return pasang(e, penyangga::ke(p, br - 1, kol - 1))
+}
+
+fn garis_besar(e) {
+    let p = keadaan::kini(e)
+    let butir = garis::besar(p.baris)
+    if len(butir) == 0 { return keadaan::kabar(e, "tidak ada fungsi atau tipe di berkas ini") }
+    var d = daftar::baru("garis", "Garis besar " + berkas::ringkas(p.nama), butir)
+    // Pilihan awal: deklarasi terakhir di atas kursor.
+    var i = 0
+    var pilih = 0
+    for _, b in butir {
+        if b[1] <= p.br + 1 { pilih = i }
+        i = i + 1
+    }
+    var x = tutup_semua(e)
+    x.daftar = daftar::ke(d, pilih, math::max(keadaan::tinggi_teks(e) - 1, 1))
+    return x
+}
+
+// ── Jalankan, periksa, rapikan ──────────────────────────────────────────
+
+/// Pastikan isi penyangga ada di disk sebelum dijalankan. Menjawab `[editor, path]`;
+/// path kosong berarti gagal (pesannya sudah dipasang).
+fn siap_jalan(e) {
+    let p = keadaan::kini(e)
+    if p.nama == "" {
+        let sementara = fs::join(fs::temp_dir(), "jrgedit_" + angka(proses::pid()) + ".jrg")
+        match file::write(sementara, penyangga::isi_teks(p)) {
+            Result::Ok(_) => { return [e, sementara] }
+            Result::Err(g) => { return [keadaan::keluhan(e, "tidak bisa menulis berkas sementara: " + g), ""] }
+        }
+    }
+    if !p.kotor { return [e, p.nama] }
+    match berkas::simpan(p) {
+        Result::Ok(q) => { return [keadaan::ganti(e, q), p.nama] }
+        Result::Err(pesan) => { return [keadaan::keluhan(e, pesan + " — tidak jadi dijalankan"), ""] }
+    }
+}
+
+/// Lompat ke galat ke-`i` yang tercatat; berkasnya dibuka kalau belum.
+fn ke_galat(e, i) {
+    let g = e.galat[i]
+    var x = e
+    x.galat_ke = i
+    if g[1] <= 0 { return keadaan::keluhan(x, g[3]) }
+    if g[0] != "" && g[0] != keadaan::kini(e).nama && !str::starts_with(g[0], "<") {
+        if !file::exists(g[0]) { return keadaan::keluhan(x, g[3] + "  (" + g[0] + ":" + angka(g[1]) + ")") }
+        x = buka_berkas(x, g[0])
+    }
+    if keadaan::kini(x).nama != g[0] && !str::starts_with(g[0], "<") && g[0] != "" { return x }
+    x = pasang(x, penyangga::ke(keadaan::kini(x), g[1] - 1, g[2] - 1))
+    let ke = len(e.galat) > 1 $ " (" + angka(i + 1) + " dari " + angka(len(e.galat)) + ")" : ""
+    return keadaan::keluhan(x, g[3] + ke)
+}
+
+/// Catat hasil menjalankan program: kode keluarnya dan galat yang dilaporkan `jrgc`.
+pub fn sesudah_jalan(e, kode, galat) {
+    var x = e
+    x.galat = galat
+    x.galat_ke = -1
+    x.paksa = true
+    if kode < 0 {
+        let sebab = len(galat) > 0 $ galat[0][3] : "sebabnya tidak diketahui"
+        x.galat = []
+        return keadaan::keluhan(x, "tidak bisa menjalankan `jrgc`: " + sebab)
+    }
+    if len(galat) > 0 { return ke_galat(x, 0) }
+    if kode == 0 { return keadaan::kabar(x, "selesai, kode keluar 0") }
+    return keadaan::keluhan(x, "selesai dengan kode keluar " + angka(kode))
+}
+
+fn galat_berikut(e) {
+    if len(e.galat) == 0 {
+        return keadaan::kabar(e, "tidak ada galat tercatat — jalankan (^R) atau periksa (Alt-P) dulu")
+    }
+    return ke_galat(e, (e.galat_ke + 1) % len(e.galat))
+}
+
+fn periksa(e) {
+    let s = siap_jalan(e)
+    if s[1] == "" { return s[0] }
+    let h = jalan::periksa(s[1])
+    var x = s[0]
+    x.galat = h[0]
+    x.galat_ke = -1
+    if len(h[0]) > 0 { return ke_galat(x, 0) }
+    if h[1] != "" { return keadaan::keluhan(x, str::split(h[1], "\n")[0]) }
+    return keadaan::kabar(x, "tidak ada galat sintaks")
+}
+
+fn rapikan(e) {
+    let p = keadaan::kini(e)
+    if p.nama == "" { return keadaan::keluhan(e, "berkas ini belum bernama — simpan dulu, baru dirapikan") }
+    if p.hanya_baca { return keadaan::keluhan(e, "berkas ini cuma bisa dibaca") }
+    let s = siap_jalan(e)
+    if s[1] == "" { return s[0] }
+    match jalan::rapikan(s[1]) {
+        Result::Err(pesan) => { return keadaan::keluhan(s[0], pesan) }
+        Result::Ok(_) => {}
+    }
+    match file::read(s[1]) {
+        Result::Err(g) => { return keadaan::keluhan(s[0], "sudah dirapikan, tapi tidak bisa dibaca ulang: " + g) }
+        Result::Ok(teks) => {
+            let baris = berkas::pecah(teks)[0]
+            let q = keadaan::kini(s[0])
+            if baris == q.baris { return keadaan::kabar(s[0], "sudah rapi") }
+            var r = penyangga::ganti_isi(q, baris)
+            r.kotor = false
+            return keadaan::kabar(pasang(s[0], r), "dirapikan")
+        }
+    }
+}
+
+fn dok(e) {
+    let p = keadaan::kini(e)
+    // Nama di bawah kursor, termasuk `ns::`-nya: majukan kursor ke ujung kata dulu.
+    let k = str::chars(p.baris[p.br])
+    var ujung = p.kol
+    while ujung < len(k) && (aksara::kata(k[ujung]) || k[ujung] == ':') { ujung = ujung + 1 }
+    let nama = lengkap::awalan(p.baris[p.br], ujung)[0]
+    if nama == "" { return keadaan::kabar(e, "taruh kursor di sebuah nama, lalu tekan F2") }
+    let baris = jalan::dok(nama)
+    if len(baris) == 1 { return keadaan::kabar(e, baris[0]) }
+    var x = tutup_semua(e)
+    x.daftar = daftar::bacaan("dok", "Penjelasan `" + nama + "`", baris)
+    return x
+}
+
+// ── Pelengkapan ─────────────────────────────────────────────────────────
+
+fn hitung_lengkap(e) {
+    let p = keadaan::kini(e)
+    let a = lengkap::awalan(p.baris[p.br], p.kol)
+    var x = e
+    x.lengkap = []
+    if a[0] == "" { return x }
+    x.lengkap = lengkap::calon(a[0], lengkap::kata_berkas(p.baris, p.br), e.bawaan, 40)
+    x.lengkap_ke = 0
+    x.lengkap_dari = a[1]
+    return x
+}
+
+fn terima_lengkap(e) {
+    let p = keadaan::kini(e)
+    let pilihan = e.lengkap[e.lengkap_ke]
+    var x = e
+    x.lengkap = []
+    return sunting(x, |q| penyangga::sisip(penyangga::pilih_rentang(q, p.br, e.lengkap_dari, p.br, p.kol), pilihan))
+}
+
+fn lengkapi(e) {
+    var x = e
+    if len(e.bawaan) == 0 { x.bawaan = jalan::daftar_bawaan() }
+    x = hitung_lengkap(x)
+    if len(x.lengkap) == 0 {
+        let a = lengkap::awalan(keadaan::kini(e).baris[keadaan::kini(e).br], keadaan::kini(e).kol)[0]
+        if a == "" { return keadaan::kabar(x, "ketik awal sebuah nama dulu, lalu ^Spasi") }
+        return keadaan::kabar(x, "tidak ada pelengkapan untuk `" + a + "`")
+    }
+    if len(x.lengkap) == 1 { return terima_lengkap(x) }
+    return x
+}
+
+/// Tombol selagi kotak pelengkapan terbuka. Menjawab `[editor, sudah_ditangani]`.
+fn tombol_lengkap(e, t) {
+    let n = len(e.lengkap)
+    var x = e
+    if t == "bawah" || t == "ctrl-n" {
+        x.lengkap_ke = (e.lengkap_ke + 1) % n
+        return [x, true]
+    }
+    if t == "atas" || t == "ctrl-p" {
+        x.lengkap_ke = (e.lengkap_ke + n - 1) % n
+        return [x, true]
+    }
+    if t == "tab" || t == "enter" { return [terima_lengkap(e), true] }
+    if t == "esc" {
+        x.lengkap = []
+        return [x, true]
+    }
+    if str::len(t) == 1 && (aksara::kata(str::char_at(t, 0)) || t == ":") {
+        x = sunting(e, |p| penyangga::ketik(p, t))
+        return [hitung_lengkap(x), true]
+    }
+    if t == "backspace" {
+        x = sunting(e, |p| penyangga::hapus_kiri(p))
+        return [hitung_lengkap(x), true]
+    }
+    x.lengkap = []
+    return [x, false]
+}
+
+// ── Tetikus ─────────────────────────────────────────────────────────────
+
+/// Posisi `[br, kol]` di penyangga untuk titik layar `(x, y)` (dari 1), atau `[]` kalau
+/// titiknya di luar area teks.
+fn titik(e, p, x, y) {
+    let r = y - 2
+    if r < 0 || r >= keadaan::tinggi_teks(e) { return [] }
+    let br = math::min(p.atas + r, len(p.baris) - 1)
+    // Cuma baris kursor yang digulung ke samping (lihat `layar::area_teks`).
+    let geser = br == p.br $ p.kiri : 0
+    let tampil = math::max(x - 1 - keadaan::lebar_nomor(p), 0) + geser
+    return [br, aksara::ke_karakter(p.baris[br], tampil)]
+}
+
+fn tetikus(e, t) {
+    let b = str::split(t, ":")
+    if len(b) != 4 || !re::test("^[0-9]+$", b[2]) || !re::test("^[0-9]+$", b[3]) { return e }
+    let aksi = b[1]
+    let x = str::to_int(b[2])
+    let y = str::to_int(b[3])
+    let p = keadaan::kini(e)
+    if aksi == "roda-atas" || aksi == "roda-bawah" {
+        // Roda menggulung TAMPILAN; kursornya tetap, dan tombol berikutnya membawanya balik.
+        var q = p
+        q.atas = aksi == "roda-atas" $ p.atas - 3 : p.atas + 3
+        return keadaan::ganti(e, keadaan::jepit_gulung(e, q))
+    }
+    let k = titik(e, p, x, y)
+    if len(k) == 0 { return e }
+    var z = e
+    if aksi == "kiri" {
+        let kini = time::now_ms()
+        let ganda = kini - e.klik_ms <= JEDA_KLIK_GANDA && e.klik_br == k[0] && e.klik_kol == k[1]
+        z.klik_n = ganda $ e.klik_n + 1 : 1
+        z.klik_ms = kini
+        z.klik_br = k[0]
+        z.klik_kol = k[1]
+        z.jangkar = k
+        z.menandai = false
+        var q = penyangga::ke(p, k[0], k[1])
+        if z.klik_n == 2 { q = penyangga::pilih_kata(q) }
+        if z.klik_n >= 3 { q = penyangga::pilih_baris(q, k[0]) }
+        return pasang(z, q)
+    }
+    if aksi == "seret" && len(e.jangkar) == 2 {
+        return pasang(z, penyangga::pilih_rentang(p, e.jangkar[0], e.jangkar[1], k[0], k[1]))
+    }
+    return e
+}
+
+// ── Dialog dan daftar ───────────────────────────────────────────────────
+
+fn dialog_dikirim(e) {
+    let d = e.dialog
+    let jenis = d.jenis
+    let isi = d.isi
+    var x = ingat(tutup_semua(e), jenis, isi)
+    if jenis == "cari" {
+        var pola = isi
+        if pola == "" { pola = e.cari_lama }
+        if pola == "" {
+            x.sorot_cari = false
+            return keadaan::kabar(kembali_ke_asal(x), "tidak ada yang dicari")
+        }
+        x.cari = pola
+        let h = cari_dari_asal(x, pola)
+        if h[1] { return lapor_cari(h[0]) }
+        var y = h[0]
+        y.sorot_cari = false
+        return keadaan::keluhan(y, "tidak ketemu: " + pola)
+    }
+    if jenis == "ganti_pola" {
+        var pola = isi
+        if pola == "" { pola = e.cari_lama }
+        if pola == "" { return keadaan::kabar(x, "tidak ada yang diganti") }
+        x.cari = pola
+        x.sorot_cari = true
+        if cari::hitung(keadaan::kini(x), pola, -1, -1)[1] == 0 {
+            x.sorot_cari = false
+            return keadaan::keluhan(x, "tidak ketemu: " + pola)
+        }
+        return buka_dialog(x, "ganti_dengan", "Ganti `" + pola + "` dengan", "")
+    }
+    if jenis == "ganti_dengan" {
+        if keadaan::kini(x).hanya_baca { return keadaan::keluhan(x, "berkas ini cuma bisa dibaca") }
+        x.ganti = isi
+        x.ganti_n = 0
+        x.ganti_sisa = cari::hitung(keadaan::kini(x), x.cari, -1, -1)[1]
+        return ganti_berikut(x)
+    }
+    if jenis == "ke_baris" { return ke_baris(x, isi) }
+    if jenis == "buka" {
+        if str::trim(isi) == "" { return jelajah(x, direktori_kini(x)) }
+        let path = perluas(isi)
+        if fs::is_dir(path) { return jelajah(x, path) }
+        return buka_berkas(x, path)
+    }
+    if jenis == "simpan_sebagai" { return simpan_sebagai(x, isi) }
+    return x
+}
+
+fn dialog_dipilih(e, huruf) {
+    let jenis = e.dialog.jenis
+    var x = tutup_semua(e)
+    if jenis == "ganti_tanya" {
+        if huruf == "b" { return ganti_selesai(e) }
+        if huruf == "s" { return ganti_semua_sisa(e) }
+        return ganti_berikut(ganti_langkah(e, huruf == "y"))
+    }
+    if jenis == "tutup_tanya" {
+        if huruf == "b" { return x }
+        if huruf == "y" {
+            let p = keadaan::kini(x)
+            if p.nama == "" { return keadaan::keluhan(x, "berkas ini belum bernama — simpan dulu dengan Alt-S") }
+            match berkas::simpan(p) {
+                Result::Ok(q) => { x = keadaan::ganti(x, q) }
+                Result::Err(pesan) => { return keadaan::keluhan(x, pesan) }
+            }
+        }
+        return keadaan::kabar(buang_penyangga(x), "ditutup")
+    }
+    if jenis == "keluar_tanya" {
+        if huruf == "b" { return x }
+        if huruf == "y" {
+            let h = simpan_semua(x)
+            if !h[1] { return h[0] }
+            x = h[0]
+        }
+        x.selesai = true
+        return x
+    }
+    return x
+}
+
+fn tombol_dialog(e, t) {
+    let d = e.dialog
+    // Di dialog cari, ^G ("hasil berikutnya") berarti: terima, lalu lanjut dari sana.
+    if d.jenis == "cari" && t == "ctrl-g" { return dialog_dikirim(e) }
+    let h = dialog::terapkan(d, t)
+    var x = e
+    x.dialog = h[0]
+    let aksi = h[1]
+    if aksi == "" { return x }
+    if aksi == "batal" {
+        var y = tutup_semua(x)
+        if d.jenis == "cari" {
+            y.cari = e.cari_lama
+            y.sorot_cari = false
+            y = kembali_ke_asal(y)
+        }
+        if d.jenis == "ganti_tanya" { return ganti_selesai(y) }
+        if d.jenis == "ganti_pola" || d.jenis == "ganti_dengan" { y.sorot_cari = false }
+        return keadaan::kabar(y, "dibatalkan")
+    }
+    if aksi == "kirim" { return dialog_dikirim(x) }
+    if str::starts_with(aksi, "pilih:") { return dialog_dipilih(x, str::slice(aksi, 6)) }
+    if aksi == "ubah" && d.jenis == "cari" {
+        // Cari sambil mengetik: tiap perubahan melompat ke hasil pertama dari tempat semula.
+        x.cari = h[0].isi
+        return cari_dari_asal(x, h[0].isi)[0]
+    }
+    return x
+}
+
+fn daftar_dipilih(e) {
+    let d = e.daftar
+    var x = tutup_semua(e)
+    match daftar::terpilih(d) {
+        Option::None => { return x }
+        Option::Some(nilai) => {
+            if d.jenis == "garis" { return pasang(x, penyangga::ke(keadaan::kini(x), nilai - 1, 0)) }
+            if d.jenis == "berkas" {
+                x.aktif = nilai
+                return x
+            }
+            if d.jenis == "jelajah" {
+                if fs::is_dir(nilai) { return jelajah(x, nilai) }
+                return buka_berkas(x, nilai)
+            }
+            return x
+        }
+    }
+}
+
+fn tombol_daftar(e, t) {
+    let tinggi = math::max(keadaan::tinggi_teks(e) - 1, 1)
+    var kunci = t
+    if str::starts_with(t, "tetikus:") {
+        let b = str::split(t, ":")
+        if b[1] == "roda-atas" { kunci = "atas" }
+        else if b[1] == "roda-bawah" { kunci = "bawah" }
+        else if b[1] == "kiri" && len(b) == 4 && re::test("^[0-9]+$", b[3]) {
+            // Klik pada sebuah butir memilihnya; baris pertama panel adalah judulnya.
+            let r = str::to_int(b[3]) - 3
+            if r < 0 || r >= tinggi || !e.daftar.bisa_pilih { return e }
+            let i = e.daftar.atas + r
+            if i >= len(e.daftar.tampil) { return e }
+            var y = e
+            y.daftar = daftar::ke(e.daftar, i, tinggi)
+            return daftar_dipilih(y)
+        } else { return e }
+    }
+    let h = daftar::terapkan(e.daftar, kunci, tinggi)
+    var x = e
+    x.daftar = h[0]
+    if h[1] == "batal" { return tutup_semua(x) }
+    if h[1] == "pilih" { return daftar_dipilih(x) }
+    return x
+}
+
+// ── Perintah ────────────────────────────────────────────────────────────
+
+fn batal(e) {
+    let p = keadaan::kini(e)
+    var x = e
+    if penyangga::ada_seleksi(p) || e.menandai {
+        x.menandai = false
+        return keadaan::ganti(x, penyangga::lepas_tanda(p))
+    }
+    if e.sorot_cari {
+        x.sorot_cari = false
+        return x
+    }
+    return laksanakan(e, "bantuan")
+}
+
+fn tandai(e) {
+    let p = keadaan::kini(e)
+    var x = e
+    if e.menandai {
+        x.menandai = false
+        return keadaan::kabar(keadaan::ganti(x, penyangga::lepas_tanda(p)), "blok dibatalkan")
+    }
+    x.menandai = true
+    return keadaan::kabar(keadaan::ganti(x, penyangga::tandai(p)), "blok dimulai — gerakkan kursor, lalu ^C salin, ^X potong, atau ^B batal")
+}
+
+fn ganti_tema(e) {
+    let baru = tema::nama() == "gelap" $ "terang" : "gelap"
+    tema::pilih(baru)
+    var x = e
+    x.paksa = true
+    x.tunda = "tema"
+    return keadaan::kabar(x, "tema " + baru)
+}
+
+/// Jalankan satu perintah bernama (lihat `tombol::TABEL`).
+pub fn laksanakan(e, nama) {
+    if dict::has(GERAK, nama) {
+        let g = GERAK[nama]
+        let p = penyangga::gerak(keadaan::kini(e), g[0], g[1] || e.menandai, keadaan::tinggi_teks(e))
+        return pasang(e, p)
+    }
+    if nama == "enter" { return sunting(e, |p| penyangga::enter(p)) }
+    if nama == "hapus_kiri" { return sunting(e, |p| penyangga::hapus_kiri(p)) }
+    if nama == "hapus_kanan" { return sunting(e, |p| penyangga::hapus_kanan(p)) }
+    if nama == "hapus_kata" { return sunting(e, |p| penyangga::hapus_kata_kiri(p)) }
+    if nama == "tab" { return sunting(e, |p| penyangga::tab(p)) }
+    if nama == "tab_balik" { return sunting(e, |p| penyangga::tab_balik(p)) }
+    if nama == "hapus_baris" { return sunting(e, |p| penyangga::hapus_baris(p)) }
+    if nama == "gandakan" { return sunting(e, |p| penyangga::gandakan_baris(p)) }
+    if nama == "baris_naik" { return sunting(e, |p| penyangga::pindah_baris(p, -1)) }
+    if nama == "baris_turun" { return sunting(e, |p| penyangga::pindah_baris(p, 1)) }
+    if nama == "komentar" { return sunting(e, |p| penyangga::alih_komentar(p)) }
+    if nama == "urung" {
+        if !penyangga::bisa_urung(keadaan::kini(e)) { return keadaan::kabar(e, "tidak ada yang bisa diurungkan") }
+        return keadaan::kabar(sunting(e, |p| penyangga::urungkan(p)), "diurungkan")
+    }
+    if nama == "ulang" {
+        if !penyangga::bisa_ulang(keadaan::kini(e)) { return keadaan::kabar(e, "tidak ada yang bisa diulangi") }
+        return keadaan::kabar(sunting(e, |p| penyangga::ulangi(p)), "diulangi")
+    }
+    if nama == "salin" { return salin(e, false) }
+    if nama == "potong" { return salin(e, true) }
+    if nama == "tempel" { return tempel(e) }
+    if nama == "pilih_semua" { return keadaan::ganti(e, penyangga::pilih_semua(keadaan::kini(e))) }
+    if nama == "tandai" { return tandai(e) }
+    if nama == "simpan" { return simpan(e) }
+    if nama == "simpan_sebagai" { return buka_dialog(e, "simpan_sebagai", "Simpan sebagai", berkas::ringkas_atau_kosong(keadaan::kini(e).nama)) }
+    if nama == "buka" { return buka_dialog(e, "buka", "Buka berkas", "") }
+    if nama == "baru" {
+        var x = tutup_semua(e)
+        x.berkas = e.berkas + [penyangga::baru("", [])]
+        x.aktif = len(e.berkas)
+        return keadaan::kabar(x, "berkas baru")
+    }
+    if nama == "tutup" { return tutup(e) }
+    if nama == "berkas_berikut" { return pindah_berkas(e, 1) }
+    if nama == "berkas_sebelum" { return pindah_berkas(e, -1) }
+    if nama == "daftar_berkas" { return daftar_berkas(e) }
+    if nama == "keluar" { return keluar(e) }
+    if nama == "cari" { return mulai_cari(e) }
+    if nama == "cari_lagi" { return cari_lagi(e, true) }
+    if nama == "cari_mundur" { return cari_lagi(e, false) }
+    if nama == "ganti" {
+        let bawaan = pola_bawaan(e)
+        var x = buka_dialog(e, "ganti_pola", label_bawaan("Ganti", bawaan), "")
+        x.cari_lama = bawaan
+        return x
+    }
+    if nama == "ke_baris" { return buka_dialog(e, "ke_baris", "Ke baris (atau baris:kolom)", "") }
+    if nama == "ke_kurung" {
+        let p = keadaan::kini(e)
+        match penyangga::pasangan_kurung(p, len(p.baris)) {
+            Option::Some(k) => { return pasang(e, penyangga::ke(p, k[0], k[1])) }
+            Option::None => { return keadaan::kabar(e, "tidak ada kurung berpasangan di kursor") }
+        }
+    }
+    if nama == "garis_besar" { return garis_besar(e) }
+    if nama == "jalankan" || nama == "jalankan_vm" {
+        let s = siap_jalan(e)
+        if s[1] == "" { return s[0] }
+        var x = s[0]
+        x.tunda = nama + ":" + s[1]
+        return x
+    }
+    if nama == "galat_berikut" { return galat_berikut(e) }
+    if nama == "periksa" { return periksa(e) }
+    if nama == "rapikan" { return rapikan(e) }
+    if nama == "dok" { return dok(e) }
+    if nama == "lengkapi" { return lengkapi(e) }
+    if nama == "bantuan" {
+        var x = tutup_semua(e)
+        x.daftar = daftar::bacaan("bantuan", "jrgedit — daftar tombol (Esc menutup)", tombol::bantuan())
+        return x
+    }
+    if nama == "batal" { return batal(e) }
+    if nama == "tema" { return ganti_tema(e) }
+    return e
+}
+
+/// Tangani satu tombol (nama dari `term::tombol`). Menjawab editor yang baru.
+pub fn tangani(e, t) {
+    var x = e
+    x.pesan = ""
+    x.pesan_galat = false
+    if dialog::aktif(x.dialog) {
+        if str::starts_with(t, "tetikus:") { return x }
+        return tombol_dialog(x, t)
+    }
+    if daftar::aktif(x.daftar) { return tombol_daftar(x, t) }
+    if str::starts_with(t, "tetikus:") {
+        x.lengkap = []
+        return tetikus(x, t)
+    }
+    if len(x.lengkap) > 0 {
+        let h = tombol_lengkap(x, t)
+        if h[1] { return h[0] }
+        x = h[0]
+    }
+    if str::starts_with(t, "tempel:") { return sunting(x, |p| penyangga::sisip(p, str::slice(t, 7))) }
+    if str::starts_with(t, "tempel-terpotong:") {
+        let y = sunting(x, |p| penyangga::sisip(p, str::slice(t, 17)))
+        return keadaan::keluhan(y, "tempelannya terlalu besar: sebagian dibuang")
+    }
+    let perintah = tombol::perintah(t)
+    if perintah != "" { return laksanakan(x, perintah) }
+    if str::len(t) == 1 { return sunting(x, |p| penyangga::ketik(p, t)) }
+    if str::starts_with(t, "?") { return keadaan::kabar(x, "tombol tidak dikenal: " + t) }
+    return x
+}

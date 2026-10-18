@@ -1,0 +1,29 @@
+// sprite_demo.jrg — memuat PNG dan menggambarnya sebagai sprite.
+
+// Sebuah "sprite" dibuat dulu supaya contoh ini berdiri sendiri: tanpa
+// berkas PNG bawaan, contohnya cuma bisa dijalankan orang yang kebetulan
+// punya gambar dengan nama yang tepat.
+let sumber = Canvas::new(16, 16, "sprite")
+// Transparan penuh HARUS ditulis sebagai `Warna {..}`, bukan angka.
+canvas::clear(sumber, Warna {r: 0, g: 0, b: 0, a: 0})
+canvas::fill_circle(sumber, 8, 8, 7, 0xFF3366)
+canvas::fill_circle(sumber, 6, 6, 2, 0xFFFFFFFF)
+canvas::save_png(sumber, "/tmp/jrg_sprite.png")
+
+// Dibaca kembali — inilah yang sebelumnya tidak mungkin.
+let sprite = Canvas::load_png("/tmp/jrg_sprite.png")
+wok("sprite:", canvas::width(sprite), "x", canvas::height(sprite))
+
+// Latar, lalu sprite-nya digambar beberapa kali. Alfanya menyatu sendiri,
+// jadi sudut-sudut yang transparan tidak menggambar kotak.
+let layar = Canvas::new(96, 48, "layar")
+canvas::clear(layar, 0xFF102030)
+for i in [0, 1, 2, 3, 4] {
+    canvas::blit(layar, sprite, 4 + i * 18, 8 + i * 4)
+}
+
+// Sebagian sprite saja — bentuk yang dipakai lembar-sprite.
+canvas::blit_region(layar, sprite, 0, 0, 8, 8, 4, 34)
+
+canvas::save_png(layar, "/tmp/jrg_layar.png")
+wok("ditulis: /tmp/jrg_layar.png")

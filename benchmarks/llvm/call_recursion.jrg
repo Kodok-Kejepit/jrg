@@ -1,0 +1,51 @@
+package main
+
+// function-call-heavy + recursion: naive binary-recursive fib (call overhead
+// + stack frames, deliberately not memoized), plus a chain of small …
+
+fn fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn ack_lite(m: int, n: int) -> int {
+    if m == 0 {
+        return n + 1
+    }
+    if n == 0 {
+        return ack_lite(m - 1, 1)
+    }
+    return ack_lite(m - 1, ack_lite(m, n - 1))
+}
+
+fn step_a(v: int) -> int {
+    return v * 3 + 1
+}
+
+fn step_b(v: int) -> int {
+    return step_a(v) ^ (v >> 2)
+}
+
+fn step_c(v: int) -> int {
+    return step_b(v) + step_a(v >> 1)
+}
+
+fn chain(v: int) -> int {
+    return step_c(step_b(step_a(v)))
+}
+
+pub fn main() {
+    let iterations: int = 20000000
+    var acc: int = 0
+
+    for i in 0..(iterations) {
+        acc = (acc + chain(i)) % 1000000007
+    }
+
+    acc = acc + fib(39)
+    acc = acc + ack_lite(2, 8)
+
+    wok(acc)
+}

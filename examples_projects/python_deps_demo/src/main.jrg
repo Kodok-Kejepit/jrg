@@ -1,0 +1,23 @@
+// JawaRustGo++ — Demo: auto-install Python dependency lewat jrgm
+package main
+
+import "std/fmt"
+
+pub fn main() {
+    wok("=== random — bagian dari Python sendiri, gak butuh install ===")
+    match py::call("random", "randint", 1, 100) {
+        Ok(v)  => wok("random.randint(1, 100) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== requests — third-party, jrgm pasang otomatis kalau belum ada ===")
+    py::import("requests")
+    match py::eval("requests.get('https://pypi.org/pypi/pip/json').status_code") {
+        Ok(v)  => wok("GET https://pypi.org/pypi/pip/json -> status_code =", v),
+        Err(e) => wok("gagal (perlu koneksi internet):", e),
+    }
+
+    wok("")
+    wok("Selesai — dua library ini kepake tanpa satu baris pun deklarasi manual.")
+}

@@ -1,0 +1,374 @@
+package main
+
+// Uji perintah editor: tiap skenario menekan tombol seperti pemakai, lalu memeriksa isi
+// penyangga, kursor, pesan, dan dialognya — tanpa terminal.
+import "sunting/keadaan"
+import "sunting/penyangga"
+import "sunting/perintah"
+import "sunting/dialog"
+import "sunting/daftar"
+
+fn buat(baris) {
+    var e = keadaan::baru([penyangga::baru("", baris)])
+    e.lebar = 60
+    e.tinggi = 20
+    e.bawaan = ["str::", "str::len", "str::lower", "wok", "wok_"]
+    return e
+}
+
+fn tekan(e, tombol) {
+    var x = e
+    for _, t in tombol { x = perintah::tangani(x, t) }
+    return x
+}
+
+fn ketik(e, teks) {
+    var x = e
+    for _, c in str::chars(teks) { x = perintah::tangani(x, "" + c) }
+    return x
+}
+
+fn isi(e) { return keadaan::kini(e).baris }
+fn kursor(e) { return [keadaan::kini(e).br, keadaan::kini(e).kol] }
+
+fn test_mengetik_enter_urung_ulang() {
+    var e = ketik(buat([]), "fn f() {")
+    // Kurung dan kurawal menutup sendiri; Enter di antaranya membuka blok berindentasi.
+    assert_eq(isi(e), ["fn f() {}"])
+    e = tekan(e, ["enter"])
+    assert_eq(isi(e), ["fn f() {", "    ", "}"])
+    assert_eq(kursor(e), [1, 4])
+    e = ketik(e, "wok(1)")
+    assert_eq(isi(e)[1], "    wok(1)")
+    e = tekan(e, ["ctrl-z"])
+    assert_eq(e.pesan, "diurungkan")
+    assert(isi(e)[1] != "    wok(1)")
+    e = tekan(e, ["ctrl-y"])
+    assert_eq(isi(e)[1], "    wok(1)")
+    // Tidak ada lagi yang bisa diulangi: dilaporkan, bukan diam.
+    e = tekan(e, ["ctrl-y"])
+    assert_eq(e.pesan, "tidak ada yang bisa diulangi")
+}
+
+fn test_seleksi_salin_potong_tempel() {
+    var e = buat(["satu dua", "tiga"])
+    e = tekan(e, ["shift-kanan", "shift-kanan", "shift-kanan", "shift-kanan", "ctrl-c"])
+    assert_eq(e.papan, "satu")
+    assert_eq(e.papan_baris, false)
+    // Papan tempel sistem diisi lewat OSC 52 (base64 dari "satu").
+    assert_eq(e.kirim, "\u001b]52;c;c2F0dQ==\u0007")
+    assert(str::contains(e.pesan, "disalin"), e.pesan)
+    e = tekan(e, ["end", "ctrl-v"])
+    assert_eq(isi(e), ["satu duasatu", "tiga"])
+    // Tanpa seleksi, ^X memotong BARIS; ^V menempelkannya sebagai baris utuh.
+    e = tekan(e, ["bawah", "ctrl-x"])
+    assert_eq(isi(e), ["satu duasatu"])
+    assert_eq(e.papan_baris, true)
+    e = tekan(e, ["ctrl-v", "ctrl-v"])
+    assert_eq(isi(e), ["tiga", "tiga", "satu duasatu"])
+}
+
+fn test_mode_blok_memilih_tanpa_shift() {
+    var e = buat(["abcdef", "ghi"])
+    e = tekan(e, ["ctrl-b", "kanan", "kanan", "bawah"])
+    assert(e.menandai)
+    assert_eq(penyangga::teks_seleksi(keadaan::kini(e)), "abcdef\ngh")
+    e = tekan(e, ["ctrl-x"])
+    assert_eq(isi(e), ["i"])
+    assert(!e.menandai)
+    assert_eq(e.papan, "abcdef\ngh")
+}
+
+fn test_cari_sambil_mengetik_dan_batal_kembali() {
+    var e = buat(["alfa", "beta gama", "gama delta", "alfa"])
+    e = tekan(e, ["bawah", "ctrl-f"])
+    assert(dialog::aktif(e.dialog))
+    e = ketik(e, "ga")
+    // Hasil pertama di atau sesudah kursor semula (baris 1), langsung dilompati.
+    assert_eq(kursor(e), [1, 5])
+    e = tekan(e, ["enter"])
+    assert(!dialog::aktif(e.dialog))
+    assert_eq(e.pesan, "ketemu di baris 2 (1 dari 2)")
+    e = tekan(e, ["ctrl-g"])
+    assert_eq(kursor(e), [2, 0])
+    assert_eq(e.pesan, "ketemu di baris 3 (2 dari 2)")
+    e = tekan(e, ["alt-g"])
+    assert_eq(kursor(e), [1, 5])
+    // Tidak ketemu: kursor tetap, dan itu dikatakan.
+    e = tekan(e, ["ctrl-f"])
+    e = ketik(e, "zzz")
+    e = tekan(e, ["enter"])
+    assert_eq(e.pesan, "tidak ketemu: zzz")
+    assert(e.pesan_galat)
+    assert_eq(kursor(e), [1, 5])
+    // Esc di tengah pencarian mengembalikan kursor DAN pola yang lama.
+    e = tekan(e, ["ctrl-f"])
+    e = ketik(e, "delta")
+    assert_eq(kursor(e), [2, 5])
+    e = tekan(e, ["esc"])
+    assert_eq(kursor(e), [1, 5])
+    assert_eq(e.cari, "zzz")
+}
+
+fn test_ganti_satu_per_satu_dan_semuanya() {
+    var e = buat(["a x a", "x", "a"])
+    e = tekan(e, ["ctrl-p"])
+    e = ketik(e, "a")
+    e = tekan(e, ["enter"])
+    assert_eq(e.dialog.jenis, "ganti_dengan")
+    e = ketik(e, "BB")
+    e = tekan(e, ["enter"])
+    assert_eq(e.dialog.jenis, "ganti_tanya")
+    assert_eq(kursor(e), [0, 0])
+    // Ya, tidak, ya: yang kedua dilewati dan TETAP `a`.
+    e = tekan(e, ["y"])
+    assert_eq(kursor(e), [0, 5])
+    e = tekan(e, ["t", "y"])
+    assert_eq(isi(e), ["BB x a", "x", "BB"])
+    assert_eq(e.pesan, "2 diganti")
+    assert(!dialog::aktif(e.dialog))
+    // Seluruh sesi ganti satu langkah urung.
+    e = tekan(e, ["ctrl-z"])
+    assert_eq(isi(e), ["a x a", "x", "a"])
+    // "Semua" di pertanyaan pertama mengganti seluruh berkas.
+    e = tekan(e, ["ctrl-p"])
+    e = ketik(e, "x")
+    e = tekan(e, ["enter"])
+    e = ketik(e, "y")
+    e = tekan(e, ["enter", "s"])
+    assert_eq(isi(e), ["a y a", "y", "a"])
+    assert_eq(e.pesan, "2 diganti")
+    // Pola yang tidak ada berhenti sebelum menanyakan penggantinya.
+    e = tekan(e, ["ctrl-p"])
+    // Pola terakhir ditawarkan di label, bukan diisikan: mengetik mulai dari kosong.
+    assert_eq(e.dialog.label, "Ganti [x]")
+    assert_eq(e.dialog.isi, "")
+    e = ketik(e, "qq")
+    e = tekan(e, ["enter"])
+    assert_eq(e.pesan, "tidak ketemu: qq")
+    assert(!dialog::aktif(e.dialog))
+}
+
+fn test_ganti_dengan_teks_yang_memuat_polanya_berhenti() {
+    // `a` -> `aa`: tiap kemunculan cuma diganti sekali, bukan berputar selamanya.
+    var e = buat(["a a"])
+    e = tekan(e, ["ctrl-p"])
+    e = ketik(e, "a")
+    e = tekan(e, ["enter"])
+    e = ketik(e, "aa")
+    e = tekan(e, ["enter", "y", "y"])
+    assert_eq(isi(e), ["aa aa"])
+    assert_eq(e.pesan, "2 diganti")
+}
+
+fn test_ke_baris() {
+    var e = buat(["a", "b", "ccc"])
+    e = tekan(e, ["ctrl-l"])
+    e = ketik(e, "3:2")
+    e = tekan(e, ["enter"])
+    assert_eq(kursor(e), [2, 1])
+    e = tekan(e, ["ctrl-l"])
+    e = ketik(e, "9")
+    e = tekan(e, ["enter"])
+    assert_eq(e.pesan, "baris 9 tidak ada — berkas ini 3 baris")
+    assert_eq(kursor(e), [2, 1])
+    e = tekan(e, ["ctrl-l"])
+    e = ketik(e, "dua")
+    e = tekan(e, ["enter"])
+    assert(str::contains(e.pesan, "bukan nomor baris"), e.pesan)
+}
+
+fn test_keluar_menanyakan_yang_belum_tersimpan() {
+    var e = buat(["a"])
+    e = tekan(e, ["ctrl-q"])
+    assert(e.selesai)
+    var f = ketik(buat(["a"]), "x")
+    f = tekan(f, ["ctrl-q"])
+    assert(!f.selesai)
+    assert_eq(f.dialog.jenis, "keluar_tanya")
+    assert(str::contains(f.dialog.label, "BELUM TERSIMPAN"), f.dialog.label)
+    // Batal: tetap di editor, isinya utuh.
+    let g = tekan(f, ["b"])
+    assert(!g.selesai)
+    assert_eq(isi(g), ["xa"])
+    // Tidak: keluar tanpa menyimpan.
+    assert(tekan(f, ["t"]).selesai)
+    // Ya, tapi berkasnya belum bernama: TIDAK keluar, dan sebabnya disebut.
+    let h = tekan(f, ["y"])
+    assert(!h.selesai)
+    assert(str::contains(h.pesan, "belum bernama"), h.pesan)
+}
+
+fn test_simpan_buka_dan_gagal_simpan_tidak_mematikan() {
+    let dir = fs::join(fs::temp_dir(), "jrgedit_uji_" + str::to_string(proses::pid()))
+    let _ = fs::mkdir(dir)
+    let satu = fs::join(dir, "satu.jrg")
+    var e = ketik(buat([]), "wok(1)")
+    // Belum bernama: ^S menanyakan nama.
+    e = tekan(e, ["ctrl-s"])
+    assert_eq(e.dialog.jenis, "simpan_sebagai")
+    e = ketik(e, satu)
+    e = tekan(e, ["enter"])
+    assert(str::starts_with(e.pesan, "tersimpan"), e.pesan)
+    assert_eq(file::read(satu).unwrap(), "wok(1)\n")
+    assert(!keadaan::kini(e).kotor)
+    assert_eq(keadaan::kini(e).nama, satu)
+    // Berkas kedua dibuka di penyangga baru; yang pertama tetap ada.
+    let dua = fs::join(dir, "dua.txt")
+    let _ = file::write(dua, "baris a\r\nbaris b\r\n")
+    e = tekan(e, ["ctrl-o"])
+    e = ketik(e, dua)
+    e = tekan(e, ["enter"])
+    assert_eq(len(e.berkas), 2)
+    assert_eq(isi(e), ["baris a", "baris b"])
+    assert(keadaan::kini(e).crlf)
+    assert(!keadaan::kini(e).bersorot)
+    // Akhir baris Windows ditulis kembali apa adanya.
+    e = tekan(e, ["end"])
+    e = ketik(e, "!")
+    e = tekan(e, ["ctrl-s"])
+    assert_eq(file::read(dua).unwrap(), "baris a!\r\nbaris b\r\n")
+    e = tekan(e, ["alt-kiri"])
+    assert_eq(keadaan::kini(e).nama, satu)
+    // Membuka yang sudah terbuka cuma pindah ke sana.
+    e = tekan(e, ["ctrl-o"])
+    e = ketik(e, dua)
+    e = tekan(e, ["enter"])
+    assert_eq(len(e.berkas), 2)
+    assert_eq(e.aktif, 1)
+    // Menyimpan ke tempat yang tidak bisa ditulis: pesan, bukan mati; isi dan nama utuh.
+    e = ketik(e, "?")
+    e = tekan(e, ["alt-s", "ctrl-u"])
+    e = ketik(e, "/proc/tidak_bisa/x.txt")
+    e = tekan(e, ["enter"])
+    assert(e.pesan_galat, e.pesan)
+    assert(str::contains(e.pesan, "tidak tersimpan"), e.pesan)
+    assert_eq(keadaan::kini(e).nama, dua)
+    assert(keadaan::kini(e).kotor)
+    // Menutup berkas yang berubah menanyakan dulu.
+    e = tekan(e, ["ctrl-w"])
+    assert_eq(e.dialog.jenis, "tutup_tanya")
+    e = tekan(e, ["t"])
+    assert_eq(len(e.berkas), 1)
+    // Direktori dan berkas yang tidak ada.
+    e = tekan(e, ["ctrl-o"])
+    e = ketik(e, dir)
+    e = tekan(e, ["enter"])
+    assert_eq(e.daftar.jenis, "jelajah")
+    assert(len(e.daftar.butir) >= 2)
+    e = tekan(e, ["esc"])
+    let _ = file::delete(satu)
+    let _ = file::delete(dua)
+    let _ = fs::delete(dir)
+}
+
+fn test_pelengkapan() {
+    var e = ketik(buat(["let jumlah = 1", ""]), "")
+    e = tekan(e, ["bawah"])
+    e = ketik(e, "ju")
+    // Satu calon: langsung dilengkapi.
+    e = tekan(e, ["ctrl-spasi"])
+    assert_eq(isi(e)[1], "jumlah")
+    e = tekan(e, ["enter"])
+    e = ketik(e, "wo")
+    e = tekan(e, ["ctrl-spasi"])
+    assert_eq(e.lengkap, ["wok", "wok_"])
+    // Panah memilih, Tab menerima.
+    e = tekan(e, ["bawah", "tab"])
+    assert_eq(isi(e)[2], "wok_")
+    assert_eq(e.lengkap, [])
+    // Mengetik selagi kotaknya terbuka menyaring calonnya.
+    e = tekan(e, ["enter"])
+    e = ketik(e, "str::l")
+    e = tekan(e, ["ctrl-spasi"])
+    assert_eq(e.lengkap, ["str::len", "str::lower"])
+    e = ketik(e, "o")
+    assert_eq(e.lengkap, ["str::lower"])
+    e = tekan(e, ["esc"])
+    assert_eq(e.lengkap, [])
+    assert_eq(isi(e)[3], "str::lo")
+    // Tanpa awalan: pesan, bukan kotak kosong.
+    e = tekan(e, ["enter", "ctrl-spasi"])
+    assert(str::contains(e.pesan, "ketik awal sebuah nama"), e.pesan)
+}
+
+fn test_tetikus() {
+    var e = buat(["satu dua tiga", "empat", "lima"])
+    // Kolom nomor 5 kolom; baris teks pertama ada di baris layar 2.
+    e = tekan(e, ["tetikus:kiri:11:2"])
+    assert_eq(kursor(e), [0, 5])
+    e = tekan(e, ["tetikus:seret:14:3"])
+    assert_eq(penyangga::teks_seleksi(keadaan::kini(e)), "dua tiga\nempat")
+    // Klik di luar area teks (baris judul) tidak memindahkan apa pun.
+    let f = tekan(e, ["tetikus:kiri:3:1"])
+    assert_eq(kursor(f), kursor(e))
+    // Klik ganda memilih kata.
+    var g = buat(["satu dua tiga"])
+    g = tekan(g, ["tetikus:kiri:11:2", "tetikus:kiri:11:2"])
+    assert_eq(penyangga::teks_seleksi(keadaan::kini(g)), "dua")
+    // Roda menggulung tampilan tanpa memindahkan kursor.
+    var baris = []
+    for _, i in range(0, 60) { baris = baris + ["baris " + str::to_string(i)] }
+    var h = buat(baris)
+    h = tekan(h, ["tetikus:roda-bawah:5:5", "tetikus:roda-bawah:5:5"])
+    assert_eq(keadaan::kini(h).atas, 6)
+    assert_eq(kursor(h), [0, 0])
+    h = tekan(h, ["tetikus:roda-atas:5:5", "tetikus:roda-atas:5:5", "tetikus:roda-atas:5:5"])
+    assert_eq(keadaan::kini(h).atas, 0)
+}
+
+fn test_tempelan_tidak_diindentasi_ulang() {
+    var e = ketik(buat([]), "fn f() {")
+    e = tekan(e, ["enter", "tempel:let a = 1\n    let b = 2\nwok(a)"])
+    // Baris tempelan masuk apa adanya: tidak ada indentasi yang menumpuk.
+    assert_eq(isi(e), ["fn f() {", "    let a = 1", "    let b = 2", "wok(a)", "}"])
+    e = tekan(e, ["tempel-terpotong:x"])
+    assert(e.pesan_galat)
+}
+
+fn test_garis_besar_esc_dan_bantuan() {
+    var e = buat(["fn satu() {", "}", "fn dua() {", "}"])
+    e = tekan(e, ["bawah", "bawah", "bawah", "alt-o"])
+    assert_eq(e.daftar.jenis, "garis")
+    // Pilihan awal: deklarasi terakhir di atas kursor.
+    assert_eq(daftar::terpilih(e.daftar), Option::Some(3))
+    e = tekan(e, ["atas", "enter"])
+    assert_eq(kursor(e), [0, 0])
+    // Esc tanpa apa pun untuk dibatalkan membuka daftar tombol; Esc lagi menutupnya.
+    e = tekan(e, ["esc"])
+    assert_eq(e.daftar.jenis, "bantuan")
+    assert(str::contains(e.daftar.judul, "daftar tombol"), e.daftar.judul)
+    e = tekan(e, ["esc"])
+    assert(!daftar::aktif(e.daftar))
+    // Dengan seleksi, Esc cuma melepas seleksinya.
+    e = tekan(e, ["shift-kanan", "esc"])
+    assert(!daftar::aktif(e.daftar))
+    assert(!penyangga::ada_seleksi(keadaan::kini(e)))
+}
+
+fn test_baca_saja_menolak_suntingan() {
+    var e = buat(["tetap"])
+    var p = keadaan::kini(e)
+    p.hanya_baca = true
+    e = keadaan::ganti(e, p)
+    e = ketik(e, "x")
+    assert_eq(isi(e), ["tetap"])
+    assert(e.pesan_galat)
+    e = tekan(e, ["ctrl-k"])
+    assert_eq(isi(e), ["tetap"])
+}
+
+fn test_riwayat_dialog() {
+    var e = buat(["alfa beta", "gama"])
+    e = tekan(e, ["ctrl-f"])
+    e = ketik(e, "beta")
+    e = tekan(e, ["enter", "ctrl-f"])
+    e = ketik(e, "gama")
+    e = tekan(e, ["enter", "ctrl-f", "atas"])
+    assert_eq(e.dialog.isi, "gama")
+    e = tekan(e, ["atas"])
+    assert_eq(e.dialog.isi, "beta")
+    // Enter dengan isi kosong mengulang pencarian terakhir.
+    e = tekan(e, ["esc", "ctrl-home", "ctrl-f", "enter"])
+    assert_eq(kursor(e), [1, 0])
+}

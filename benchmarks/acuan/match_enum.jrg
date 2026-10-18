@@ -1,0 +1,15 @@
+enum Op { Tambah(int), Kali(int), Nol }
+fn terap(op, v) {
+    return match op {
+        Op::Tambah(n) => v + n,
+        Op::Kali(n) => (v * n) % 1000003,
+        Op::Nol => 0,
+    }
+}
+let ops = [Op::Tambah(3), Op::Kali(7), Op::Tambah(11), Op::Kali(2)]
+var v = 1
+for i in 0..400000 {
+    v = terap(ops[i % 4], v)
+    if v == 0 { v = 1 }
+}
+wok(v)

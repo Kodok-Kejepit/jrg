@@ -1,0 +1,67 @@
+// JawaRustGo++ — Demo: FFI (Foreign Function Interface)
+package main
+
+import "std/fmt"
+
+// Tanpa nama library: simbol dicari di symbol table proses itu sendiri —
+// cukup untuk memanggil fungsi libc yang sudah ter-link ke interpreter …
+extern "C" {
+    fn abs(n: i32) -> i32
+    fn getpid() -> i32
+    fn strlen(s: string) -> i64
+}
+
+// Dengan nama library eksplisit: di-load lewat dlopen saat program mulai.
+extern "C" "libm.so.6" {
+    fn sqrt(x: f64) -> f64
+    fn pow(base: f64, exp: f64) -> f64
+}
+
+pub fn main() {
+    wok("=== FFI: memanggil fungsi C asli ===")
+
+    match abs(-42) {
+        Ok(v)  => wok("abs(-42) =", v),
+        Err(e) => wok("abs(-42) gagal:", e),
+    }
+
+    match getpid() {
+        Ok(pid) => wok("PID proses ini:", pid),
+        Err(e)  => wok("getpid() gagal:", e),
+    }
+
+    match strlen("JawaRustGo++") {
+        Ok(n)  => wok("strlen(\"JawaRustGo++\") =", n),
+        Err(e) => wok("strlen gagal:", e),
+    }
+
+    wok("")
+    wok("=== FFI: library eksternal (libm) ===")
+    let akar = sqrt(2.0)
+    match akar {
+        Ok(v)  => wok("sqrt(2.0) =", v),
+        Err(e) => wok("sqrt(2.0) tidak bisa dipanggil:", e),
+    }
+
+    let pangkat = pow(2.0, 10.0)
+    match pangkat {
+        Ok(v)  => wok("pow(2.0, 10.0) =", v),
+        Err(e) => wok("pow(2.0, 10.0) tidak bisa dipanggil:", e),
+    }
+
+    wok("")
+    wok("=== FFI: error ditangani lewat Result, bukan crash ===")
+    // Memanggil simbol yang sengaja tidak ada — programnya tetap jalan
+    // sampai akhir, hanya dapat Err yang menjelaskan alasannya.
+    match fungsi_yang_tidak_ada() {
+        Ok(_)  => wok("(seharusnya tidak pernah sampai sini)"),
+        Err(e) => wok("seperti yang diharapkan, dapat Err:", e),
+    }
+
+    wok("")
+    wok("Selesai — FFI bekerja, dan setiap kegagalan tertangani rapi.")
+}
+
+extern "C" {
+    fn fungsi_yang_tidak_ada() -> i32
+}

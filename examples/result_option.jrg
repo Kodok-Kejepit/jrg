@@ -1,0 +1,89 @@
+// JawaRustGo++ — Demo: Result<T, E> dan Option<T>
+package main
+
+import "std/fmt"
+
+// `bagi` mengembalikan Result<f64, string>: Ok(hasil) jika berhasil,
+// Err(pesan) jika tidak (di sini, pembagian dengan nol).
+fn bagi(a: f64, b: f64) -> Result<f64, string> {
+    if b == 0.0 {
+        return Err("tidak bisa bagi dengan nol")
+    }
+    return Ok(a / b)
+}
+
+// `cari_genap` mengembalikan Option<int>: Some(angka) kalau ketemu,
+// None kalau tidak ada satupun angka genap di `data`.
+fn cari_genap(data: array) -> Option<int> {
+    for _, x in data {
+        if x % 2 == 0 {
+            return Some(x)
+        }
+    }
+    return None
+}
+
+// Operator `?` meng-unwrap nilai Ok/Some secara otomatis, atau langsung
+// mengembalikan (propagate) Err/None dari `hitung` itu sendiri — persis
+// seperti `?` di Rust. Tidak perlu nested match berlapis-lapis.
+fn hitung(total: f64, jumlah_data: f64, pembagi: f64) -> Result<f64, string> {
+    let rata = bagi(total, jumlah_data)?
+    let hasil = bagi(rata, pembagi)?
+    return Ok(hasil)
+}
+
+pub fn main() {
+    wok("=== Result<T, E> ===")
+
+    let hasil1 = bagi(10.0, 2.0)
+    match hasil1 {
+        Ok(v)  => wok("10 / 2 =", v),
+        Err(e) => wok("error:", e),
+    }
+
+    let hasil2 = bagi(10.0, 0.0)
+    match hasil2 {
+        Ok(v)  => wok("10 / 0 =", v),
+        Err(e) => wok("error:", e),
+    }
+
+    // Method-method bawaan Result, tanpa perlu match setiap saat.
+    wok("hasil1.is_ok()         :", hasil1.is_ok())
+    wok("hasil2.is_err()        :", hasil2.is_err())
+    wok("hasil1.unwrap()        :", hasil1.unwrap())
+    wok("hasil2.unwrap_or(-1.0) :", hasil2.unwrap_or(-1.0))
+
+    // map(): transformasi nilai sukses tanpa unwrap manual; kalau Err,
+    // map() tidak melakukan apa-apa dan Err-nya diteruskan apa adanya.
+    let dilipatduakan = bagi(20.0, 4.0).map(fn(v) => v * 2.0)
+    wok("bagi(20,4) lalu .map(x2):", dilipatduakan)
+
+    wok("")
+    wok("=== Operator `?` untuk propagasi error otomatis ===")
+    let final1 = hitung(100.0, 10.0, 2.0)
+    match final1 {
+        Ok(v)  => wok("hitung(100,10,2) =", v),
+        Err(e) => wok("hitung(100,10,2) gagal:", e),
+    }
+    let final2 = hitung(100.0, 10.0, 0.0)
+    match final2 {
+        Ok(v)  => wok("hitung(100,10,0) =", v),
+        Err(e) => wok("hitung(100,10,0) gagal:", e),
+    }
+
+    wok("")
+    wok("=== Option<T> ===")
+    let angka = [1, 3, 5, 8, 9, 11]
+    match cari_genap(angka) {
+        Some(n) => wok("angka genap pertama di", angka, ":", n),
+        None    => wok("tidak ada angka genap"),
+    }
+
+    let semua_ganjil = [1, 3, 5, 7]
+    let genap2 = cari_genap(semua_ganjil)
+    wok("genap2.is_none()    :", genap2.is_none())
+    wok("genap2.unwrap_or(0) :", genap2.unwrap_or(0))
+
+    wok("")
+    wok("Selesai — tidak ada satupun nilai nil yang lolos tanpa dicek!")
+}

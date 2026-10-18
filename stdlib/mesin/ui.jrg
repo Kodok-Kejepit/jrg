@@ -1,0 +1,82 @@
+package std_mesin_ui
+
+// Antarmuka sederhana di atas kanvas: teks, tombol yang bisa diklik, dan bilah.
+// Gambar UI SESUDAH `kamera.lepas(c)`, supaya ia menempel di layar.
+import "std/mesin/fisika"
+
+/// Tulis `teks` di `(x, y)` dengan skala font `skala` (1 = 5x7 piksel per huruf).
+pub fn label(c, x, y, teks, skala, w) {
+    canvas::draw_text_scaled(c, x, y, str(teks), skala, w)
+}
+
+/// Lebar piksel `teks` pada skala `skala` — untuk meratakan tengah.
+pub fn lebar_teks(teks, skala) { return len(str(teks)) * 6 * skala }
+
+pub struct Tombol { pub kotak: fisika::Kotak, pub teks: string }
+
+/// Tombol di kotak `(x, y, w, h)` bertuliskan `teks`.
+pub fn tombol(x, y, w, h, teks) {
+    if typeof(teks) != "string" { panik("ui::tombol: teks harus teks, dapat `" + typeof(teks) + "`") }
+    return Tombol { kotak: fisika::kotak(x, y, w, h), teks: teks }
+}
+
+impl Tombol {
+    /// Tetikus sedang di atasnya.
+    pub fn disorot(self, m) { return self.kotak.berisi(m.tetikus) }
+    /// Tombol kiri tetikus BARU ditekan di atasnya.
+    pub fn diklik(self, m) { return self.disorot(m) && m.tetikus_tekan(0) }
+    /// Gambar tombolnya; warnanya lebih terang saat disorot.
+    pub fn gambar(self, c, m, dasar, tulisan) {
+        let isi = self.disorot(m) $ dasar.terang(0.25) : dasar
+        let k = self.kotak
+        canvas::fill_rect(c, k.x, k.y, k.w, k.h, isi)
+        canvas::draw_rect(c, k.x, k.y, k.w, k.h, dasar.gelap(0.4))
+        let tx = k.x + (k.w - (lebar_teks(self.teks, 1) as float)) / 2.0
+        let ty = k.y + (k.h - 7.0) / 2.0
+        canvas::draw_text(c, tx, ty, self.teks, tulisan)
+    }
+}
+
+/// Bilah kemajuan: kotak `(x, y, w, h)` terisi sebagian `nilai` (0 sampai 1).
+pub fn bilah(c, x, y, w, h, nilai, isi, latar) {
+    if typeof(nilai) != "int" && typeof(nilai) != "float" { panik("ui::bilah: nilai harus angka, dapat `" + typeof(nilai) + "`") }
+    let t = math::clamp(nilai as float, 0.0, 1.0)
+    canvas::fill_rect(c, x, y, w, h, latar)
+    canvas::fill_rect(c, x, y, (w as float) * t, h, isi)
+}
+
+/// Menu pilihan yang dinavigasi papan tik: Up/Down (atau W/S) berpindah dan berputar,
+/// Enter/Space memilih.
+pub struct Menu { pub pilihan: []string, pub aktif: int = 0 }
+
+/// Menu dari daftar teks yang tidak kosong.
+pub fn menu(pilihan) -> Menu {
+    if typeof(pilihan) != "array" || len(pilihan) == 0 {
+        panik("ui::menu: pilihan harus array teks yang tidak kosong")
+    }
+    for i, p in pilihan {
+        if typeof(p) != "string" { panik("ui::menu: pilihan ke-" + str(i) + " harus teks, dapat `" + typeof(p) + "`") }
+    }
+    return Menu { pilihan: pilihan }
+}
+
+impl Menu {
+    /// Satu langkah dengan masukan `m`: menjawab `(menu_baru, Option<nomor yang dipilih>)`.
+    pub fn perbarui(self, m) -> (Menu, Option<int>) {
+        let n = len(self.pilihan)
+        var a = self.aktif
+        if m.tekan("Up") || m.tekan("W") { a = (a + n - 1) % n }
+        if m.tekan("Down") || m.tekan("S") { a = (a + 1) % n }
+        let baru = Menu { pilihan: self.pilihan, aktif: a }
+        if m.tekan("Enter") || m.tekan("Space") { return (baru, Option::Some(a)) }
+        return (baru, Option::None)
+    }
+    /// Gambar tiap pilihan di bawah `(x, y)`, yang aktif dengan warna `sorot` dan tanda `>`.
+    pub fn gambar(self, c, x, y, w, sorot) {
+        for i, p in self.pilihan {
+            let aktif = i == self.aktif
+            let teks: string = aktif $ "> " + p : "  " + p
+            canvas::draw_text(c, x, y + i * 10, teks, aktif $ sorot : w)
+        }
+    }
+}

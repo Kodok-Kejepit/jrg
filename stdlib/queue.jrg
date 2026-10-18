@@ -1,0 +1,58 @@
+package std_queue
+
+// Antrean FIFO di atas satu array dan indeks kepalanya: `push`, `rest` dan `peek` O(1).
+// `T` tipe isinya. Bentuk yang linear: `q = q.push(x)` dan `let v = q.peek(); q = q.rest()`.
+pub struct Queue<T> { pub isi: []T, pub kepala: int }
+
+/// Antrean FIFO yang kosong.
+pub fn new<T>() -> Queue<T> { return Queue { isi: [], kepala: 0 } }
+/// Antrean FIFO dari sebuah array.
+pub fn from<T>(a: []T) -> Queue<T> { return Queue { isi: a, kepala: 0 } }
+
+impl<T> Queue<T> {
+    /// Masukkan ke belakang antrean. Tulis `q = q.push(x)`.
+    pub fn push(self, x: T) -> Queue<T> {
+        self.isi += [x]
+        return self
+    }
+
+    /// Berapa isinya.
+    pub fn len(self) -> int { return len(self.isi) - self.kepala }
+    /// Benar kalau antreannya kosong.
+    pub fn is_empty(self) -> bool { return self.len() == 0 }
+
+    /// Lihat yang paling depan tanpa mengambilnya.
+    pub fn peek(self) -> Option<T> { return arr::get(self.isi, self.kepala) }
+
+    // Awalan yang sudah lewat dibuang begitu melebihi separuh isi, jadi memorinya
+    // tidak tumbuh terus dan biayanya tetap amortisasi O(1).
+    /// Antrean TANPA yang paling depan. Tulis `q = q.rest()`; antrean kosong tetap kosong.
+    pub fn rest(self) -> Queue<T> {
+        if self.kepala >= len(self.isi) { return self }
+        self.kepala += 1
+        if self.kepala >= 32 && self.kepala * 2 >= len(self.isi) {
+            self.isi = arr::skip(self.isi, self.kepala)
+            self.kepala = 0
+        }
+        return self
+    }
+
+    // Bentuk yang sama dengan `arr::pop`: antrean kosong menjawab `None`, bukan `nil`.
+    /// Ambil dari depan: `(antrean baru, Option berisi nilainya)`. Tulis `q, v = q.pop()`.
+    pub fn pop(self) -> (Queue<T>, Option<T>) {
+        let v = self.peek()
+        self = self.rest()
+        return (self, v)
+    }
+
+    /// Isinya sebagai array, urut dari depan.
+    pub fn to_array(self) -> []T { return arr::skip(self.isi, self.kepala) }
+
+    /// Jalankan `f` untuk tiap isi, urut dari depan.
+    pub fn each(self, f: fn(T)) { for _, x in self.to_array() { f(x) } }
+
+    /// Bentuk tampilannya, dipakai `wok`.
+    pub fn to_string(self) -> string {
+        return "Queue" + fmt::sprint(self.to_array())
+    }
+}

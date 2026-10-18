@@ -1,0 +1,61 @@
+package main
+
+/* Pekerja paralel: goroutine mengambil tugas dari satu channel dan menaruh
+   hasilnya di channel lain. `select` menunggu dua sumber sekaligus.
+   Program TIDAK berakhir sebelum semua goroutine selesai — itu sengaja. */
+
+fn berat(n: int) -> int {
+    var jumlah = 0
+    for i in range(1, n + 1) {
+        jumlah = jumlah + i * i
+    }
+    return jumlah
+}
+
+pub fn main() {
+    let tugas = make_chan(int, 16)
+    let hasil = make_chan(string, 16)
+    let angka = [1000, 2500, 500, 4000, 1500, 3000]
+
+    /* tiga pekerja berebut isi satu antrean: siapa yang senggang, dia ambil */
+    for p in range(0, 3) {
+        let nomor = p + 1
+        spawn {
+            loop {
+                let n = <-tugas
+                if n == 0 { break }          /* 0 = tanda berhenti */
+                hasil <- str(n) + "|" + str(berat(n))
+            }
+        }
+    }
+
+    for _, n in angka { tugas <- n }
+    for p in range(0, 3) { tugas <- 0 }        /* tanda berhenti untuk tiap pekerja */
+
+    /* Urutan siapa yang selesai duluan TIDAK ditentukan — itu memang sifat
+       konkurensi. Jadi hasilnya dikumpulkan dulu, baru dicetak urut masukan,
+       supaya keluaran programnya tetap sama tiap kali dijalankan. */
+    var kumpul = dict::new()
+    var diterima = 0
+    loop {
+        if diterima >= len(angka) { break }
+        let bagian = str::split(<-hasil, "|")
+        kumpul[bagian[0]] = bagian[1]
+        diterima = diterima + 1
+    }
+    tugas.close()
+    hasil.close()
+
+    for _, n in angka {
+        wok("  n =", str::pad_left(str(n), 5), "-> jumlah kuadrat =", kumpul[str(n)])
+    }
+    wok("")
+    wok("semua", diterima, "tugas selesai oleh 3 pekerja")
+
+    /* Future: hitung di latar, ambil hasilnya belakangan */
+    let f1 = Future::new(berat, 6000)
+    let f2 = Future::new(berat, 7000)
+    wok("dua hitungan berat jalan bersamaan…")
+    wok("f1 =", future::await(f1))
+    wok("f2 =", future::await(f2))
+}

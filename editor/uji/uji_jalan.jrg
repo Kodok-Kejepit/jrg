@@ -1,0 +1,53 @@
+package main
+
+import "sunting/jalan"
+import "sunting/garis"
+
+fn test_lokasi_galat_dibaca_dari_diagnostik() {
+    let teks = "error[E0103]: nama `f` sudah dipakai\n --> /tmp/a b/x.jrg:12:5\n   |\n12 | fn f() {}\n   |    ^\n\nerror: variabel `q` belum dikenal\n  --> modul.jrg:3:9\n"
+    assert_eq(jalan::urai_galat(teks), [
+        ["/tmp/a b/x.jrg", 12, 5, "nama `f` sudah dipakai"],
+        ["modul.jrg", 3, 9, "variabel `q` belum dikenal"],
+    ])
+    // Galat tanpa lokasi, dan baris `-->` tanpa galat di depannya, tidak menghasilkan apa pun.
+    assert_eq(jalan::urai_galat("error: gagal total\n\n --> yatim.jrg:1:1\n"), [])
+    assert_eq(jalan::urai_galat(""), [])
+    // Nama berkas yang memuat titik dua tetap utuh.
+    assert_eq(jalan::urai_galat("error: x\n --> C:/a/b.jrg:7:2\n"), [["C:/a/b.jrg", 7, 2, "x"]])
+    assert_eq(jalan::urai_galat("error: x\n --> b.jrg:tujuh:2\n"), [])
+}
+
+fn test_catatan_galat_dibaca_per_baris() {
+    assert_eq(jalan::urai_catatan("/a/b.jrg\t3\t7\tpesan satu\n\n/a/c.jrg\t10\t1\tpesan\tber-tab\nrusak\n\tx\ty\tz\n"), [
+        ["/a/b.jrg", 3, 7, "pesan satu"],
+        ["/a/c.jrg", 10, 1, "pesan ber-tab"],
+    ])
+}
+
+fn test_garis_besar() {
+    let b = [
+        "package main",
+        "import \"std/set\"",
+        "const BATAS = 10",
+        "pub struct Titik { pub x: int }",
+        "impl Titik {",
+        "    pub fn geser(self, d) {",
+        "        let baru = self.x + d",
+        "        return Titik { x: baru }",
+        "    }",
+        "}",
+        "fn main() {",
+        "    var n = 0",
+        "    fn bantu() { return 1 }",
+        "}",
+    ]
+    assert_eq(garis::besar(b), [
+        ["const BATAS = 10", 3],
+        ["pub struct Titik", 4],
+        ["impl Titik", 5],
+        ["    pub fn geser(self, d)", 6],
+        ["fn main()", 11],
+        ["    fn bantu()", 13],
+    ])
+    assert_eq(garis::besar([""]), [])
+}

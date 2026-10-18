@@ -1,0 +1,27 @@
+[package]
+name        = "jrgrt"
+version     = "0.2.0"
+edition     = "2021"
+description = "JawaRustGo++ native runtime — linked into every jrgc --emit-llvm compiled binary. no_std + alloc on libc, zero external crates: must build fully offline."
+
+[lib]
+name       = "jrgrt"
+crate-type = ["staticlib"]
+path       = "src/lib.rs"
+
+[dependencies]
+# Intentionally empty. The runtime is linked into every compiled JRG
+# program, so it must build with nothing but the Rust standard library —
+# no crates.io fetch should ever be required just to compile a JRG
+# program on a machine that already has rustc+cargo (the same toolchain
+# jrgc itself needs).
+
+[profile.release]
+opt-level     = 3
+lto           = true
+codegen-units = 1
+panic         = "abort"   # no Rust unwinding crosses the C ABI boundary
+strip         = true
+
+[profile.dev]
+panic = "abort"

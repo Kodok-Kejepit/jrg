@@ -1,0 +1,65 @@
+// Konsol APK untuk program C/C++ yang dibungkus `jrgm apk` (src/jrgm/konsol.rs). Programnya mulai saat
+// halaman dibuka; halaman membaca keluarannya tiap 120 ms dan mengirim tiap baris masukan ke stdin-nya.
+package main
+
+var nomor = -1
+
+fn program() {
+    return fs::join(env::get("JRG_PUSTAKA").unwrap_or("."), "libprogram.so")
+}
+
+fn halaman() {
+    let dir = fs::dirname(env::args()[0])
+    return dok::html(fs::read(fs::join(dir, "index.html")))
+}
+
+fn mulai() {
+    if nomor >= 0 { let _ = proses::hentikan(nomor) }
+    nomor = -1
+    match proses::mulai(program(), []) {
+        Ok(n) => {
+            nomor = n
+            return dok::json_response({"ok": true})
+        }
+        Err(e) => return dok::json_response({"ok": false, "galat": e})
+    }
+}
+
+fn baca() {
+    if nomor < 0 { return dok::json_response({"keluaran": "", "galat": "", "selesai": true, "kode": -1, "jalan": false}) }
+    match proses::baca(nomor) {
+        Ok(h) => {
+            if h["selesai"] { nomor = -1 }
+            return dok::json_response({"keluaran": h["keluaran"], "galat": h["galat"], "selesai": h["selesai"], "kode": h["kode"], "jalan": true})
+        }
+        Err(e) => {
+            nomor = -1
+            return dok::json_response({"keluaran": "", "galat": e + "\n", "selesai": true, "kode": -1, "jalan": true})
+        }
+    }
+}
+
+fn tulis(teks) {
+    if nomor < 0 { return dok::json_response({"ok": false}) }
+    match proses::tulis(nomor, teks) {
+        Ok(_) => return dok::json_response({"ok": true})
+        Err(e) => return dok::json_response({"ok": false, "galat": e})
+    }
+}
+
+fn henti() {
+    if nomor >= 0 { let _ = proses::hentikan(nomor) }
+    return dok::json_response({"ok": true})
+}
+
+pub fn main() {
+    let r = dok::router_new()
+    dok::router_get(r, "/", fn(req) => halaman())
+    dok::router_post(r, "/mulai", fn(req) => mulai())
+    dok::router_get(r, "/baca", fn(req) => baca())
+    dok::router_post(r, "/tulis", fn(req) => tulis(req.body))
+    dok::router_post(r, "/henti", fn(req) => henti())
+    let port = int(env::get("PORT").unwrap_or("8080"))
+    wok("konsol di http://127.0.0.1:" + str(port))
+    dok::serve(r, port, "127.0.0.1")
+}

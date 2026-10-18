@@ -1,0 +1,10 @@
+let xs = range(0, 200000)
+var tot = 0
+for k in 0..5 {
+    let ys = xs.map(|x| x * 2 + k).filter(|x| x % 3 == 0)
+    tot = tot + ys.reduce(|a, b| a + b, 0) % 1000
+}
+let tambah = |a| |b| a + b
+var u = 0
+for i in 0..100000 { u = tambah(i)(1) + u % 7 }
+wok(tot, u)

@@ -1,0 +1,96 @@
+package sunting_lengkap
+
+// Pelengkapan kata: awalan di kiri kursor dicocokkan dengan kata di berkas, kata bahasa,
+// dan nama fungsi bawaan. Murni nilai — kotaknya digambar `layar`, tombolnya `perintah`.
+import "sunting/aksara"
+import "sunting/sorot"
+
+const MAKS_BARIS = 4000
+
+/// Awalan yang sedang diketik di kiri kolom `kol`: huruf, angka, `_`, dan `::`.
+/// Menjawab `[awalan, kolom_mulai]`.
+pub fn awalan(teks, kol) {
+    let k = str::chars(teks)
+    var i = math::min(kol, len(k))
+    while i > 0 {
+        let c = k[i - 1]
+        if aksara::kata(c) {
+            i = i - 1
+        } else if c == ':' && i >= 2 && k[i - 2] == ':' {
+            i = i - 2
+        } else {
+            break
+        }
+    }
+    return [str::slice(teks, i, math::min(kol, len(k))), i]
+}
+
+/// Kata-kata (tiga huruf atau lebih) di sekitar baris `br`, yang terdekat dulu. Berkas
+/// raksasa cuma dibaca `MAKS_BARIS` baris di sekitar kursor.
+pub fn kata_berkas(baris, br) {
+    let n = len(baris)
+    let dari = math::max(br - MAKS_BARIS / 2, 0)
+    let sampai = math::min(dari + MAKS_BARIS, n)
+    var ada = dict::new()
+    var keluar = []
+    // Dari kursor ke atas dulu, lalu ke bawah: yang baru ditulis biasanya yang dicari.
+    var urutan = [arr::join(arr::reverse(baris[dari:math::min(br + 1, sampai)]), "\n")]
+    if br + 1 < sampai { urutan = urutan + [arr::join(baris[br + 1:sampai], "\n")] }
+    for _, teks in urutan {
+        for _, m in re::find_all("[A-Za-z_][A-Za-z0-9_]*", teks) {
+            let w = m["match"]
+            if str::len(w) >= 3 && !dict::has(ada, w) {
+                ada[w] = true
+                keluar = keluar + [w]
+            }
+        }
+    }
+    return keluar
+}
+
+fn cocok(calon, awal, kecil) {
+    if kecil { return str::starts_with(str::lower(calon), awal) }
+    return str::starts_with(calon, awal)
+}
+
+/// Calon pelengkapan untuk `awal`, paling banyak `maks`: kata berkas, lalu kata bahasa,
+/// lalu fungsi bawaan. Tanpa calon yang peka huruf, dicoba lagi tanpa peduli huruf besar.
+pub fn calon(awal, kata, bawaan, maks) {
+    if awal == "" { return [] }
+    var sumber = kata
+    // Dengan `::` di awalan yang dicari pasti nama berkualifikasi: kata bahasa tidak ikut.
+    if !str::contains(awal, "::") { sumber = sumber + arr::sort(sorot::kata_bahasa()) }
+    sumber = sumber + bawaan
+    for _, kecil in [false, true] {
+        let a = kecil $ str::lower(awal) : awal
+        var ada = dict::new()
+        var keluar = []
+        for _, c in sumber {
+            if c != awal && !dict::has(ada, c) && cocok(c, a, kecil) {
+                ada[c] = true
+                keluar = keluar + [c]
+                if len(keluar) >= maks { return keluar }
+            }
+        }
+        if len(keluar) > 0 { return keluar }
+    }
+    return []
+}
+
+/// Nama fungsi bawaan dan awalan namespace-nya (`str::`), dari keluaran
+/// `jrgc --daftar-builtin`. Nama internal (`__…`) dibuang.
+pub fn dari_daftar(teks) {
+    var nama = []
+    var ruang = dict::new()
+    for _, b in str::split(teks, "\n") {
+        let t = str::trim(b)
+        if t != "" && !str::contains(t, "__") {
+            nama = nama + [t]
+            match str::find(t, "::") {
+                Option::Some(i) => { ruang[str::slice(t, 0, i + 2)] = true }
+                Option::None => {}
+            }
+        }
+    }
+    return arr::sort(dict::keys(ruang)) + nama
+}

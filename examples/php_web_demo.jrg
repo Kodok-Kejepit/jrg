@@ -1,0 +1,31 @@
+package main
+
+// php_web_demo.jrg — server web JRG yang merender halamannya dengan templat PHP.
+// Butuh `php` 8.0 ke atas. Server ini MEMBLOKIR; buka http://127.0.0.1:7076/.
+
+const HALAMAN = """<!doctype html>
+<h1>Halo, <?= htmlspecialchars($nama) ?>!</h1>
+<p>Dirender PHP <?= PHP_VERSION ?> untuk server JRG.</p>
+<ul><?php foreach ($menu as $m): ?><li><?= htmlspecialchars($m) ?></li><?php endforeach; ?></ul>"""
+
+pub fn main() {
+    if !php::tersedia() {
+        wok("`php` tidak ada di mesin ini — demo dilewati")
+        return
+    }
+    let r = dok::router_new()
+    dok::router_get(r, "/", |req| {
+        let nama = match dok::query_get(req.query, "nama") {
+            Some(n) => n,
+            None => "dunia",
+        }
+        // Templat PHP TIDAK meloloskan HTML sendiri — htmlspecialchars di atas
+        // yang melakukannya, sama seperti di aplikasi PHP biasa.
+        match php::render_str(HALAMAN, {"nama": nama, "menu": ["beranda", "<tentang>"]}) {
+            Ok(html) => dok::html(html),
+            Err(e) => dok::response(500, e),
+        }
+    })
+    wok("buka http://127.0.0.1:7076/?nama=Ani")
+    dok::serve(r, 7076)
+}

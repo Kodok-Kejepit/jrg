@@ -1,0 +1,10 @@
+// JawaRustGo++ — Demo: Module System (Tier 2)
+package main
+
+import "helpers"
+
+pub fn main() {
+    let hasil = helpers::add(10, 32)
+    wok("10 + 32 =", hasil)
+    wok(helpers::greet("JRG Developer"))
+}

@@ -1,0 +1,12 @@
+struct Titik { pub x: int, pub y: int }
+impl Titik {
+    fn geser(self, dx, dy) { return Titik { x: self.x + dx, y: self.y + dy } }
+    fn jumlah(self) { return self.x + self.y }
+}
+var p = Titik { x: 0, y: 0 }
+var t = 0
+for i in 0..300000 {
+    p = p.geser(1, 2)
+    t = t + p.jumlah() % 5
+}
+wok(p.x, p.y, t)

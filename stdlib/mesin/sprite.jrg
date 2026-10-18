@@ -1,0 +1,96 @@
+package std_mesin_sprite
+
+// Lembar sprite (satu gambar berisi petak-petak berukuran sama) dan animasi
+// bingkai. Menggambar lewat `canvas::blit_region`, jadi ikut transformasi
+// (kamera) dan clip seperti primitif lain.
+
+pub struct Lembar { pub gambar: Canvas, pub w: int, pub h: int, pub kolom: int, pub baris: int }
+
+fn _ukuran(nama, w, h) {
+    if typeof(w) != "int" || typeof(h) != "int" || w <= 0 || h <= 0 {
+        panik(nama + ": ukuran petak harus bilangan bulat positif, dapat " + str(w) + "x" + str(h))
+    }
+}
+
+/// Lembar dari kanvas `c` dengan petak `w` x `h`. Kanvas yang lebih kecil dari satu petak ditolak.
+pub fn dari_kanvas(c, w, h) {
+    if typeof(c) != "canvas" { panik("sprite::dari_kanvas: argumen ke-1 harus kanvas, dapat `" + typeof(c) + "`") }
+    _ukuran("sprite::dari_kanvas", w, h)
+    let kolom = canvas::width(c) / w
+    let baris = canvas::height(c) / h
+    if kolom == 0 || baris == 0 {
+        panik("sprite::dari_kanvas: gambar " + str(canvas::width(c)) + "x" + str(canvas::height(c)) +
+              " lebih kecil dari satu petak " + str(w) + "x" + str(h))
+    }
+    return Lembar { gambar: c, w: w, h: h, kolom: kolom, baris: baris }
+}
+
+/// Lembar dari berkas PNG.
+pub fn muat(path, w, h) { return dari_kanvas(Canvas::load_png(path), w, h) }
+
+impl Lembar {
+    /// Berapa petaknya.
+    pub fn jumlah(self) { return self.kolom * self.baris }
+    /// Gambar petak ke-`i` (dari kiri atas, baris demi baris) di `(x, y)`.
+    pub fn gambar(self, c, i, x, y) {
+        if typeof(i) != "int" || i < 0 || i >= self.jumlah() {
+            panik("sprite::gambar: petak " + str(i) + " tidak ada — lembar ini punya " +
+                  str(self.jumlah()) + " petak (0 sampai " + str(self.jumlah() - 1) + ")")
+        }
+        let sx = (i % self.kolom) * self.w
+        let sy = (i / self.kolom) * self.h
+        canvas::blit_region(c, self.gambar, sx, sy, self.w, self.h, x, y)
+    }
+    /// Seperti `gambar`, dicerminkan mendatar (tokoh yang menghadap kiri) —
+    /// petaknya tetap menempati kotak `(x, y)` yang sama.
+    pub fn gambar_balik(self, c, i, x, y) {
+        canvas::push(c)
+        canvas::translate(c, (x as float) + (self.w as float), y)
+        canvas::scale(c, -1.0, 1.0)
+        self.gambar(c, i, 0, 0)
+        canvas::pop(c)
+    }
+}
+
+/// Animasi: urutan petak, `fps` bingkai per detik, berulang atau berhenti di akhir.
+pub struct Animasi { pub bingkai: []int, pub lama: float, pub waktu: float = 0.0, pub ulang: bool = true }
+
+/// Animasi baru. `bingkai` tidak boleh kosong, `fps` harus positif.
+pub fn animasi(bingkai, fps, ulang) {
+    if typeof(bingkai) != "array" || len(bingkai) == 0 {
+        panik("sprite::animasi: daftar bingkai harus array yang tidak kosong")
+    }
+    if (typeof(fps) != "int" && typeof(fps) != "float") || fps <= 0 {
+        panik("sprite::animasi: fps harus angka positif, dapat " + str(fps))
+    }
+    if typeof(ulang) != "bool" { panik("sprite::animasi: `ulang` harus bool, dapat `" + typeof(ulang) + "`") }
+    return Animasi { bingkai: bingkai, lama: 1.0 / (fps as float), ulang: ulang }
+}
+
+impl Animasi {
+    /// Animasi yang dimajukan `dt` detik.
+    pub fn maju(self, dt) {
+        var a = self
+        a.waktu = self.waktu + (dt as float)
+        return a
+    }
+    /// Petak yang tampil sekarang.
+    pub fn petak(self) {
+        let n = len(self.bingkai)
+        let k = math::floor(self.waktu / self.lama) as int
+        if self.ulang { return self.bingkai[k % n] }
+        if k >= n { return self.bingkai[n - 1] }
+        return self.bingkai[k]
+    }
+    /// Benar kalau animasi tak berulang sudah sampai bingkai terakhirnya.
+    pub fn selesai(self) {
+        if self.ulang { return false }
+        return self.waktu >= self.lama * (len(self.bingkai) as float)
+    }
+    /// Kembali ke bingkai pertama.
+    pub fn ulangi(self) {
+        var a = self
+        a.waktu = 0.0
+        return a
+    }
+}

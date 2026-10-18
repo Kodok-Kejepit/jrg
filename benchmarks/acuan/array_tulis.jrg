@@ -1,0 +1,7 @@
+var a = [0; 50000]
+for k in 0..20 {
+    for i in 0..50000 {
+        a[i] = a[i] + i % 13 + k
+    }
+}
+wok(a[49999], len(a))

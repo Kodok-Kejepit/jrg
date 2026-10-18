@@ -1,0 +1,13 @@
+package main
+
+fn kernel(iterations: int) -> uint {
+    var x: uint = 305419896
+    for i in 0..iterations {
+        x = math::wrap_add(math::wrap_mul(x, 1664525), 1013904223) ^ (x >> 13)
+    }
+    return x
+}
+
+pub fn main() {
+    wok(kernel(200000000))
+}

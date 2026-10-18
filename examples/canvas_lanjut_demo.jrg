@@ -1,0 +1,70 @@
+package main
+
+// ============================================================================
+// Canvas lanjut — anti-alias, transformasi, pemotongan, gradien, PNG.
+
+fn kartu(c, x, y, w, h, isi, warna) {
+    c.fill_round_rect(x + 3.0, y + 3.0, w, h, 14.0, 0x40000000)   // bayangan
+    c.fill_round_rect(x, y, w, h, 14.0, warna)
+    c.draw_round_rect(x, y, w, h, 14.0, 0xFFFFFF)
+    c.draw_text_scaled(x as int + 14, y as int + 14, isi, 2, 0xFFFFFF)
+}
+
+pub fn main() {
+    let L = 640
+    let T = 420
+    let c = Canvas::new(L, T, "wokwok canvas")
+
+    // Latar: gradien linear, lalu cahaya radial di kiri atas
+    c.fill_linear_gradient(0, 0, 0, T, 0x141C2E, 0x2A1830)
+    c.fill_radial_gradient(120.0, 90.0, 260.0, 0x30FFFFFF, 0x00000000)
+
+    kartu(c, 40.0, 40.0, 220.0, 110.0, "WOKWOK", 0xC0A03060)
+    kartu(c, 300.0, 40.0, 220.0, 110.0, "CANVAS", 0xC0306050)
+
+    // Poligon bintang, dibuat dari sudut — bukan koordinat yang diketik
+    var bintang = []
+    var i = 0
+    while i < 10 {
+        let sudut = (i as float) * 36.0 * 3.14159265 / 180.0 - 1.5707963
+        let r = i % 2 == 0 $ 70.0 : 30.0
+        bintang = bintang + [[160.0 + r * math::cos(sudut), 270.0 + r * math::sin(sudut)]]
+        i = i + 1
+    }
+    c.fill_poly(bintang, 0xF0D24A)
+    c.draw_poly(bintang, 0xFFFFFF)
+
+    // Kurva Bezier kubik
+    c.draw_bezier([[260, 340], [340, 200], [440, 400], [560, 250]], 0x60E0FF)
+
+    // Busur dan elips
+    c.draw_arc(470.0, 300.0, 70.0, 200.0, 340.0, 0xFF6080)
+    c.fill_ellipse(470.0, 300.0, 26.0, 26.0, 0xFF6080)
+
+    // Transformasi: deretan kotak yang diputar makin miring
+    var k = 0
+    while k < 8 {
+        c.push()
+        c.translate(70.0 + (k as float) * 68.0, 390.0)
+        c.rotate((k as float) * 11.0)
+        c.scale(1.0 - (k as float) * 0.06, 1.0)
+        c.fill_round_rect(-22.0, -14.0, 44.0, 28.0, 6.0, 0x80FFD060)
+        c.pop()
+        k = k + 1
+    }
+
+    // Pemotongan: garis-garis halus, tapi cuma terlihat di dalam kotak
+    c.clip(300, 170, 260, 60)
+    var g = 0
+    while g < 40 {
+        c.line_aa(290.0 + (g as float) * 8.0, 160.0, 250.0 + (g as float) * 8.0, 240.0, 0x5090FFC0)
+        g = g + 1
+    }
+    c.clip_reset()
+    c.draw_round_rect(300.0, 170.0, 260.0, 60.0, 8.0, 0x60FFFFFF)
+
+    c.draw_text_scaled(40, 190, "aa + transform + clip + gradient", 1, 0xB0C8E0)
+
+    wok("PNG :", c.save_png("/tmp/canvas_demo.png"))
+    wok("BMP :", c.save_bmp("/tmp/canvas_demo.bmp"))
+}

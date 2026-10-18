@@ -1,0 +1,33 @@
+package main
+
+// `pub` di ketiga field ini bukan hiasan: `main` membacanya dari luar, dan
+// field tanpa `pub` bersifat private di JRG.
+struct Envelope {
+    pub value: Option<Record>,
+}
+
+struct Record {
+    pub id: int,
+    pub data: [4]int,
+}
+
+fn checksum(data: array) -> int {
+    var total: int = 0
+    for _, value in data {
+        total += value
+    }
+    total
+}
+
+pub fn main() {
+    let record: Record = Record {
+        id: 17,
+        data: [10, 20, 30, 40],
+    }
+    let envelope: Envelope = Envelope { value: Some(record) }
+    let loaded: Record = envelope.value.unwrap()
+    let middle = loaded.data[1:3]
+
+    wok("record:", loaded.id)
+    wok("middle checksum:", checksum(middle))
+}

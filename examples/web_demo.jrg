@@ -1,0 +1,113 @@
+package main
+
+// ============================================================================
+// web_demo.jrg — aplikasi web kecil yang memakai seluruh lapisan `dok::` …
+
+// Rahasia sesi. Di program sungguhan ini datang dari `env::get("SESSION_KEY")`,
+// bukan dari sumber — sebuah kunci yang ikut ter-commit sama saja dengan tidak
+// ada kunci.
+const KUNCI = "kunci-sesi-contoh-yang-cukup-panjang"
+
+const HALAMAN = «<!doctype html>
+<title>{{ judul }}</title>
+<h1>{{ judul }}</h1>
+{{#if pesan}}<p class=pesan>{{ pesan }}</p>{{/if}}
+<ul>
+{{#each barang}}  <li>{{ @index }}. {{ . }}</li>
+{{/each}}</ul>
+{{#if masuk}}<p>Halo, {{ user }}. <a href="/keluar">Keluar</a></p>
+{{else}}<form method=post action="/masuk">
+  <input name=user><button>Masuk</button>
+</form>{{/if}}»
+
+pub fn main() {
+    wok("=== dok::render — template, HTML diloloskan secara bawaan ===")
+    let data = {
+        "judul": "Toko <b>JRG</b>",
+        "pesan": "",
+        "barang": ["kopi", "gula & susu", "<script>alert(1)</script>"],
+        "masuk": false,
+        "user": ""
+    }
+    match dok::render(HALAMAN, data) {
+        Ok(html) => wok(html)
+        Err(e)   => wok("gagal render:", e)
+    }
+
+    wok("")
+    wok("=== dok::password_hash / verify — PBKDF2-HMAC-SHA256 ===")
+    // Putaran dikecilkan supaya contoh ini cepat; bawaannya 210_000.
+    let simpan = dok::password_hash("rahasia123", 20000)
+    wok("hash    :", str::slice(simpan, 0, 40) + "...")
+    wok("benar   :", dok::password_verify("rahasia123", simpan))
+    wok("salah   :", dok::password_verify("tebakan", simpan))
+    wok("dua hash sandi yang sama beda garam:",
+        dok::password_hash("x", 20000) != dok::password_hash("x", 20000))
+
+    wok("")
+    wok("=== dok::session_encode / decode — sesi bertanda tangan ===")
+    let sesi = dok::session_encode({"user": "budi", "peran": "admin"}, KUNCI)
+    wok("cookie  :", str::slice(sesi, 0, 40) + "...")
+    match dok::session_decode(sesi, KUNCI) {
+        Ok(d)  => wok("terbaca :", d.user, "sebagai", d.peran)
+        Err(e) => wok("gagal   :", e)
+    }
+    // Muatan yang diubah ditolak walau bentuknya masih sah.
+    let titik = str::index_of(sesi, ".").unwrap_or(0)
+    let palsu = "eyJ1c2VyIjoiYWRtaW4ifQ." + str::slice(sesi, titik + 1, str::len(sesi))
+    match dok::session_decode(palsu, KUNCI) {
+        Ok(_)  => wok("BAHAYA  : muatan palsu diterima")
+        Err(e) => wok("dipalsu : ditolak —", e)
+    }
+
+    wok("")
+    wok("=== dok::serve — server dengan middleware (BLOCKING) ===")
+    let r = dok::router_new()
+
+    // Middleware SEBELUM: mencatat tiap request, lalu meneruskannya apa adanya.
+    dok::router_use(r, |req| {
+        dok::log_info(req.method + " " + req.path)
+        return nil                      // nil = lanjut, request tidak berubah
+    })
+
+    // Middleware SEBELUM kedua: menolak, dan itu berhenti di sini — handler
+    // tidak pernah dipanggil.
+    dok::router_use(r, |req| {
+        if str::starts_with(req.path, "/admin") {
+            match dok::cookie_get(req, "sesi") {
+                Some(c) => {
+                    match dok::session_decode(c, KUNCI) {
+                        Ok(d)  => { return nil }
+                        Err(_) => { return dok::response(401, "sesi tidak sah") }
+                    }
+                }
+                None => { return dok::response(401, "perlu masuk dulu") }
+            }
+        }
+        return nil
+    })
+
+    // Middleware SESUDAH: menambah header ke SETIAP respons, termasuk 404.
+    dok::router_after(r, |req, resp| {
+        return dok::header_set(resp, "X-Ditenagai-Oleh", "JawaRustGo++")
+    })
+
+    dok::router_get(r, "/", |req| {
+        let d = {"judul": "Toko JRG", "pesan": "", "barang": ["kopi", "teh"],
+                 "masuk": false, "user": ""}
+        match dok::render(HALAMAN, d) {
+            Ok(h)  => dok::html(h)
+            Err(e) => dok::response(500, e)
+        }
+    })
+
+    dok::router_post(r, "/masuk", |req| {
+        let sesi = dok::session_encode({"user": "budi"}, KUNCI)
+        let resp = dok::redirect("/admin", 302)
+        return dok::cookie_set(resp, "sesi", sesi, {"max_age": 3600})
+    })
+
+    dok::router_get(r, "/admin", |req| dok::text("halaman admin"))
+
+    dok::serve(r, 7070)
+}

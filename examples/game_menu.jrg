@@ -1,0 +1,71 @@
+// Menu, main, jeda — tumpukan adegan `std/mesin/adegan` dengan `ui::menu`.
+// Dengan jendela: panah + Enter di menu, P menjeda, Escape kembali ke menu.
+// Tanpa jendela: diputar dengan rekaman, dan tiap pindah adegannya dicetak.
+package main
+
+import "std/mesin"
+import "std/mesin/adegan"
+import "std/mesin/warna"
+import "std/mesin/ui"
+
+struct Main { pub langkah: int, pub x: float }
+
+fn adegan_menu() { return adegan::baru("menu", ui::menu(["Main", "Keluar"]), perbarui_menu, gambar_menu) }
+fn adegan_main() { return adegan::baru("main", Main { langkah: 0, x: 4.0 }, perbarui_main, gambar_main) }
+fn adegan_jeda() { return adegan::baru("jeda", 0, perbarui_jeda, gambar_jeda) }
+
+fn perbarui_menu(k, m, dt) {
+    let r = k.perbarui(m)
+    match r[1] {
+        Option::Some(0) => { return [r[0], adegan::Pindah::Ganti(adegan_main())] }
+        Option::Some(_) => { return [r[0], adegan::Pindah::Ganti(adegan::baru("selesai", 0, |k, m, dt| [k, adegan::Pindah::Tetap], |c, k| k))] }
+        Option::None => { return [r[0], adegan::Pindah::Tetap] }
+    }
+}
+fn gambar_menu(c, k) { k.gambar(c, 8, 8, warna::PUTIH, warna::KUNING) }
+
+fn perbarui_main(k, m, dt) {
+    if m.tekan("P") { return [k, adegan::Pindah::Dorong(adegan_jeda())] }
+    if m.tekan("Escape") { return [k, adegan::Pindah::Ganti(adegan_menu())] }
+    var s = k
+    s.langkah = k.langkah + 1
+    s.x = k.x + 30.0 * dt
+    return [s, adegan::Pindah::Tetap]
+}
+fn gambar_main(c, k) { canvas::fill_rect(c, k.x, 20, 6, 6, warna::MERAH) }
+
+fn perbarui_jeda(k, m, dt) {
+    if m.tekan("P") { return [k, adegan::Pindah::Lepas] }
+    return [k + 1, adegan::Pindah::Tetap]
+}
+fn gambar_jeda(c, k) { ui::label(c, 20, 30, "JEDA", 2, warna::PUTIH) }
+
+fn lapor(g) {
+    let p = g.keadaan
+    let atas = p.atas()
+    var isi = str(atas.keadaan)
+    if atas.nama == "main" { isi = "langkah " + str(atas.keadaan.langkah) }
+    if atas.nama == "menu" { isi = "aktif " + str(atas.keadaan.aktif) }
+    wok("langkah", g.langkah_ke, "| adegan", atas.nama, "| tumpukan", p.kedalaman(), "|", isi)
+}
+
+pub fn main() {
+    let g = adegan::sebagai_game("Menu", 96, 64, adegan_menu())
+        .dengan_tombol(["Up", "Down", "Enter", "Space", "P", "Escape", "W", "S"])
+        .dengan_selesai(|p| p.atas().nama == "selesai")
+    if canvas::punya_jendela() {
+        g.jalankan()
+        return
+    }
+    var h = g.simulasi([[], ["Down"], [], ["Up"]])
+    lapor(h)
+    h = h.simulasi([["Enter"], [], [], [], [], []])
+    lapor(h)
+    h = h.simulasi([["P"], [], [], []])
+    lapor(h)
+    h = h.simulasi([["P"], [], []])
+    lapor(h)
+    h = h.simulasi([["Escape"], ["Down"], [], ["Enter"], [], []])
+    lapor(h)
+    wok("selesai:", h.sudah_selesai())
+}

@@ -1,0 +1,166 @@
+package main
+
+// Konformansi: semantik penangkapan (capture) closure.
+
+pub fn main() {
+    // ── dasar: mutasi lewat closure bertahan ─────────────────────────────
+    var x = 1
+    let ubah = || { x = 2 }
+    ubah()
+    assert_eq(x, 2)
+
+    // ── binding hidup, bukan salinan saat pembuatan ──────────────────────
+    // Closure dibuat SEBELUM `y` diubah, tapi tetap melihat nilai terbaru.
+    var y = 1
+    let baca = || y
+    y = 2
+    assert_eq(baca(), 2)
+
+    // ── counter: mutasi bertahan antar pemanggilan ───────────────────────
+    let c = bikin_counter()
+    assert_eq(c(), 1)
+    assert_eq(c(), 2)
+    assert_eq(c(), 3)
+
+    // dua counter berbeda TIDAK berbagi apa-apa
+    let c2 = bikin_counter()
+    assert_eq(c2(), 1)
+    assert_eq(c(), 4)
+
+    // ── aliasing: dua closure, satu binding ──────────────────────────────
+    var n = 0
+    let naik = || { n = n + 1 }
+    let lihat = || n
+    naik()
+    naik()
+    assert_eq(lihat(), 2)      // perubahan lewat A terlihat lewat B
+    assert_eq(n, 2)            // ...dan lewat akses langsung
+    n = 10
+    assert_eq(lihat(), 10)     // perubahan langsung terlihat lewat closure
+    naik()
+    assert_eq(n, 11)
+
+    // ── variabel global ikut aturan yang sama ────────────────────────────
+    let gn = || { g = g + 1; return g }
+    assert_eq(gn(), 1)
+    assert_eq(gn(), 2)
+    assert_eq(g, 2)
+
+    // ── LOOP: tiap iterasi dapat binding BARU ────────────────────────────
+    var fs = []
+    for i in 0..3 { fs = fs + [|| i] }
+    assert_eq(fs[0](), 0)
+    assert_eq(fs[1](), 1)
+    assert_eq(fs[2](), 2)
+
+    // closure dalam loop yang menangkap variabel DI LUAR loop tetap
+    // berbagi satu binding
+    var jumlah = 0
+    var penambah = []
+    for k in 0..4 { penambah = penambah + [|| { jumlah = jumlah + 1 }] }
+    for idx in penambah { penambah[idx]() }
+    assert_eq(jumlah, 4)
+
+    // ── shadowing: yang ditangkap binding yang benar ─────────────────────
+    let s = 1
+    {
+        let s = 2
+        let f = || s
+        assert_eq(f(), 2)
+    }
+    assert_eq(s, 1)
+
+    // deklarasi di DALAM closure membayangi tangkapan
+    var t = 1
+    let dalam = || { let t = 99; return t }
+    assert_eq(dalam(), 99)
+    assert_eq(t, 1)            // yang di luar tidak tersentuh
+
+    // parameter membayangi tangkapan
+    var p = 1
+    let byparam = |p| p
+    assert_eq(byparam(5), 5)
+    assert_eq(p, 1)
+
+    // ── escape: closure hidup lebih lama dari frame asalnya ──────────────
+    let esc = escape_sederhana()
+    assert_eq(esc(), 42)
+
+    // dua closure yang escape bersama tetap berbagi binding
+    let (inc, get) = pasangan()
+    inc()
+    inc()
+    assert_eq(get(), 2)
+
+    // ── closure bersarang ────────────────────────────────────────────────
+    let bersarang = luar()
+    let tengah = bersarang()
+    assert_eq(tengah(), 11)
+    assert_eq(tengah(), 21)
+
+    // ── menangkap banyak variabel dari beberapa scope ────────────────────
+    var a1 = 1
+    {
+        var b1 = 10
+        {
+            var c1 = 100
+            let semua = || { a1 = a1 + 1; b1 = b1 + 1; c1 = c1 + 1; return a1 + b1 + c1 }
+            assert_eq(semua(), 114)
+            assert_eq(semua(), 117)
+            assert_eq(c1, 102)
+        }
+        assert_eq(b1, 12)
+    }
+    assert_eq(a1, 3)
+
+    // ── closure disimpan di koleksi, dipanggil belakangan ────────────────
+    var simpan = 0
+    let kotak = [|| { simpan = simpan + 5; return simpan }]
+    assert_eq(kotak[0](), 5)
+    assert_eq(kotak[0](), 10)
+    assert_eq(simpan, 10)
+
+    // ── closure sebagai argumen tetap memutasi binding aslinya ───────────
+    var arg = 1
+    assert_eq(jalankan(|| { arg = arg * 3; return arg }), 3)
+    assert_eq(arg, 3)
+
+    // ── closure yang tidak pernah dipanggil tidak mengubah apa pun ───────
+    var diam = 7
+    let tak_dipanggil = || { diam = 999 }
+    assert_eq(diam, 7)
+
+    // ── closure rekursif ─────────────────────────────────────────────────
+    var rec = nil
+    rec = |n| { if n <= 0 { return 0 }; return n + rec(n - 1) }
+    assert_eq(rec(4), 10)
+
+    wok("closures OK")
+}
+
+var g = 0
+
+fn bikin_counter() {
+    var n = 0
+    return || { n = n + 1; return n }
+}
+
+fn escape_sederhana() {
+    let x = 42
+    return || x
+}
+
+fn pasangan() {
+    var n = 0
+    return (|| { n = n + 1 }, || n)
+}
+
+fn luar() {
+    var a = 1
+    return || {
+        var b = 10
+        return || { a = a + b; return a }
+    }
+}
+
+fn jalankan(f) { return f() }

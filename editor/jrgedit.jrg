@@ -1,0 +1,160 @@
+// jrgedit — penyunting kode untuk JRG, ditulis DALAM JRG.
+// Jalankan: jrgc --sunting berkas.jrg   (sumbernya tertanam di biner)
+// Modul-modulnya di `editor/sunting/`.
+package main
+
+import "sunting/keadaan"
+import "sunting/penyangga"
+import "sunting/berkas"
+import "sunting/layar"
+import "sunting/perintah"
+import "sunting/jalan"
+
+// Paling lama menunggu tombol sebelum memeriksa ukuran jendela lagi.
+const JEDA_MS = 400
+// Tombol yang sudah menumpuk ditangani sekaligus sebelum menggambar: paling banyak ini.
+const MAKS_BERUNTUN = 512
+
+/// Layar alternatif, tetikus, tempelan berkurung. Tiap mode dicatat `term::`, jadi jalan
+/// keluar mana pun — galat, `exit`, panik — mematikannya lagi.
+fn masuk_layar() {
+    term::mode("layar", true)
+    term::mode("tetikus", true)
+    term::mode("tempel", true)
+    term::mode("kursor", false)
+}
+
+fn keluar_layar() {
+    term::mode("tempel", false)
+    term::mode("tetikus", false)
+    term::mode("layar", false)
+    term::mode("kursor", true)
+}
+
+/// Samakan ukuran editor dengan jendelanya; yang berubah memaksa gambar ulang.
+fn ukur(e) {
+    let u = term::ukuran()
+    let lebar = math::max(u[0], 10)
+    let tinggi = math::max(u[1], 3)
+    if lebar == e.lebar && tinggi == e.tinggi { return e }
+    var x = e
+    x.lebar = lebar
+    x.tinggi = tinggi
+    x.paksa = true
+    return keadaan::ganti(x, keadaan::gulung(x, keadaan::kini(x)))
+}
+
+/// Jalankan berkas di terminal SUNGGUHAN: layar editor ditinggalkan dulu, jadi keluaran
+/// programnya tampil di layar biasa dan program interaktif tetap bisa dipakai.
+fn jalankan(e) {
+    let vm = str::starts_with(e.tunda, "jalankan_vm:")
+    var path = e.tunda
+    match str::find(e.tunda, ":") {
+        Option::Some(i) => { path = str::slice(e.tunda, i + 1) }
+        Option::None => {}
+    }
+    keluar_layar()
+    term::raw(false)
+    wok("── jrgedit: menjalankan " + berkas::ringkas(path) + (vm $ " lewat --vm" : "") + " ──")
+    let h = jalan::jalankan(path, vm)
+    wok("")
+    wok("── selesai (kode " + str::to_string(h[0]) + ") — Enter untuk kembali ──")
+    let _ = tok()
+    term::raw(true)
+    masuk_layar()
+    var x = e
+    x.tunda = ""
+    return perintah::sesudah_jalan(x, h[0], h[1])
+}
+
+/// `berkas.jrg:12` membuka berkasnya di baris 12 — bentuk yang dicetak diagnostik `jrgc`.
+/// Menjawab `[nama, baris]`; baris 0 kalau tidak disebut.
+fn pisah_baris(arg) {
+    if file::exists(arg) { return [arg, 0] }
+    let b = str::split(arg, ":")
+    let n = len(b)
+    if n >= 2 && re::test("^[0-9]+$", b[n - 1]) { return [arr::join(b[:n - 1], ":"), str::to_int(b[n - 1])] }
+    if n >= 3 && re::test("^[0-9]+$", b[n - 2]) && re::test("^[0-9]+$", b[n - 1]) {
+        return [arr::join(b[:n - 2], ":"), str::to_int(b[n - 2])]
+    }
+    return [arg, 0]
+}
+
+pub fn main() {
+    if !term::interaktif() {
+        wok("jrgedit butuh terminal sungguhan: stdin-nya bukan terminal.")
+        wok("Jalankan langsung dari terminal:  jrgc --sunting berkas.jrg")
+        return
+    }
+    var e = keadaan::baru([penyangga::baru("", [])])
+    let args = env::args()
+    var i = 1
+    var direktori = ""
+    while i < len(args) {
+        let a = pisah_baris(args[i])
+        if fs::is_dir(a[0]) {
+            direktori = a[0]
+        } else {
+            e = perintah::buka_berkas(e, a[0])
+            if a[1] > 0 {
+                e = keadaan::ganti(e, penyangga::ke(keadaan::kini(e), a[1] - 1, 0))
+            }
+        }
+        i = i + 1
+    }
+    if len(e.berkas) > 1 { e.aktif = 0 }
+    // Sebuah direktori dibuka sebagai daftar isinya, bukan ditolak.
+    if direktori != "" { e = perintah::jelajah(e, direktori) }
+    if !term::raw(true) {
+        wok("jrgedit tidak bisa memasang mode raw di terminal ini.")
+        return
+    }
+    masuk_layar()
+    e.paksa = true
+    var perlu = true
+    loop {
+        let u = ukur(e)
+        if u.paksa { perlu = true }
+        e = u
+        if perlu {
+            e = keadaan::ganti(e, keadaan::gulung_bila_perlu(e, keadaan::kini(e)))
+            e = layar::gambar(e)
+            if e.kirim != "" {
+                term::tulis(e.kirim)
+                e.kirim = ""
+            }
+            perlu = false
+        }
+        match term::tombol_tunggu(JEDA_MS) {
+            Option::None => {}
+            Option::Some(t) => {
+                perlu = true
+                if t == "eof" {
+                    e.selesai = true
+                } else {
+                    e = perintah::tangani(e, t)
+                }
+                // Yang sudah menumpuk — ketikan cepat, tempelan tanpa kurung — ditangani
+                // sebelum menggambar lagi.
+                var n = 0
+                while n < MAKS_BERUNTUN && !e.selesai && e.tunda == "" {
+                    match term::tombol_tunggu(0) {
+                        Option::None => { n = MAKS_BERUNTUN }
+                        Option::Some(s) => {
+                            if s == "eof" { e.selesai = true } else { e = perintah::tangani(e, s) }
+                        }
+                    }
+                    n = n + 1
+                }
+            }
+        }
+        if str::starts_with(e.tunda, "jalankan") { e = jalankan(e) }
+        if e.tunda == "tema" {
+            layar::lupa_rakitan()
+            e.tunda = ""
+        }
+        if e.selesai { break }
+    }
+    keluar_layar()
+    term::raw(false)
+}

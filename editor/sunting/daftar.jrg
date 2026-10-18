@@ -1,0 +1,140 @@
+package sunting_daftar
+
+// Daftar yang bisa disaring dan dipilih: garis besar berkas, penjelajah berkas, berkas
+// yang terbuka, palet perintah, dan layar bantuan (yang cuma dibaca). Murni nilai.
+
+pub struct Daftar {
+    pub jenis: string = "",
+    pub judul: string = "",
+    pub butir: array = [],
+    pub tampil: array = [],
+    pub saring: string = "",
+    pub pilih: int = 0,
+    pub atas: int = 0,
+    pub bisa_pilih: bool = true,
+    pub data: string = "",
+}
+
+/// Daftar baru. Tiap butir `[teks, nilai]`; `nilai` yang dikembalikan saat dipilih.
+pub fn baru(jenis, judul, butir) {
+    var d = Daftar { jenis: jenis, judul: judul, butir: butir }
+    return saring_ulang(d)
+}
+
+/// Daftar yang cuma dibaca (bantuan, keluaran program): panah menggulung, tidak memilih.
+pub fn bacaan(jenis, judul, baris) {
+    var butir = []
+    for _, b in baris { butir = butir + [[b, ""]] }
+    var d = Daftar { jenis: jenis, judul: judul, butir: butir, bisa_pilih: false }
+    return saring_ulang(d)
+}
+
+pub fn aktif(d) { return d.jenis != "" }
+
+/// Hitung ulang butir yang lolos saringan: tiap kata saringan harus ada di teksnya,
+/// tanpa peduli huruf besar-kecil.
+fn saring_ulang(d) {
+    var x = d
+    var lolos = []
+    let kata = str::split(str::lower(str::trim(d.saring)), " ")
+    var i = 0
+    for _, b in d.butir {
+        let t = str::lower(b[0])
+        var cocok = true
+        for _, k in kata {
+            if k != "" && !str::contains(t, k) { cocok = false }
+        }
+        if cocok { lolos = lolos + [i] }
+        i = i + 1
+    }
+    x.tampil = lolos
+    if x.pilih >= len(lolos) { x.pilih = math::max(len(lolos) - 1, 0) }
+    return x
+}
+
+/// Taruh pilihan di butir pertama yang nilainya `nilai` (mis. baris kursor di garis besar).
+pub fn sorot_nilai(d, nilai) {
+    var x = d
+    var i = 0
+    for _, n in d.tampil {
+        if d.butir[n][1] == nilai { x.pilih = i }
+        i = i + 1
+    }
+    return x
+}
+
+fn gulung(d, tinggi) {
+    var x = d
+    if x.pilih < x.atas { x.atas = x.pilih }
+    if x.pilih >= x.atas + tinggi { x.atas = x.pilih - tinggi + 1 }
+    let maks = math::max(len(x.tampil) - tinggi, 0)
+    if x.atas > maks { x.atas = maks }
+    if x.atas < 0 { x.atas = 0 }
+    return x
+}
+
+/// Terapkan satu tombol; `tinggi` jumlah baris yang tampil. Menjawab `[daftar, aksi]`:
+/// "" (lanjut), "pilih", atau "batal".
+pub fn terapkan(d, t, tinggi) {
+    if t == "esc" || t == "ctrl-c" || t == "ctrl-g" || t == "ctrl-q" { return [d, "batal"] }
+    var x = d
+    let n = len(d.tampil)
+    if !d.bisa_pilih {
+        // Bacaan: `pilih` adalah baris teratas, dan tombol apa pun selain gerak menutupnya.
+        let maks = math::max(n - tinggi, 0)
+        if t == "atas" { x.atas = math::max(d.atas - 1, 0); return [x, ""] }
+        if t == "bawah" { x.atas = math::min(d.atas + 1, maks); return [x, ""] }
+        if t == "pgup" { x.atas = math::max(d.atas - tinggi, 0); return [x, ""] }
+        if t == "pgdn" || t == " " { x.atas = math::min(d.atas + tinggi, maks); return [x, ""] }
+        if t == "home" { x.atas = 0; return [x, ""] }
+        if t == "end" { x.atas = maks; return [x, ""] }
+        return [d, "batal"]
+    }
+    if t == "enter" {
+        if n == 0 { return [d, ""] }
+        return [d, "pilih"]
+    }
+    if t == "atas" || t == "ctrl-p" { x.pilih = math::max(d.pilih - 1, 0); return [gulung(x, tinggi), ""] }
+    if t == "bawah" || t == "ctrl-n" { x.pilih = math::min(d.pilih + 1, math::max(n - 1, 0)); return [gulung(x, tinggi), ""] }
+    if t == "pgup" { x.pilih = math::max(d.pilih - tinggi, 0); return [gulung(x, tinggi), ""] }
+    if t == "pgdn" { x.pilih = math::min(d.pilih + tinggi, math::max(n - 1, 0)); return [gulung(x, tinggi), ""] }
+    if t == "home" { x.pilih = 0; return [gulung(x, tinggi), ""] }
+    if t == "end" { x.pilih = math::max(n - 1, 0); return [gulung(x, tinggi), ""] }
+    if t == "backspace" {
+        if d.saring == "" { return [d, ""] }
+        x.saring = str::slice(d.saring, 0, str::len(d.saring) - 1)
+        x.pilih = 0
+        return [gulung(saring_ulang(x), tinggi), ""]
+    }
+    if t == "ctrl-u" {
+        x.saring = ""
+        x.pilih = 0
+        return [gulung(saring_ulang(x), tinggi), ""]
+    }
+    if str::len(t) == 1 {
+        x.saring = d.saring + t
+        x.pilih = 0
+        return [gulung(saring_ulang(x), tinggi), ""]
+    }
+    return [d, ""]
+}
+
+/// Geser pilihan ke butir tampil ke-`i` (klik tetikus).
+pub fn ke(d, i, tinggi) {
+    var x = d
+    x.pilih = math::min(math::max(i, 0), math::max(len(d.tampil) - 1, 0))
+    return gulung(x, tinggi)
+}
+
+/// Nilai butir yang sedang dipilih.
+pub fn terpilih(d) {
+    if len(d.tampil) == 0 { return Option::None }
+    return Option::Some(d.butir[d.tampil[d.pilih]][1])
+}
+
+/// Teks butir tampil ke-`i` dari atas layar, atau `None` di luar isi.
+pub fn baris_ke(d, i) {
+    let n = d.atas + i
+    if n < 0 || n >= len(d.tampil) { return Option::None }
+    return Option::Some(d.butir[d.tampil[n]][0])
+}

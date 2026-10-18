@@ -1,0 +1,118 @@
+package std_path
+
+// Manipulasi path sebagai TEKS.
+
+pub const PEMISAH = "/"
+
+/// Apakah path-nya mulai dari akar.
+pub fn is_absolute(p) { return str::starts_with(p, PEMISAH) }
+
+// Komponen path, tanpa bagian kosong. `""` menghasilkan `[]`, bukan `[""]`.
+/// Pecah jadi potongan-potongannya.
+pub fn split(p) {
+    var keluar = []
+    for _, bagian in str::split(p, PEMISAH) {
+        if len(bagian) > 0 { keluar = arr::push(keluar, bagian) }
+    }
+    return keluar
+}
+
+/// Sambung dua potongan path dengan pemisah yang benar.
+pub fn join(a, b) {
+    if len(a) == 0 { return b }
+    if len(b) == 0 { return a }
+    if is_absolute(b) { return b }
+    if str::ends_with(a, PEMISAH) { return a + b }
+    return a + PEMISAH + b
+}
+
+/// Sambung semua potongan di sebuah array.
+pub fn join_all(bagian) {
+    var hasil = ""
+    for _, b in bagian { hasil = join(hasil, b) }
+    return hasil
+}
+
+/// Nama berkasnya saja, tanpa direktori.
+pub fn basename(p) {
+    let bagian = split(p)
+    if len(bagian) == 0 { return "" }
+    return bagian[len(bagian) - 1]
+}
+
+/// Direktori induknya.
+pub fn parent(p) {
+    let bagian = split(p)
+    if len(bagian) <= 1 {
+        if is_absolute(p) { return PEMISAH }
+        return ""
+    }
+    let induk = str::join(arr::take(bagian, len(bagian) - 1), PEMISAH)
+    if is_absolute(p) { return PEMISAH + induk }
+    return induk
+}
+
+// Ekstensi TANPA titiknya, `None` kalau tidak ada.
+/// Ekstensi TANPA titiknya, `None` kalau tidak ada. Berkas tersembunyi (`.bashrc`) tidak dihitung berekstensi.
+pub fn extension(p) {
+    let nama = basename(p)
+    // Titik di posisi 0 berarti berkas tersembunyi (`.bashrc`), bukan ekstensi.
+    match str::index_of(nama, ".") {
+        None => return Option::None,
+        Some(i) => if i < 1 { return Option::None },
+    }
+    var akhir = -1
+    for j, c in nama {
+        if c == '.' { akhir = j }
+    }
+    if akhir < 1 { return Option::None }
+    if akhir == len(nama) - 1 { return Option::None }
+    return Option::Some(str::sub(nama, akhir + 1, len(nama)))
+}
+
+/// Nama berkas tanpa ekstensinya.
+pub fn stem(p) {
+    let nama = basename(p)
+    var akhir = -1
+    for j, c in nama {
+        if c == '.' { akhir = j }
+    }
+    if akhir < 1 { return nama }
+    return str::sub(nama, 0, akhir)
+}
+
+/// Ganti ekstensinya.
+pub fn with_extension(p, ext) {
+    let induk = parent(p)
+    var nama = stem(p)
+    if len(ext) > 0 { nama = nama + "." + ext }
+    if len(induk) == 0 { return nama }
+    return join(induk, nama)
+}
+
+// Selesaikan `.` dan `..` secara TEKSTUAL, tanpa menyentuh disk.
+/// Rapikan `.` dan `..` tanpa menyentuh berkas apa pun.
+pub fn normalize(p) {
+    let mutlak = is_absolute(p)
+    var tumpuk = []
+    for _, bagian in split(p) {
+        if bagian == "." { continue }
+        if bagian == ".." {
+            let n = len(tumpuk)
+            if n > 0 {
+                if tumpuk[n - 1] != ".." {
+                    tumpuk = arr::take(tumpuk, n - 1)
+                    continue
+                }
+            }
+            if mutlak { continue }
+            tumpuk = arr::push(tumpuk, "..")
+            continue
+        }
+        tumpuk = arr::push(tumpuk, bagian)
+    }
+    let inti = str::join(tumpuk, PEMISAH)
+    if mutlak { return PEMISAH + inti }
+    if len(inti) == 0 { return "." }
+    return inti
+}

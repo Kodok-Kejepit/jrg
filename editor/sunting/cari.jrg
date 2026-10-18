@@ -1,0 +1,139 @@
+package sunting_cari
+
+// Pencarian teks harfiah di penyangga: semua kemunculan di satu baris (untuk disorot),
+// kemunculan berikut/sebelumnya dari kursor dengan berputar, dan penggantian.
+import "sunting/penyangga"
+
+/// Peka huruf besar-kecil hanya kalau polanya memuat huruf besar ("smart case").
+pub fn peka(pola) {
+    return str::lower(pola) != pola
+}
+
+fn siap(teks, pola) {
+    if peka(pola) { return teks }
+    return str::lower(teks)
+}
+
+/// Posisi awal tiap kemunculan `pola` di `teks` (tidak bertumpuk), dalam indeks karakter.
+pub fn di_baris(teks, pola) {
+    if pola == "" { return [] }
+    var t = siap(teks, pola)
+    // Huruf yang berubah panjang saat dikecilkan menggeser indeks; baris itu dicari apa adanya.
+    if str::len(t) != str::len(teks) { t = teks }
+    let p = siap(pola, pola)
+    let np = str::len(p)
+    let n = str::len(t)
+    var keluar = []
+    var dari = 0
+    while dari <= n - np {
+        match str::find(str::slice(t, dari), p) {
+            Option::Some(i) => {
+                keluar = keluar + [dari + i]
+                dari = dari + i + np
+            }
+            Option::None => { return keluar }
+        }
+    }
+    return keluar
+}
+
+/// Kemunculan pertama SESUDAH kursor, berputar ke awal berkas. Menjawab `[br, kol]`.
+pub fn maju(p, pola) {
+    if pola == "" { return Option::None }
+    let n = len(p.baris)
+    var d = 0
+    while d <= n {
+        let br = (p.br + d) % n
+        for _, k in di_baris(p.baris[br], pola) {
+            // Putaran pertama cuma menerima yang di kanan kursor; putaran penuh (d == n)
+            // menerima yang di kirinya juga.
+            if d > 0 || k > p.kol { if d < n || k <= p.kol { return Option::Some([br, k]) } }
+        }
+        d = d + 1
+    }
+    return Option::None
+}
+
+/// Kemunculan pertama DI atau sesudah `(br, kol)`, berputar ke awal berkas — dipakai
+/// pencarian sambil mengetik, yang selalu mulai dari tempat kursor semula.
+pub fn dari(p, pola, br, kol) {
+    if pola == "" { return Option::None }
+    let n = len(p.baris)
+    var d = 0
+    while d <= n {
+        let b = (br + d) % n
+        for _, k in di_baris(p.baris[b], pola) {
+            if d > 0 || k >= kol { if d < n || k < kol { return Option::Some([b, k]) } }
+        }
+        d = d + 1
+    }
+    return Option::None
+}
+
+/// Kemunculan terakhir SEBELUM kursor, berputar ke akhir berkas.
+pub fn mundur(p, pola) {
+    if pola == "" { return Option::None }
+    let n = len(p.baris)
+    var d = 0
+    while d <= n {
+        let br = ((p.br - d) % n + n) % n
+        let semua = di_baris(p.baris[br], pola)
+        var i = len(semua) - 1
+        while i >= 0 {
+            let k = semua[i]
+            if d > 0 || k < p.kol { if d < n || k >= p.kol { return Option::Some([br, k]) } }
+            i = i - 1
+        }
+        d = d + 1
+    }
+    return Option::None
+}
+
+/// Jumlah seluruh kemunculan dan urutan kemunculan di `(br, kol)` (dari 1; 0 kalau bukan
+/// kemunculan). Menjawab `[urutan, jumlah]`.
+pub fn hitung(p, pola, br, kol) {
+    var jumlah = 0
+    var urutan = 0
+    var i = 0
+    while i < len(p.baris) {
+        for _, k in di_baris(p.baris[i], pola) {
+            jumlah = jumlah + 1
+            if i == br && k == kol { urutan = jumlah }
+        }
+        i = i + 1
+    }
+    return [urutan, jumlah]
+}
+
+/// Ganti SEMUA kemunculan; menjawab `[penyangga, berapa]`. Satu langkah urung.
+pub fn ganti_semua(p, pola, ganti) {
+    var teks = []
+    var kena = 0
+    for _, b in p.baris {
+        let pos = di_baris(b, pola)
+        if len(pos) == 0 {
+            teks = teks + [b]
+        } else {
+            let np = str::len(pola)
+            var bagian = []
+            var dari = 0
+            for _, k in pos {
+                bagian = bagian + [str::slice(b, dari, k), ganti]
+                dari = k + np
+            }
+            bagian = bagian + [str::slice(b, dari)]
+            teks = teks + [arr::join(bagian, "")]
+            kena = kena + len(pos)
+        }
+    }
+    if kena == 0 { return [p, 0] }
+    var x = penyangga::pilih_semua(p)
+    x = penyangga::sisip(x, arr::join(teks, "\n"))
+    return [penyangga::ke(x, p.br, p.kol), kena]
+}
+
+/// Ganti kemunculan di `(br, kol)` saja; kursor mendarat sesudah penggantinya.
+pub fn ganti_satu(p, pola, ganti, br, kol) {
+    var x = penyangga::pilih_rentang(p, br, kol, br, kol + str::len(pola))
+    return penyangga::sisip(x, ganti)
+}

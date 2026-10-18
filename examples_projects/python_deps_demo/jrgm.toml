@@ -1,0 +1,19 @@
+[package]
+name        = "python_deps_demo"
+version     = "0.1.0"
+edition     = "jrg2025"
+entry       = "src/main.jrg"
+
+[dependencies]
+std = { version = "0.1" }
+
+# Daftar eksplisit ini SENGAJA dibiarkan kosong — main.jrg di project ini
+# pakai `random` (stdlib) dan `requests` (third-party) murni lewat py::,
+# dan jrgm men-scan src/main.jrg otomatis lalu memasang apa pun yang
+# kedeteksi (lihat scan_python_deps_from_tokens + ensure_python_packages
+# di src/jrgm/main.rs). Baris di bawah ini cuma contoh; isi manual kalau
+# ada package yang scan tidak bisa tangkap (py::exec("import ...")), atau
+# kalau nama untuk pip install beda dari nama untuk import.
+#
+# [python]
+# packages = ["some-pkg-with-different-pip-name"]

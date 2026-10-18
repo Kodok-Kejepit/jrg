@@ -1,0 +1,105 @@
+// JawaRustGo++ — Demo: Goroutine Sandbox (spawn/go + channel)
+package main
+
+import "std/fmt"
+
+// Worker sederhana: hitung kuadrat sebuah angka, kirim hasilnya ke
+// channel `hasil`. Dijalankan oleh beberapa goroutine sekaligus.
+fn worker(id: int, n: int, hasil: chan int) {
+    let kuadrat = n * n
+    wok("worker", id, "menghitung", n, "* ", n, "=", kuadrat)
+    hasil <- kuadrat
+}
+
+pub fn main() {
+    wok("=== spawn: goroutine dasar ===")
+    let selesai = make_chan(bool)
+    spawn {
+        wok("halo dari goroutine yang di-spawn!")
+        selesai <- true
+    }
+    <-selesai
+    wok("goroutine pertama sudah selesai")
+
+    wok("")
+    wok("=== go: sintaks ala Go untuk spawn ===")
+    let selesai2 = make_chan(bool)
+    go worker_sederhana(selesai2)
+    <-selesai2
+    wok("goroutine kedua (lewat `go`) sudah selesai")
+
+    wok("")
+    wok("=== Worker pool: banyak goroutine, satu channel hasil ===")
+    let hasil = make_chan(int)
+    let jumlah_worker = 5
+    for i in 0..jumlah_worker {
+        spawn {
+            worker(i, i + 1, hasil)
+        }
+    }
+    // Kumpulkan SEMUA hasil dari channel — urutannya boleh acak,
+    // tergantung goroutine mana yang selesai duluan, tapi totalnya
+    // pasti tetap benar.
+    let mut total = 0
+    for i in 0..jumlah_worker {
+        let v = <-hasil
+        total = total + v
+    }
+    wok("total semua kuadrat (1..5):", total)
+
+    wok("")
+    wok("=== Channel buffered ===")
+    let antrian = make_chan(string, 3)
+    antrian <- "tugas-1"
+    antrian <- "tugas-2"
+    antrian <- "tugas-3"
+    wok("kapasitas channel:", antrian.cap())
+    wok("ambil:", <-antrian)
+    wok("ambil:", <-antrian)
+    wok("ambil:", <-antrian)
+
+    wok("")
+    wok("=== select: non-blocking dengan default ===")
+    let ch_a = make_chan(int)
+    let ch_b = make_chan(int)
+    select {
+        case v := <-ch_a: {
+            wok("dapat dari ch_a:", v)
+        }
+        case v := <-ch_b: {
+            wok("dapat dari ch_b:", v)
+        }
+        default: {
+            wok("tidak ada channel yang siap — lanjut tanpa nge-block")
+        }
+    }
+
+    wok("")
+    wok("=== select: menunggu goroutine mana yang selesai duluan ===")
+    // Buffered (kapasitas 1): siapa pun yang menang race di `select` tetap
+    // membiarkan goroutine "kalah" mengirim dengan sukses ke buffer-nya sendiri …
+    let cepat = make_chan(string, 1)
+    let lambat = make_chan(string, 1)
+    spawn {
+        cepat <- "goroutine cepat selesai duluan"
+    }
+    spawn {
+        lambat <- "goroutine lambat (boleh menang, boleh kalah — tetap aman)"
+    }
+    select {
+        case pesan := <-cepat: {
+            wok(pesan)
+        }
+        case pesan := <-lambat: {
+            wok(pesan)
+        }
+    }
+
+    wok("")
+    wok("Selesai — semua goroutine & channel bekerja seperti Go asli.")
+}
+
+fn worker_sederhana(selesai: chan bool) {
+    wok("halo dari goroutine via `go`!")
+    selesai <- true
+}

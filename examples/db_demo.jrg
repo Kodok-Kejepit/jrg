@@ -1,0 +1,47 @@
+package main
+
+// ============================================================================
+// db_demo.jrg — SQLite lewat `dok::db_*`.
+
+pub fn main() {
+    if !dok::db_tersedia() {
+        wok("libsqlite3 tidak ada di mesin ini — contoh ini dilewati")
+        return
+    }
+
+    let db = dok::db_open(":memory:")?
+    dok::db_exec(db, "CREATE TABLE murid(id INTEGER PRIMARY KEY, nama TEXT, nilai REAL)")?
+
+    // Parameter DIIKAT dengan `?`, tidak pernah disisipkan ke teks SQL-nya.
+    // Itu satu-satunya cara yang disediakan, dan itu disengaja.
+    let orang = [["budi", 8.5], ["ani", 9.25], ["cici", 7.0]]
+    for i in orang {
+        dok::db_exec(db, "INSERT INTO murid(nama, nilai) VALUES (?, ?)", orang[i])?
+    }
+    wok("id terakhir:", dok::db_last_id(db)?)
+
+    wok("")
+    wok("=== semua murid (satu baris = satu dict, bukan array) ===")
+    let semua = dok::db_query(db, "SELECT * FROM murid ORDER BY nilai DESC")?
+    for i in semua {
+        let m = semua[i]
+        wok(str::format("  {} {:.2}", str::pad_right(m.nama, 6), m.nilai))
+    }
+
+    wok("")
+    wok("=== nilai di atas 8 ===")
+    wok(dok::db_query(db, "SELECT nama FROM murid WHERE nilai > ?", [8.0])?)
+
+    wok("")
+    wok("=== percobaan injeksi diikat sebagai NILAI, bukan perintah ===")
+    let jahat = "budi'; DROP TABLE murid; --"
+    wok("hasil cari:", dok::db_query(db, "SELECT * FROM murid WHERE nama = ?", [jahat])?)
+    wok("tabel utuh:", dok::db_query(db, "SELECT count(*) AS n FROM murid")?)
+
+    wok("")
+    wok("=== NULL bolak-balik sebagai nil ===")
+    dok::db_exec(db, "INSERT INTO murid(nama, nilai) VALUES (?, ?)", [nil, nil])?
+    wok(dok::db_query(db, "SELECT id, nama, nilai FROM murid WHERE nama IS NULL")?)
+
+    dok::db_close(db)
+}

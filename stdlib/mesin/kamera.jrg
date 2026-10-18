@@ -1,0 +1,64 @@
+package std_mesin_kamera
+
+// Kamera 2D: titik dunia di `pusat` tampil di tengah layar, diperbesar `zoom`.
+// `pasang(c)` lalu gambar dunia, lalu `lepas(c)` sebelum menggambar UI.
+import "std/mesin/vek"
+
+pub struct Kamera { pub pusat: vek::Vek2, pub zoom: float = 1.0, pub lebar: int, pub tinggi: int }
+
+/// Kamera untuk layar selebar `lebar` x `tinggi`, melihat ke `pusat`.
+pub fn baru(lebar, tinggi, pusat) {
+    if typeof(lebar) != "int" || typeof(tinggi) != "int" || lebar <= 0 || tinggi <= 0 {
+        panik("kamera::baru: ukuran layar harus bilangan bulat positif")
+    }
+    if typeof(pusat) != "struct:Vek2" { panik("kamera::baru: pusat harus `Vek2`, dapat `" + typeof(pusat) + "`") }
+    return Kamera { pusat: pusat, lebar: lebar, tinggi: tinggi }
+}
+
+impl Kamera {
+    /// Kamera yang sama dengan zoom lain (harus positif).
+    pub fn dengan_zoom(self, z) {
+        if (typeof(z) != "int" && typeof(z) != "float") || z <= 0 {
+            panik("kamera::dengan_zoom: zoom harus angka positif, dapat " + str(z))
+        }
+        return Kamera { pusat: self.pusat, zoom: z as float, lebar: self.lebar, tinggi: self.tinggi }
+    }
+    /// Bergerak ke arah `target` sebesar `t` (0 diam, 1 langsung sampai).
+    pub fn ikuti(self, target, t) {
+        return Kamera { pusat: self.pusat.lerp(target, t), zoom: self.zoom,
+                        lebar: self.lebar, tinggi: self.tinggi }
+    }
+    /// Kamera yang digeser seperlunya supaya layarnya tidak melihat ke luar dunia
+    /// `(0, 0)`-`(lebar_dunia, tinggi_dunia)`. Dunia yang lebih sempit dari layar
+    /// diletakkan di tengah.
+    pub fn batasi(self, lebar_dunia, tinggi_dunia) {
+        let angka = |v| typeof(v) == "int" || typeof(v) == "float"
+        if !angka(lebar_dunia) || !angka(tinggi_dunia) { panik("kamera::batasi: ukuran dunia harus angka") }
+        let lw = lebar_dunia as float
+        let lh = tinggi_dunia as float
+        let sw = (self.lebar as float) / 2.0 / self.zoom
+        let sh = (self.tinggi as float) / 2.0 / self.zoom
+        let x: float = lw <= 2.0 * sw $ lw / 2.0 : math::clamp(self.pusat.x, sw, lw - sw)
+        let y: float = lh <= 2.0 * sh $ lh / 2.0 : math::clamp(self.pusat.y, sh, lh - sh)
+        return Kamera { pusat: vek::baru(x, y), zoom: self.zoom, lebar: self.lebar, tinggi: self.tinggi }
+    }
+    /// Titik dunia ke titik layar.
+    pub fn ke_layar(self, p) {
+        return vek::baru((p.x - self.pusat.x) * self.zoom + (self.lebar as float) / 2.0,
+                         (p.y - self.pusat.y) * self.zoom + (self.tinggi as float) / 2.0)
+    }
+    /// Titik layar ke titik dunia (kebalikan `ke_layar`).
+    pub fn ke_dunia(self, p) {
+        return vek::baru((p.x - (self.lebar as float) / 2.0) / self.zoom + self.pusat.x,
+                         (p.y - (self.tinggi as float) / 2.0) / self.zoom + self.pusat.y)
+    }
+    /// Pasang transformasinya di kanvas; pasangkan dengan `lepas`.
+    pub fn pasang(self, c) {
+        canvas::push(c)
+        canvas::translate(c, (self.lebar as float) / 2.0, (self.tinggi as float) / 2.0)
+        canvas::scale(c, self.zoom, self.zoom)
+        canvas::translate(c, -self.pusat.x, -self.pusat.y)
+    }
+    /// Lepas transformasi yang dipasang `pasang`.
+    pub fn lepas(self, c) { canvas::pop(c) }
+}

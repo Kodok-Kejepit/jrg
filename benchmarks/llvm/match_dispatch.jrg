@@ -1,0 +1,71 @@
+package main
+
+// pattern-matching-heavy: a tiny stack machine whose opcodes are a
+// payload-carrying enum.
+
+enum Op {
+    Push(int),
+    AddK(int),
+    MulK(int),
+    Xor,
+    Rot,
+    Range(int, int),
+}
+
+fn classify(v: int) -> int {
+    match v % 11 {
+        0 => 5,
+        1 | 2 | 3 => 7,
+        4..=8 => 11,
+        _ => 13,
+    }
+}
+
+fn exec(o: Op, acc: int) -> int {
+    match o {
+        Op::Push(k) => k,
+        Op::AddK(k) => acc + k,
+        Op::MulK(k) => (acc * k) % 1000003,
+        Op::Xor => acc ^ 1431655765,
+        Op::Rot => ((acc << 7) | (acc >> 25)) % 1000003,
+        Op::Range(lo, hi) => {
+            var out: int = acc
+            if (acc < lo) {
+                out = lo
+            }
+            if (acc > hi) {
+                out = hi
+            }
+            return out
+        }
+    }
+}
+
+pub fn main() {
+    let iterations: int = 45000000
+    var acc: int = 1
+    var total: int = 0
+
+    for i in 0..(iterations) {
+        let sel: int = i % 6
+        var op: Op = Op::Xor
+        if (sel == 0) {
+            op = Op::Push(i % 997)
+        } else if (sel == 1) {
+            op = Op::AddK(i % 31)
+        } else if (sel == 2) {
+            op = Op::MulK(3 + i % 7)
+        } else if (sel == 3) {
+            op = Op::Xor
+        } else if (sel == 4) {
+            op = Op::Rot
+        } else {
+            op = Op::Range(10, 900000)
+        }
+
+        acc = exec(op, acc)
+        total = (total + classify(acc)) % 1000000007
+    }
+
+    wok(acc, total)
+}

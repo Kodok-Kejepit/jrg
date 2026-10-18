@@ -1,0 +1,69 @@
+package sunting_tema
+
+// Warna editor (palet 256 warna), dua tema. Tiap gaya ditulis LENGKAP — reset, warna
+// huruf, latar — jadi satu potongan tidak pernah mewarisi warna potongan sebelumnya.
+
+pub const RESET = "\u001b[0m"
+
+// Warna huruf per jenis sorotan (k kunci, t tipe, s teks, a angka, c komentar, f fungsi,
+// n nilai/konstanta, m namespace, i interpolasi), latar per lapisan, dan warna antarmuka.
+const GELAP = {
+    "k": "38;5;213", "t": "38;5;117", "s": "38;5;150", "a": "38;5;215", "c": "38;5;246",
+    "f": "38;5;222", "n": "38;5;209", "m": "38;5;116", "i": "38;5;223",
+    "pilih": "48;5;24", "cocok": "48;5;58", "kini": "48;5;172;38;5;16",
+    "kurung": "48;5;240;1", "baris": "48;5;236",
+    "nomor": "38;5;246", "nomor_kini": "1;38;5;229", "nomor_galat": "1;38;5;203",
+    "kosong": "38;5;240", "judul": "1;48;5;24;38;5;255", "judul_redup": "48;5;24;38;5;153",
+    "pesan": "38;5;222", "pesan_galat": "1;38;5;203", "tanya": "1;38;5;117",
+    "tombol": "48;5;250;38;5;16", "ket": "38;5;250", "popup": "48;5;238;38;5;253",
+    "popup_pilih": "48;5;31;38;5;255", "tebal": "1", "redup": "38;5;244",
+}
+
+const TERANG = {
+    "k": "38;5;127", "t": "38;5;25", "s": "38;5;28", "a": "38;5;130", "c": "38;5;244",
+    "f": "38;5;94", "n": "38;5;124", "m": "38;5;30", "i": "38;5;94",
+    "pilih": "48;5;153", "cocok": "48;5;229", "kini": "48;5;214;38;5;16",
+    "kurung": "48;5;250;1", "baris": "48;5;254",
+    "nomor": "38;5;243", "nomor_kini": "1;38;5;16", "nomor_galat": "1;38;5;160",
+    "kosong": "38;5;250", "judul": "1;48;5;25;38;5;255", "judul_redup": "48;5;25;38;5;189",
+    "pesan": "38;5;94", "pesan_galat": "1;38;5;160", "tanya": "1;38;5;25",
+    "tombol": "48;5;240;38;5;255", "ket": "38;5;240", "popup": "48;5;252;38;5;16",
+    "popup_pilih": "48;5;25;38;5;255", "tebal": "1", "redup": "38;5;246",
+}
+
+var TERPILIH = "gelap"
+var GAYA = dict::new()
+
+pub fn nama() { return TERPILIH }
+
+/// Ganti tema: "gelap" atau "terang". Nama lain tidak mengubah apa pun dan menjawab false.
+pub fn pilih(tema) {
+    if tema != "gelap" && tema != "terang" { return false }
+    TERPILIH = tema
+    GAYA = dict::new()
+    return true
+}
+
+fn palet() {
+    if TERPILIH == "terang" { return TERANG }
+    return GELAP
+}
+
+/// Urutan SGR untuk potongan teks berjenis `jenis` ("" teks biasa) di atas lapisan
+/// `lapis` ("" tanpa latar).
+pub fn gaya(jenis, lapis) {
+    let kunci = jenis + "," + lapis
+    if dict::has(GAYA, kunci) { return GAYA[kunci] }
+    let p = palet()
+    var isi = "0"
+    if jenis != "" { isi = isi + ";" + p[jenis] }
+    if lapis != "" { isi = isi + ";" + p[lapis] }
+    let g = "\u001b[" + isi + "m"
+    GAYA[kunci] = g
+    return g
+}
+
+/// Urutan SGR untuk unsur antarmuka: "judul", "nomor", "pesan", "tombol", …
+pub fn warna(unsur) {
+    return gaya(unsur, "")
+}

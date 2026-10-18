@@ -1,0 +1,188 @@
+package main
+
+// Konformansi: alur kendali.
+
+fn klasifikasi(n: int) -> str {
+    if n < 0 {
+        return "negatif"
+    } else if n == 0 {
+        return "nol"
+    }
+    return "positif"
+}
+
+// rantai else-if sebagai ekspresi (nilai = cabang yang diambil)
+fn tingkat(v: int) -> int {
+    if v < 10 { 1 } else if v < 20 { 2 } else { 3 }
+}
+
+fn tanpa_return(n: int) -> int {
+    // `if` sebagai ekspresi ekor fungsi
+    if n > 10 { 100 } else { 200 }
+}
+
+fn cari_pertama_genap(xs: array) -> int {
+    for idx in 0..len(xs) {
+        if xs[idx] % 2 == 0 { return xs[idx] }
+    }
+    return -1
+}
+
+pub fn main() {
+    // ── if sebagai statement ────────────────────────────────────────────
+    var x: int = 0
+    if true { x = 5 }
+    assert_eq(x, 5)
+
+    if false { x = 9 }
+    assert_eq(x, 5)
+
+    // if/else
+    var label: str = "?"
+    if x > 3 { label = "besar" } else { label = "kecil" }
+    assert_eq(label, "besar")
+
+    // rantai else-if memilih cabang PERTAMA yang cocok
+    assert_eq(klasifikasi(-2), "negatif")
+    assert_eq(klasifikasi(0), "nol")
+    assert_eq(klasifikasi(7), "positif")
+
+    // ── if sebagai ekspresi ─────────────────────────────────────────────
+    let a = if true { 1 } else { 2 }
+    assert_eq(a, 1)
+
+    let b = if false { 1 } else { 2 }
+    assert_eq(b, 2)
+
+    assert_eq(tanpa_return(50), 100)
+    assert_eq(tanpa_return(1), 200)
+
+    // bersarang
+    let c = if true { if true { 42 } else { 1 } } else { 2 }
+    assert_eq(c, 42)
+
+    // rantai else-if sebagai ekspresi
+    assert_eq(tingkat(5), 1)
+    assert_eq(tingkat(15), 2)
+    assert_eq(tingkat(25), 3)
+
+    // if-ekspresi di dalam ekspresi lain
+    assert_eq(1 + if true { 10 } else { 20 }, 11)
+
+    // cabang boleh menghasilkan tipe non-integer
+    let s = if false { "tidak" } else { "ya" }
+    assert_eq(s, "ya")
+
+    // blok telanjang di posisi ekor bernilai isi bloknya
+    let d = { { 77 } }
+    assert_eq(d, 77)
+
+    // blok dengan statement lalu ekspresi ekor
+    let e = { var t: int = 5; t + 7 }
+    assert_eq(e, 12)
+
+    // ── while ───────────────────────────────────────────────────────────
+    var i: int = 0
+    var jumlah: int = 0
+    while i < 5 {
+        jumlah = jumlah + i
+        i = i + 1
+    }
+    assert_eq(jumlah, 10)
+
+    // while yang tidak pernah masuk
+    var n: int = 0
+    while false { n = 1 }
+    assert_eq(n, 0)
+
+    // ── loop + break/continue ───────────────────────────────────────────
+    var hitung: int = 0
+    loop {
+        hitung = hitung + 1
+        if hitung >= 3 { break }
+    }
+    assert_eq(hitung, 3)
+
+    var ganjil: int = 0
+    for k in 0..10 {
+        if k % 2 == 0 { continue }
+        ganjil = ganjil + k
+    }
+    assert_eq(ganjil, 25)
+
+    // ── for range ───────────────────────────────────────────────────────
+    var total: int = 0
+    for v in 0..4 { total = total + v }
+    assert_eq(total, 6)
+
+    // range kosong tidak pernah dieksekusi
+    var kosong: int = 0
+    for v in 0..0 { kosong = kosong + 1 }
+    assert_eq(kosong, 0)
+
+    // ── return lebih awal ───────────────────────────────────────────────
+    assert_eq(cari_pertama_genap([1, 3, 8, 10]), 8)
+    assert_eq(cari_pertama_genap([1, 3, 5]), -1)
+
+    // ── break/continue TANPA label cuma kena loop TERDEKAT ────────────────
+    var terekam_tanpa_label = []
+    for i in 0..2 {
+        for j in 0..3 {
+            if j == 1 { break }                    // cuma hentikan loop j
+            terekam_tanpa_label = terekam_tanpa_label + [(i, j)]
+        }
+    }
+    assert_eq(terekam_tanpa_label, [(0, 0), (1, 0)])
+
+    // ── break BERLABEL menembus loop yang membungkusnya ───────────────────
+    var terekam_break_label = []
+    'luar: for i in 0..3 {
+        for j in 0..3 {
+            if i == 1 && j == 1 { break 'luar }     // hentikan loop i, bukan cuma j
+            terekam_break_label = terekam_break_label + [(i, j)]
+        }
+    }
+    assert_eq(terekam_break_label, [(0, 0), (0, 1), (0, 2), (1, 0)])
+
+    // ── continue BERLABEL melanjutkan loop LUAR, bukan yang dalam ─────────
+    var terekam_continue_label = []
+    'luar2: for i in 0..3 {
+        for j in 0..3 {
+            if j == 1 { continue 'luar2 }           // lompat ke i berikutnya
+            terekam_continue_label = terekam_continue_label + [(i, j)]
+        }
+        // baris ini TIDAK PERNAH tercapai: j selalu berhenti di 1
+        terekam_continue_label = terekam_continue_label + [(i, -1)]
+    }
+    assert_eq(terekam_continue_label, [(0, 0), (1, 0), (2, 0)])
+
+    // ── label juga berlaku untuk `while` dan `loop` ───────────────────────
+    var n = 0
+    'w: while true {
+        n = n + 1
+        if n == 5 { break 'w }
+    }
+    assert_eq(n, 5)
+
+    var m = 0
+    'lp: loop {
+        m = m + 1
+        if m == 4 { break 'lp }
+    }
+    assert_eq(m, 4)
+
+    // ── tiga tingkat bersarang, label menembus dua level sekaligus ────────
+    var terekam_tiga_level = []
+    'terluar: for a in 0..3 {
+        for b in 0..3 {
+            for c in 0..3 {
+                if a == 1 && b == 1 { break 'terluar }
+                terekam_tiga_level = terekam_tiga_level + [(a, b, c)]
+            }
+        }
+    }
+    // Berhenti tepat SEBELUM (a=1, b=1, *): (0,*,*) penuh, lalu (1,0,*) penuh
+    assert_eq(terekam_tiga_level.len(), 9 + 3)
+
+    wok("control_flow OK")
+}

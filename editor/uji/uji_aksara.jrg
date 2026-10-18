@@ -1,0 +1,85 @@
+package main
+import "sunting/aksara"
+
+fn test_lebar_ascii() {
+    assert_eq(aksara::lebar("halo"), 4)
+    assert_eq(aksara::lebar(""), 0)
+    assert(aksara::polos("let x = 1"))
+    assert(!aksara::polos("a\tb"))
+    assert(!aksara::polos("日本"))
+}
+
+fn test_lebar_tab_dan_lebar_ganda() {
+    assert_eq(aksara::lebar("\t"), 4)
+    assert_eq(aksara::lebar("a\tb"), 5)
+    assert_eq(aksara::lebar("abcd\tb"), 9)
+    assert_eq(aksara::lebar("日本語"), 6)
+    assert_eq(aksara::lebar("a😀b"), 4)
+    assert_eq(aksara::lebar("é"), 1)
+}
+
+fn test_ke_tampil_dan_balik() {
+    assert_eq(aksara::ke_tampil("a\tb", 0), 0)
+    assert_eq(aksara::ke_tampil("a\tb", 1), 1)
+    assert_eq(aksara::ke_tampil("a\tb", 2), 4)
+    assert_eq(aksara::ke_tampil("a\tb", 3), 5)
+    assert_eq(aksara::ke_tampil("日本語", 2), 4)
+    assert_eq(aksara::ke_tampil("abc", 99), 3)
+    assert_eq(aksara::ke_tampil("日本語", 99), 6)
+    assert_eq(aksara::ke_karakter("a\tb", 0), 0)
+    assert_eq(aksara::ke_karakter("a\tb", 2), 1)
+    assert_eq(aksara::ke_karakter("a\tb", 4), 2)
+    assert_eq(aksara::ke_karakter("a\tb", 99), 3)
+    assert_eq(aksara::ke_karakter("日本語", 3), 1)
+    assert_eq(aksara::ke_karakter("abc", 2), 2)
+    assert_eq(aksara::ke_karakter("abc", 99), 3)
+    assert_eq(aksara::ke_karakter("abc", -5), 0)
+}
+
+fn test_jendela() {
+    assert_eq(aksara::jendela("halo dunia", 0, 4), "halo")
+    assert_eq(aksara::jendela("halo dunia", 5, 99), "dunia")
+    assert_eq(aksara::jendela("halo", 9, 5), "")
+    assert_eq(aksara::jendela("a\tb", 0, 10), "a   b")
+    assert_eq(aksara::jendela("a\tb", 2, 10), "  b")
+    assert_eq(aksara::jendela("日本語", 1, 4), " 本 ")
+    assert_eq(aksara::jendela("日本語", 0, 3), "日 ")
+    assert_eq(aksara::jendela("a\u0001b", 0, 10), "a^Ab")
+}
+
+fn test_potong_dan_peta() {
+    assert_eq(aksara::potong("halo dunia", 5, 10, 0, 99), "dunia")
+    assert_eq(aksara::potong("halo dunia", 0, 10, 2, 4), "lo d")
+    assert_eq(aksara::potong("halo dunia", 3, 3, 0, 99), "")
+    assert_eq(aksara::potong("a日b", 1, 2, 0, 99), "日")
+    assert_eq(aksara::potong("a日b", 0, 3, 2, 99), " b")
+    // Tanda gabung menumpang di hurufnya dan tidak menambah kolom.
+    assert_eq(aksara::lebar("e\u0301a"), 2)
+    assert_eq(aksara::ke_tampil("e\u0301a", 2), 1)
+    assert_eq(aksara::jendela("e\u0301a", 0, 10), "e\u0301a")
+    // Kendali C1 tidak punya rupa: satu tanda tanya, satu kolom.
+    assert_eq(aksara::jendela("a\u0085b", 0, 10), "a?b")
+    assert_eq(aksara::lebar("a\u0085b"), 3)
+    assert_eq(aksara::lebar("a\u007fb"), 4)
+    let p = aksara::peta("a\tb")
+    assert_eq(p[0], [0, 1, 4, 5])
+    assert_eq(p[1], ["a", "   ", "b"])
+}
+
+fn test_indentasi_dan_kata() {
+    assert_eq(aksara::indentasi("    x"), 4)
+    assert_eq(aksara::indentasi("\t x"), 2)
+    assert_eq(aksara::indentasi(""), 0)
+    assert(aksara::kata('a'))
+    assert(aksara::kata('_'))
+    assert(aksara::kata('9'))
+    assert(!aksara::kata(':'))
+}
+
+fn test_digit() {
+    assert(aksara::digit('0'))
+    assert(aksara::digit('9'))
+    assert(!aksara::digit('-'))
+    assert(!aksara::digit('.'))
+    assert(!aksara::digit('a'))
+}

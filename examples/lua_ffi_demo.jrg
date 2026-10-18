@@ -1,0 +1,22 @@
+// examples/lua_ffi_demo.jrg — memanggil Lua dari JRG (interpreter saja; butuh `lua` 5.3+).
+package main
+
+fn ganda(x) { return x * 2 }
+
+pub fn main() {
+    if !lua::tersedia() {
+        wok("lua tidak ada di mesin ini — lewati demo")
+        return
+    }
+    lua::exec("function sapa(nama) return 'halo, ' .. nama end")
+    wok(lua::call("sapa", "JRG").unwrap())
+    wok(lua::eval("math.floor(10 / 3)").unwrap())
+    wok(lua::call("string.format", "%05.1f", 3.14159).unwrap())
+    // Fungsi JRG bisa dipanggil balik dari dalam Lua.
+    lua::exec("function petakan(f, xs) local r = {} for i, v in ipairs(xs) do r[i] = f(v) end return r end")
+    wok(lua::call("petakan", ganda, [1, 2, 3]).unwrap())
+    match lua::eval("error('contoh galat')") {
+        Ok(v) => wok("tak terduga:", v),
+        Err(e) => wok("galat Lua jadi Err:", e),
+    }
+}

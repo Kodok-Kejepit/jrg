@@ -1,0 +1,24 @@
+// halo.jrg — sebuah SKRIP: tanpa `package`, tanpa `main` yang ditulis
+// sendiri.
+
+wok("halo dari JRG")
+
+// Deklarasi tetap di tingkat atas dan tetap ter-hoist — jadi `sapa` boleh
+// dipanggil sebelum barisnya sendiri.
+wok(sapa("Nusantara"))
+
+fn sapa(nama) {
+    return «sugeng rawuh, ${nama}!»
+}
+
+// `let` justru TIDAK ter-hoist di sini, dan itu disengaja: sebuah skrip
+// dibaca dari atas ke bawah, jadi urutannya berlaku seperti yang terlihat.
+let angka = [5, 3, 8, 1]
+wok("terurut:", arr::sort(angka))
+wok("jumlah:", arr::sum(angka))
+
+struct Titik { pub x: int, pub y: int }
+impl Titik {
+    fn jarak_kuadrat(self) -> int { return self.x * self.x + self.y * self.y }
+}
+wok("jarak kuadrat:", Titik{x: 3, y: 4}.jarak_kuadrat())

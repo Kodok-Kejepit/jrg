@@ -1,0 +1,129 @@
+package std_heap
+
+// Penjaga argumen. Tanpa ini sebuah `heap::new_by(5)` DITERIMA dan baru gagal waktu
+// hasilnya dipanggil — dengan caret di dalam berkas ini, menunjuk baris yang
+// tidak salah, di berkas yang pembacanya tidak pernah buka.
+fn _wajib_fungsi(nama, ke, v) {
+    let t = typeof(v)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str::to_string(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+    return true
+}
+
+// Heap biner (min-heap) di atas sebuah array dengan panjang LOGIS `n`: `push` dan `rest`
+// O(log n). `T` tipe isinya, `K` tipe bobot yang dibandingkan; tanpa fungsi kunci, bobotnya
+// nilainya sendiri. Bentuk yang cepat: `h = h.push(x)` dan `let v = h.peek(); h = h.rest()`.
+pub struct Heap<T, K> { pub isi: []T, pub n: int, pub kunci: fn(T) -> K }
+
+/// Min-heap kosong. `peek` melihat yang terkecil, `rest` membuangnya dalam O(log n).
+pub fn new<T>() -> Heap<T, T> { return Heap { isi: [], n: 0, kunci: |x: T| x } }
+/// Min-heap kosong yang urutannya ditentukan `f(x)`.
+pub fn new_by<T, K>(f: fn(T) -> K) -> Heap<T, K> {
+    _wajib_fungsi("heap::new_by", 1, f)
+    return Heap { isi: [], n: 0, kunci: f } }
+
+/// Min-heap dari sebuah array.
+pub fn from<T>(a: []T) -> Heap<T, T> {
+    var h: Heap<T, T> = new()
+    for _, x in a { h = h.push(x) }
+    return h
+}
+
+/// Min-heap dari sebuah array, urutannya ditentukan `f(x)`.
+pub fn from_by<T, K>(a: []T, f: fn(T) -> K) -> Heap<T, K> {
+    _wajib_fungsi("heap::from_by", 2, f)
+    var h: Heap<T, K> = new_by(f)
+    for _, x in a { h = h.push(x) }
+    return h
+}
+
+impl<T, K> Heap<T, K> {
+    fn bobot(self, x: T) -> K {
+        let f = self.kunci
+        return f(x)
+    }
+
+    /// Berapa isinya.
+    pub fn len(self) -> int { return self.n }
+    /// Benar kalau kosong.
+    pub fn is_empty(self) -> bool { return self.n == 0 }
+    /// Lihat yang terkecil tanpa mengambilnya.
+    pub fn peek(self) -> Option<T> {
+        if self.n == 0 { return Option::None }
+        return arr::get(self.isi, 0)
+    }
+
+    /// Masukkan satu nilai. Tulis `h = h.push(x)`.
+    pub fn push(self, x: T) -> Heap<T, K> {
+        if self.n < len(self.isi) { self.isi[self.n] = x } else { self.isi += [x] }
+        self.n += 1
+        var i = self.n - 1
+        while i > 0 {
+            let induk = (i - 1) / 2
+            if self.bobot(self.isi[i]) < self.bobot(self.isi[induk]) {
+                let t = self.isi[i]
+                self.isi[i] = self.isi[induk]
+                self.isi[induk] = t
+                i = induk
+            } else {
+                i = 0
+            }
+        }
+        return self
+    }
+
+    /// Heap TANPA yang terkecil. Tulis `h = h.rest()`; heap kosong tetap kosong.
+    pub fn rest(self) -> Heap<T, K> {
+        if self.n == 0 { return self }
+        self.n -= 1
+        if self.n == 0 { return self }
+        self.isi[0] = self.isi[self.n]
+        var i = 0
+        var jalan = true
+        while jalan {
+            let kiri = 2 * i + 1
+            let kanan = 2 * i + 2
+            var kecil = i
+            if kiri < self.n {
+                if self.bobot(self.isi[kiri]) < self.bobot(self.isi[kecil]) { kecil = kiri }
+            }
+            if kanan < self.n {
+                if self.bobot(self.isi[kanan]) < self.bobot(self.isi[kecil]) { kecil = kanan }
+            }
+            if kecil == i {
+                jalan = false
+            } else {
+                let t = self.isi[i]
+                self.isi[i] = self.isi[kecil]
+                self.isi[kecil] = t
+                i = kecil
+            }
+        }
+        return self
+    }
+
+    // Bentuk yang sama dengan `arr::pop`: heap kosong menjawab `None`, bukan `nil`.
+    /// Ambil yang TERKECIL: `(heap baru, Option berisi nilainya)`. Tulis `h, v = h.pop()`.
+    pub fn pop(self) -> (Heap<T, K>, Option<T>) {
+        let v = self.peek()
+        self = self.rest()
+        return (self, v)
+    }
+
+    // Kuras seluruh isinya menurut urutan heap. Ini juga cara termurah
+    // memeriksa bahwa heap-nya benar: hasilnya harus terurut.
+    /// Seluruh isinya sebagai array terurut menaik.
+    pub fn to_sorted_array(self) -> []T {
+        var h = self
+        var keluar: []T = []
+        while !h.is_empty() {
+            keluar += [Option::unwrap(h.peek())]
+            h = h.rest()
+        }
+        return keluar
+    }
+
+    /// Bentuk tampilannya, dipakai `wok`.
+    pub fn to_string(self) -> string { return "Heap" + fmt::sprint(arr::take(self.isi, self.n)) }
+}

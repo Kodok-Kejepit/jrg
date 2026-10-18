@@ -1,0 +1,56 @@
+package main
+
+// Konformansi: alokasi memori manual `jawa::` / `jawir::`.
+
+pub fn main() {
+    // ── sel tunggal ─────────────────────────────────────────────────────
+    let p = jawa::alloc(42)
+    assert_eq(jawa::get(p), 42)
+    jawa::set(p, 99)
+    assert_eq(jawa::get(p), 99)
+    assert_eq(jawa::is_valid(p), true)
+    jawir::free(p)
+    assert_eq(jawa::is_valid(p), false)
+
+    // ── bentuk telanjang: `jawa(v)` == `jawa::alloc(v)` ─────────────────
+    let q = jawa(7)
+    assert_eq(jawa::get(q), 7)
+    jawir(q)                       // == jawir::free(q)
+    assert_eq(jawa::is_valid(q), false)
+
+    // ── array ───────────────────────────────────────────────────────────
+    let a = jawa::array(3)
+    assert_eq(jawa::array_len(a), 3)
+    jawa::array_set(a, 0, 10)
+    jawa::array_set(a, 1, 20)
+    assert_eq(jawa::array_get(a, 0), 10)
+    let a2 = jawa::array_push(a, 30)
+    assert_eq(jawa::array_len(a), 4)
+    assert_eq(jawa::array_get(a, 3), 30)
+    jawir::free(a)
+    assert_eq(jawa::is_valid(a), false)
+
+    // ── buffer ──────────────────────────────────────────────────────────
+    let b = jawa::buffer(4)
+    assert_eq(jawa::buffer_len(b), 4)
+    jawa::buffer_set(b, 0, 255)
+    assert_eq(jawa::buffer_get(b, 0), 255)
+    jawir::free(b)
+
+    // ── handle adalah nilai biasa: salinannya menunjuk penyimpanan SAMA ──
+    let asli = jawa::alloc(1)
+    let salinan = asli
+    jawa::set(salinan, 123)
+    assert_eq(jawa::get(asli), 123)     // terlihat lewat handle aslinya
+    jawir::free(salinan)
+    assert_eq(jawa::is_valid(asli), false)   // dibebaskan lewat salinan
+    assert_eq(jawa::is_valid(salinan), false)
+
+    // ── nilai biasa TIDAK terpengaruh sama sekali ───────────────────────
+    var biasa = [1, 2, 3]
+    var lain = biasa
+    lain[0] = 99
+    assert_eq(biasa[0], 1)             // tetap value semantics
+
+    wok("memori_manual OK")
+}

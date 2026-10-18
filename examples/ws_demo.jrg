@@ -1,0 +1,48 @@
+package main
+
+// ============================================================================
+// ws_demo.jrg — server WebSocket + HTTP di satu router.
+
+const HALAMAN = «<!doctype html>
+<title>Gema WebSocket</title>
+<h1>Gema WebSocket</h1>
+<input id=t autofocus><button onclick=k()>Kirim</button>
+<ul id=l></ul>
+<script>
+const w = new WebSocket("ws://" + location.host + "/gema")
+w.onmessage = e => l.insertAdjacentHTML("beforeend", "<li>" + e.data + "</li>")
+function k() { w.send(t.value); t.value = "" }
+</script>»
+
+pub fn main() {
+    let r = dok::router_new()
+
+    // Middleware `sebelum` juga menutupi endpoint WebSocket — itu disengaja,
+    // karena endpoint WS justru yang paling sering lupa dijaga.
+    dok::router_use(r, |req| {
+        dok::log_info(req.method + " " + req.path)
+        return nil
+    })
+
+    dok::router_get(r, "/", |req| dok::html(HALAMAN))
+
+    // Handler WS menerima (koneksi, request). Soketnya tetap terbuka selama
+    // handler berjalan; `ws_recv` menjawab `None` HANYA kalau ditutup.
+    dok::router_ws(r, "/gema", |c, req| {
+        dok::log_info("ws tersambung dari " + req.remote_addr)
+        var n = 0
+        while true {
+            match dok::ws_recv(c) {
+                Some(m) => {
+                    n = n + 1
+                    dok::ws_send(c, "gema #" + n as string + ": " + m)
+                }
+                None => { break }
+            }
+        }
+        dok::log_info("ws putus sesudah " + n as string + " pesan")
+    })
+
+    wok("buka http://127.0.0.1:7075 di browser")
+    dok::serve(r, 7075)
+}

@@ -1,0 +1,162 @@
+package std_mesin_peta
+
+// Peta petak (tilemap): kisi `lebar` x `tinggi` berisi bilangan bulat, tiap petak
+// selebar `ukuran` piksel. Petak di luar peta dijawab `Option::None`, bukan 0.
+import "std/mesin/vek"
+import "std/mesin/fisika"
+
+pub struct Peta { pub lebar: int, pub tinggi: int, pub ukuran: int, pub isi: []int }
+
+fn _bulat_positif(nama, apa, n) {
+    if typeof(n) != "int" || n <= 0 {
+        panik(nama + ": " + apa + " harus bilangan bulat positif, dapat " + str(n))
+    }
+}
+
+/// Peta baru yang semua petaknya `isi_awal`.
+pub fn baru(lebar, tinggi, ukuran, isi_awal) {
+    _bulat_positif("peta::baru", "lebar", lebar)
+    _bulat_positif("peta::baru", "tinggi", tinggi)
+    _bulat_positif("peta::baru", "ukuran petak", ukuran)
+    if typeof(isi_awal) != "int" { panik("peta::baru: isi petak harus bilangan bulat, dapat `" + typeof(isi_awal) + "`") }
+    return Peta { lebar: lebar, tinggi: tinggi, ukuran: ukuran, isi: arr::fill(isi_awal, lebar * tinggi) }
+}
+
+/// Peta dari baris-baris teks; `arti` memetakan tiap karakter ke nilai petaknya.
+/// Baris yang panjangnya beda dan karakter yang tidak ada di `arti` ditolak.
+pub fn dari_teks(baris, ukuran, arti) {
+    if typeof(baris) != "array" || len(baris) == 0 { panik("peta::dari_teks: baris harus array teks yang tidak kosong") }
+    _bulat_positif("peta::dari_teks", "ukuran petak", ukuran)
+    let lebar = len(baris[0])
+    var isi = []
+    for y, b in baris {
+        if len(b) != lebar {
+            panik("peta::dari_teks: baris " + str(y) + " panjangnya " + str(len(b)) + ", baris 0 panjangnya " + str(lebar))
+        }
+        for x, ch in b {
+            let k = str(ch)
+            if !dict::has(arti, k) {
+                panik("peta::dari_teks: karakter `" + k + "` di (" + str(x) + ", " + str(y) + ") tidak ada di `arti`")
+            }
+            isi = isi + [arti[k]]
+        }
+    }
+    return Peta { lebar: lebar, tinggi: len(baris), ukuran: ukuran, isi: isi }
+}
+
+impl Peta {
+    /// Isi petak `(x, y)`, atau `Option::None` di luar peta.
+    pub fn di(self, x, y) {
+        if x < 0 || y < 0 || x >= self.lebar || y >= self.tinggi { return Option::None }
+        return Option::Some(self.isi[y * self.lebar + x])
+    }
+    /// Peta baru dengan petak `(x, y)` diganti `v`. Di luar peta ditolak.
+    pub fn atur(self, x, y, v) {
+        if x < 0 || y < 0 || x >= self.lebar || y >= self.tinggi {
+            panik("peta::atur: petak (" + str(x) + ", " + str(y) + ") di luar peta " + str(self.lebar) + "x" + str(self.tinggi))
+        }
+        var p = self
+        p.isi[y * self.lebar + x] = v
+        return p
+    }
+    /// Petak yang memuat titik dunia `p`, sebagai `[x, y]`.
+    pub fn petak_di(self, p) {
+        return [math::floor(p.x / (self.ukuran as float)) as int, math::floor(p.y / (self.ukuran as float)) as int]
+    }
+    /// Kotak dunia sebuah petak.
+    pub fn kotak_petak(self, x, y) {
+        return fisika::kotak(x * self.ukuran, y * self.ukuran, self.ukuran, self.ukuran)
+    }
+    /// Apakah kotak `k` menyentuh petak yang nilainya ada di `padat`.
+    /// Petak di luar peta dihitung padat: dunia berakhir di tepinya.
+    pub fn tabrak(self, k, padat) {
+        let u = self.ukuran as float
+        let x0 = math::floor(k.x / u) as int
+        let y0 = math::floor(k.y / u) as int
+        let x1 = math::floor((k.x + k.w - 0.0001) / u) as int
+        let y1 = math::floor((k.y + k.h - 0.0001) / u) as int
+        for _, y in range_inclusive(y0, y1) {
+            for _, x in range_inclusive(x0, x1) {
+                match self.di(x, y) {
+                    Option::None => { return true }
+                    Option::Some(v) => { if arr::contains(padat, v) { return true } }
+                }
+            }
+        }
+        return false
+    }
+    /// Gambar tiap petak dari lembar sprite: `petak_dari(nilai)` menjawab nomor
+    /// petaknya di `lembar`, atau `nil` untuk tidak menggambar apa pun.
+    pub fn gambar_lembar(self, c, lembar, petak_dari) {
+        for i, v in self.isi {
+            let p = petak_dari(v)
+            if p != nil {
+                lembar.gambar(c, p, (i % self.lebar) * self.ukuran, (i / self.lebar) * self.ukuran)
+            }
+        }
+    }
+    /// Gambar tiap petak dengan `warna_dari(nilai)`; nilai yang dijawab `nil` tidak digambar.
+    pub fn gambar(self, c, warna_dari) {
+        for i, v in self.isi {
+            let w = warna_dari(v)
+            if w != nil {
+                canvas::fill_rect(c, (i % self.lebar) * self.ukuran, (i / self.lebar) * self.ukuran,
+                                  self.ukuran, self.ukuran, w)
+            }
+        }
+    }
+}
+/// Sisi mana yang tertahan petak padat sesudah `gerak`.
+pub struct Sentuh { pub kiri: bool, pub kanan: bool, pub atas: bool, pub bawah: bool }
+
+impl Peta {
+    /// Geser kotak `k` sejauh `v` (`Vek2`) sambil ditahan petak `padat`: sumbu x dulu,
+    /// lalu y, berhenti TEPAT di tepi petak, dan dipecah jadi langkah kecil supaya tidak
+    /// menembus dinding tipis. Menjawab `(kotak_baru, Sentuh)`.
+    pub fn gerak(self, k: fisika::Kotak, v: vek::Vek2, padat) -> (fisika::Kotak, Sentuh) {
+        if typeof(k) != "struct:Kotak" { panik("peta::gerak: butuh `Kotak`, dapat `" + typeof(k) + "`") }
+        if typeof(v) != "struct:Vek2" { panik("peta::gerak: geseran harus `Vek2`, dapat `" + typeof(v) + "`") }
+        if self.tabrak(k, padat) {
+            panik("peta::gerak: kotak di (" + str(k.x) + ", " + str(k.y) + ") sudah di dalam petak padat — " +
+                  "letakkan di ruang kosong dulu")
+        }
+        let u = self.ukuran as float
+        let n = math::ceil(math::max(math::abs(v.x), math::abs(v.y)) / (u / 2.0)) as int
+        let langkah = n <= 0 $ 1 : n
+        let dx = v.x / (langkah as float)
+        let dy = v.y / (langkah as float)
+        var kotak = k
+        var s = Sentuh { kiri: false, kanan: false, atas: false, bawah: false }
+        for _ in range(0, langkah) {
+            if dx != 0.0 && !s.kiri && !s.kanan {
+                let coba = fisika::kotak(kotak.x + dx, kotak.y, kotak.w, kotak.h)
+                if self.tabrak(coba, padat) {
+                    if dx > 0.0 {
+                        kotak.x = math::floor((coba.x + coba.w - 0.0001) / u) * u - kotak.w
+                        s.kanan = true
+                    } else {
+                        kotak.x = (math::floor(coba.x / u) + 1.0) * u
+                        s.kiri = true
+                    }
+                } else {
+                    kotak = coba
+                }
+            }
+            if dy != 0.0 && !s.atas && !s.bawah {
+                let coba = fisika::kotak(kotak.x, kotak.y + dy, kotak.w, kotak.h)
+                if self.tabrak(coba, padat) {
+                    if dy > 0.0 {
+                        kotak.y = math::floor((coba.y + coba.h - 0.0001) / u) * u - kotak.h
+                        s.bawah = true
+                    } else {
+                        kotak.y = (math::floor(coba.y / u) + 1.0) * u
+                        s.atas = true
+                    }
+                } else {
+                    kotak = coba
+                }
+            }
+        }
+        return (kotak, s)
+    }
+}

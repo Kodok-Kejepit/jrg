@@ -1,0 +1,185 @@
+package main
+
+// Uji perakit layar: tiap baris diperiksa TEKSNYA (tanpa warna), lebarnya, dan letak kursor.
+import "sunting/keadaan"
+import "sunting/penyangga"
+import "sunting/layar"
+import "sunting/dialog"
+import "sunting/daftar"
+import "sunting/aksara"
+
+fn polos(s) { return re::replace_all("\u001b\\[[0-9;?]*[A-Za-z]", s, "") }
+
+fn buat(baris, lebar, tinggi) {
+    var e = keadaan::baru([penyangga::baru("uji.jrg", baris)])
+    e.lebar = lebar
+    e.tinggi = tinggi
+    return e
+}
+
+fn bingkai(e) { return layar::bingkai(layar::siapkan(e)) }
+
+fn test_bingkai_dasar() {
+    let e = buat(["fn main() {", "    wok(1)", "}"], 40, 10)
+    let h = bingkai(e)
+    let b = h[0]
+    // judul + 7 baris teks + pesan + 1 baris pintasan
+    assert_eq(len(b), 10)
+    let judul = polos(b[0])
+    assert_eq(str::len(judul), 40)
+    assert(str::contains(judul, "uji.jrg"), judul)
+    assert(str::contains(judul, "1:1"), judul)
+    assert(str::contains(judul, "3 baris"), judul)
+    // Baris kursor diisi sampai tepi kanan (latar baris aktif); yang lain dihapus sisanya.
+    assert_eq(polos(b[1]), "   1 fn main() {" + str::repeat(" ", 24))
+    assert_eq(polos(b[2]), "   2     wok(1)")
+    assert_eq(polos(b[3]), "   3 }")
+    assert_eq(polos(b[4]), "~")
+    assert_eq([h[1], h[2], h[3]], [2, 6, true])
+    for _, r in b { assert(aksara::lebar(polos(r)) <= 40, polos(r)) }
+}
+
+fn test_tidak_ada_baris_melebihi_lebar_di_layar_sempit() {
+    // Layar 20 kolom: judul, pintasan dan teks panjang semuanya harus muat.
+    var e = buat(["let nama_yang_sangat_panjang_sekali = 12345678901234567890", "pendek"], 20, 16)
+    e = keadaan::kabar(e, "pesan yang juga jauh lebih panjang dari lebar layarnya")
+    let h = bingkai(e)
+    assert_eq(len(h[0]), 16)
+    for _, r in h[0] { assert(aksara::lebar(polos(r)) <= 20, polos(r)) }
+    // Dua baris pintasan di layar setinggi ini.
+    assert_eq(keadaan::baris_pintasan(e), 2)
+}
+
+fn test_seleksi_dan_hasil_cari_diberi_latar() {
+    var e = buat(["fn main() {", "    wok(1)", "", "}"], 40, 10)
+    var p = penyangga::pilih_rentang(keadaan::kini(e), 0, 3, 3, 0)
+    e = keadaan::ganti(e, p)
+    let b = bingkai(e)[0]
+    // Latar seleksi (48;5;24) ada di tiap baris yang kena, termasuk baris KOSONG.
+    assert(str::contains(b[1], "48;5;24"), "baris 1")
+    assert(str::contains(b[2], "48;5;24"), "baris 2")
+    assert(str::contains(b[3], "48;5;24"), "baris kosong di dalam seleksi")
+    assert(!str::contains(b[4], "48;5;24"), "baris sesudah seleksi")
+    var c = buat(["fn main() {", "    wok(1)", "}"], 40, 10)
+    c.cari = "wok"
+    c.sorot_cari = true
+    let d = bingkai(c)[0]
+    assert(str::contains(d[2], "48;5;58"), "hasil cari tidak disorot")
+    assert(!str::contains(d[1], "48;5;58"), "baris tanpa hasil ikut disorot")
+}
+
+fn test_tab_dan_huruf_lebar_menggeser_kursor() {
+    // Tab = 4 kolom, tiap huruf CJK 2 kolom: kursor sesudah "\tx日" ada di kolom 4+1+2.
+    var e = buat(["\tx日本"], 40, 10)
+    e = keadaan::ganti(e, penyangga::ke(keadaan::kini(e), 0, 3))
+    let h = bingkai(e)
+    assert_eq(polos(h[0][1]), "   1     x日本" + str::repeat(" ", 26))
+    assert_eq([h[1], h[2]], [2, 5 + 7 + 1])
+}
+
+fn test_gulung_samping_memotong_dari_kiri() {
+    var e = buat(["0123456789abcdefghij"], 15, 10)
+    var p = keadaan::kini(e)
+    p.kiri = 5
+    p = penyangga::ke(p, 0, 8)
+    p.kiri = 5
+    e = keadaan::ganti(e, p)
+    let h = bingkai(e)
+    // Lebar teks 15 - 5 = 10 kolom, mulai dari kolom tampil ke-5; kedua tepinya ditandai
+    // karena barisnya berlanjut ke kiri dan ke kanan.
+    assert_eq(polos(h[0][1]), "   1 <6789abcd>")
+    assert_eq([h[1], h[2]], [2, 5 + 3 + 1])
+    // Baris LAIN tidak ikut digulung: konteksnya tetap terbaca.
+    var f = buat(["0123456789abcdefghij", "pendek"], 15, 10)
+    var q = penyangga::ke(keadaan::kini(f), 0, 8)
+    q.kiri = 5
+    f = keadaan::ganti(f, q)
+    let g = bingkai(f)
+    assert_eq(polos(g[0][2]), "   2 pendek")
+    // Baris yang muat tidak diberi tanda apa pun.
+    var k = buat(["0123456789"], 15, 10)
+    assert_eq(polos(bingkai(k)[0][1]), "   1 0123456789")
+    // Satu kolom lebih panjang dari layar: tanda `>` menggantikan kolom terakhir.
+    var l = buat(["0123456789a"], 15, 10)
+    assert_eq(polos(bingkai(l)[0][1]), "   1 012345678>")
+}
+
+fn test_dialog_dan_daftar_memindahkan_kursor_ke_baris_pesan() {
+    var e = buat(["a", "b"], 40, 10)
+    e.dialog = dialog::teks("cari", "Cari", "ab", [])
+    let h = bingkai(e)
+    let t = keadaan::tinggi_teks(e)
+    assert_eq(polos(h[0][t + 1]), "Cari: ab")
+    assert_eq([h[1], h[2], h[3]], [t + 2, 9, true])
+    var f = buat(["a", "b"], 40, 10)
+    f.daftar = daftar::baru("garis", "Garis besar", [["fn satu", 1], ["fn dua", 5]])
+    let g = bingkai(f)
+    assert(str::contains(polos(g[0][1]), "Garis besar"), polos(g[0][1]))
+    assert(str::contains(polos(g[0][1]), "2 dari 2"), polos(g[0][1]))
+    assert_eq(str::trim_end(polos(g[0][2])), " fn satu")
+    assert_eq(polos(g[0][3]), " fn dua")
+    assert_eq(polos(g[0][t + 1]), " saring: ")
+    assert_eq([g[1], g[2], g[3]], [t + 2, 10, true])
+}
+
+fn test_judul_daftar_kepanjangan_dipotong_dari_depan() {
+    var e = buat(["a"], 30, 10)
+    e.daftar = daftar::baru("jelajah", "Buka dari /rumah/pemakai/proyek/jauh/sekali/sub", [["a.jrg", 1]])
+    let h = polos(bingkai(e)[0][1])
+    // Ujung path-nya yang membedakan direktori, dan hitungan butirnya tetap ada.
+    assert(str::contains(h, "sekali/sub"), h)
+    assert(str::contains(h, "(1 dari 1)"), h)
+    assert(str::starts_with(h, " .."), h)
+    assert_eq(term::lebar(h), 30)
+}
+
+fn test_kotak_pelengkapan_di_bawah_kursor() {
+    var e = buat(["let x = wo", "", "", ""], 40, 12)
+    e = keadaan::ganti(e, penyangga::ke(keadaan::kini(e), 0, 10))
+    e.lengkap = ["wok", "wok_"]
+    e.lengkap_ke = 1
+    e.lengkap_dari = 8
+    let b = bingkai(e)[0]
+    assert(str::contains(polos(b[2]), " wok "), polos(b[2]))
+    assert(str::contains(polos(b[3]), " wok_ "), polos(b[3]))
+    // Kotaknya mulai di kolom awalan (5 nomor + 8), ditulis lewat pindah kolom mutlak.
+    assert(str::contains(b[2], "\u001b[14G"), "kolom kotak")
+}
+
+fn test_selisih_cuma_menulis_baris_yang_berubah() {
+    var e = buat(["satu", "dua", "tiga"], 40, 10)
+    layar::lupa()
+    let pertama = layar::selisih(bingkai(e), true)
+    assert(str::contains(pertama, "\u001b[2J"), "gambar paksa harus membersihkan layar")
+    assert(str::contains(polos(pertama), "satu"), "isi tidak ditulis")
+    // Bingkai yang sama: tidak ada satu baris pun yang ditulis ulang.
+    let kedua = layar::selisih(bingkai(e), false)
+    assert_eq(kedua, "\u001b[?25l\u001b[2;6H\u001b[?25h")
+    // Turun satu baris: yang berubah baris judul (posisi) dan dua baris teks.
+    e = keadaan::ganti(e, penyangga::gerak(keadaan::kini(e), "bawah", false, 7))
+    let ketiga = layar::selisih(bingkai(e), false)
+    assert(str::contains(ketiga, "\u001b[1;1H"), "judul")
+    assert(str::contains(ketiga, "\u001b[2;1H"), "baris lama")
+    assert(str::contains(ketiga, "\u001b[3;1H"), "baris baru")
+    assert(!str::contains(ketiga, "\u001b[4;1H"), "baris yang tidak berubah ikut ditulis")
+}
+
+fn test_keadaan_sorot_merambat_dan_dibatalkan_dari_baris_yang_berubah() {
+    var e = buat(["a /* buka", "masih komentar", "tutup */ b", "c"], 40, 12)
+    e = layar::siapkan(e)
+    var p = keadaan::kini(e)
+    assert_eq(p.awal_sorot, ["", "k1", "k1", ""])
+    assert_eq(p.ubah_dari, penyangga::TAK_BERUBAH)
+    // Menutup komentar di baris pertama mengubah keadaan semua baris sesudahnya.
+    p = penyangga::ke(p, 0, 9)
+    p = penyangga::sisip(p, " */")
+    assert_eq(p.ubah_dari, 0)
+    e = layar::siapkan(keadaan::ganti(e, p))
+    assert_eq(keadaan::kini(e).awal_sorot, ["", "", "", ""])
+    // Berkas bukan .jrg tidak disorot sama sekali.
+    var t = keadaan::baru([penyangga::baru("catatan.txt", ["fn x() /* y"])])
+    t.lebar = 40
+    t.tinggi = 10
+    let b = bingkai(t)[0]
+    assert(!str::contains(b[1], "38;5;213"), "berkas teks ikut disorot")
+}

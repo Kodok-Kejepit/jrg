@@ -1,0 +1,156 @@
+package sunting_aksara
+
+// Lebar TAMPIL teks di terminal: tab melebar ke kelipatan `TAB`, huruf Asia Timur dan
+// emoji dua kolom, tanda gabung nol kolom. Tanpa hitungan ini kursor meleset dari huruf
+// yang sedang disunting. Lebar tiap karakter datang dari `term::lebar_tiap`.
+
+pub const TAB = 4
+
+// Peta tampil per isi baris; dikosongkan kalau sudah terlalu banyak.
+var PETA_TAMPIL = dict::new()
+
+/// Benar kalau tiap karakter menempati tepat satu kolom, jadi kolom layar sama dengan
+/// indeks karakternya — jalur cepat untuk hampir semua baris kode.
+pub fn polos(s) {
+    return !re::test("[^ -~]", s)
+}
+
+/// Bentuk yang aman ditulis untuk karakter kendali: `^A`…`^_`, `^?`. Byte kendali mentah
+/// menggerakkan kursor terminal dan merusak layar.
+fn kendali(n) {
+    if n < 32 { return "^" + ((n + 64) as rune) }
+    if n == 127 { return "^?" }
+    return ""
+}
+
+fn susun_peta(s) {
+    let lebar = term::lebar_tiap(s)
+    var kol = [0]
+    var rupa = []
+    var x = 0
+    var i = 0
+    for _, c in str::chars(s) {
+        var w = lebar[i]
+        var r = "" + c
+        if c == '\t' {
+            w = TAB - (x % TAB)
+            r = str::repeat(" ", w)
+        } else if w == 0 {
+            let k = kendali(c as int)
+            if k != "" {
+                w = 2
+                r = k
+            } else if (c as int) < 160 {
+                // Kendali C1: tidak punya rupa; tanda tanya menjaga kolomnya tetap lurus.
+                w = 1
+                r = "?"
+            }
+        }
+        x = x + w
+        kol = kol + [x]
+        rupa = rupa + [r]
+        i = i + 1
+    }
+    return [kol, rupa]
+}
+
+/// Peta tampil sebuah baris: `[kol, rupa]`. `kol[i]` kolom layar tempat karakter ke-i
+/// mulai (`kol[n]` lebar seluruhnya); `rupa[i]` teks yang ditulis untuk karakter itu.
+pub fn peta(s) {
+    if dict::has(PETA_TAMPIL, s) { return PETA_TAMPIL[s] }
+    if len(PETA_TAMPIL) > 3000 { PETA_TAMPIL = dict::new() }
+    let p = susun_peta(s)
+    PETA_TAMPIL[s] = p
+    return p
+}
+
+/// Lebar tampil seluruh teks.
+pub fn lebar(s) {
+    if polos(s) { return str::len(s) }
+    let kol = peta(s)[0]
+    return kol[len(kol) - 1]
+}
+
+/// Kolom layar (dari 0) tempat karakter ke-`i` mulai digambar.
+pub fn ke_tampil(s, i) {
+    if polos(s) { return math::min(math::max(i, 0), str::len(s)) }
+    let kol = peta(s)[0]
+    return kol[math::min(math::max(i, 0), len(kol) - 1)]
+}
+
+/// Indeks karakter yang menempati kolom layar `x`; di kanan ujung baris menjawab panjangnya.
+pub fn ke_karakter(s, x) {
+    if polos(s) { return math::min(math::max(x, 0), str::len(s)) }
+    let kol = peta(s)[0]
+    let n = len(kol) - 1
+    var i = 0
+    while i < n {
+        if kol[i + 1] > x { return i }
+        i = i + 1
+    }
+    return n
+}
+
+/// Potongan karakter `[dari, sampai)` yang jatuh di kolom layar `[kiri, kiri + muat)`,
+/// siap ditulis. Huruf lebar yang terpotong di tepi diganti spasi supaya kolomnya lurus.
+pub fn potong(s, dari, sampai, kiri, muat) {
+    if dari >= sampai { return "" }
+    if polos(s) {
+        let a = math::max(dari, kiri)
+        let b = math::min(sampai, kiri + muat)
+        if a >= b { return "" }
+        return str::slice(s, a, b)
+    }
+    let p = peta(s)
+    let kol = p[0]
+    let rupa = p[1]
+    let kanan = kiri + muat
+    var bagian = []
+    var i = dari
+    while i < sampai {
+        let x = kol[i]
+        let y = kol[i + 1]
+        if x >= kanan { break }
+        if y > kiri {
+            if x < kiri || y > kanan {
+                bagian = bagian + [str::repeat(" ", math::min(y, kanan) - math::max(x, kiri))]
+            } else {
+                bagian = bagian + [rupa[i]]
+            }
+        } else if y == x && x >= kiri {
+            // Tanda gabung tepat di tepi kiri jendela ikut hurufnya, yang tidak tampil.
+            if x > kiri { bagian = bagian + [rupa[i]] }
+        }
+        i = i + 1
+    }
+    return arr::join(bagian, "")
+}
+
+/// Seluruh baris yang jatuh di kolom layar `[kiri, kiri + muat)`.
+pub fn jendela(s, kiri, muat) {
+    return potong(s, 0, str::len(s), kiri, muat)
+}
+
+/// Karakter penyusun nama: huruf, angka, garis bawah.
+pub fn kata(c) {
+    return c == '_' || str::is_alphanumeric(c)
+}
+
+/// Digit ASCII. Bukan `str::is_numeric`, yang juga menerima `-` dan `.`.
+pub fn digit(c) {
+    return c >= '0' && c <= '9'
+}
+
+pub fn spasi(c) {
+    return c == ' ' || c == '\t'
+}
+
+/// Jumlah karakter spasi/tab di awal baris.
+pub fn indentasi(s) {
+    var n = 0
+    for _, c in str::chars(s) {
+        if !spasi(c) { return n }
+        n = n + 1
+    }
+    return n
+}

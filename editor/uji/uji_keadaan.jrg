@@ -1,0 +1,31 @@
+import "sunting/keadaan"
+import "sunting/penyangga"
+import "sunting/tema"
+import "sunting/dialog"
+import "sunting/daftar"
+
+fn test_keadaan_baru() {
+    var e = keadaan::baru([penyangga::baru("a.jrg", ["satu", "dua"])])
+    assert_eq(len(e.berkas), 1)
+    assert_eq(dialog::aktif(e.dialog), false)
+    assert_eq(daftar::aktif(e.daftar), false)
+    e = keadaan::kabar(e, "halo")
+    assert_eq(e.pesan, "halo")
+    e.lebar = 40
+    e.tinggi = 10
+    assert_eq(keadaan::baris_pintasan(e), 1)
+    assert_eq(keadaan::tinggi_teks(e), 7)
+    assert_eq(keadaan::lebar_nomor(keadaan::kini(e)), 5)
+    assert_eq(keadaan::riwayat(e, "cari"), [])
+}
+
+fn test_tema() {
+    assert_eq(tema::gaya("", ""), "\u001b[0m")
+    assert_eq(tema::gaya("k", ""), "\u001b[0;38;5;213m")
+    assert_eq(tema::gaya("s", "pilih"), "\u001b[0;38;5;150;48;5;24m")
+    assert_eq(tema::pilih("hantu"), false)
+    assert_eq(tema::pilih("terang"), true)
+    assert_eq(tema::gaya("k", ""), "\u001b[0;38;5;127m")
+    assert_eq(tema::pilih("gelap"), true)
+    assert_eq(tema::warna("judul"), "\u001b[0;1;48;5;24;38;5;255m")
+}

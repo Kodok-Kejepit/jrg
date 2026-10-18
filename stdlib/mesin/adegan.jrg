@@ -1,0 +1,87 @@
+package std_mesin_adegan
+
+// Tumpukan adegan (menu, main, jeda). `perbarui` menjawab `[keadaan_baru, Pindah]`;
+// semua adegan digambar dari bawah ke atas, jadi layar jeda bisa menimpa
+// permainan yang terlihat di belakangnya.
+import "std/mesin"
+import "std/mesin/masukan"
+
+pub struct Adegan<K> { pub nama: string, pub keadaan: K,
+                       pub perbarui: fn(K, masukan::Masukan, float) -> array, pub gambar: fn(Canvas, K) -> unit }
+
+/// Apa yang terjadi pada tumpukan sesudah satu langkah.
+pub enum Pindah { Tetap, Dorong(Adegan), Lepas, Ganti(Adegan) }
+
+pub struct Panggung { pub tumpukan: []Adegan }
+
+fn _fungsi(nama, ke, f) {
+    let t = typeof(f)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+}
+
+/// Adegan baru. `perbarui(keadaan, masukan, dt)` menjawab `[keadaan_baru, Pindah]`;
+/// `gambar(c, keadaan)` menggambar.
+pub fn baru<K>(nama: string, keadaan: K, perbarui: fn(K, masukan::Masukan, float) -> array,
+               gambar: fn(Canvas, K) -> unit) -> Adegan {
+    if typeof(nama) != "string" { panik("adegan::baru: nama harus teks, dapat `" + typeof(nama) + "`") }
+    _fungsi("adegan::baru", 3, perbarui)
+    _fungsi("adegan::baru", 4, gambar)
+    return Adegan { nama: nama, keadaan: keadaan, perbarui: perbarui, gambar: gambar }
+}
+
+/// Panggung yang dimulai dengan adegan `awal`.
+pub fn panggung(awal: Adegan) -> Panggung {
+    if typeof(awal) != "struct:Adegan" { panik("adegan::panggung: butuh `Adegan`, dapat `" + typeof(awal) + "`") }
+    return Panggung { tumpukan: [awal] }
+}
+
+/// Game `mesin::` yang keadaannya panggung ini — sisanya diurus `mesin`.
+pub fn sebagai_game(judul: string, lebar: int, tinggi: int, awal: Adegan) -> mesin::Game<Panggung> {
+    return mesin::baru(judul, lebar, tinggi, panggung(awal),
+                       |p, m, dt| p.langkah(m, dt), |c, p| p.gambar(c))
+}
+
+impl Panggung {
+    /// Adegan paling atas (yang sedang menerima masukan).
+    pub fn atas(self) -> Adegan { return self.tumpukan[len(self.tumpukan) - 1] }
+    /// Berapa adegan yang bertumpuk.
+    pub fn kedalaman(self) -> int { return len(self.tumpukan) }
+
+    /// Satu langkah untuk adegan paling atas, lalu terapkan `Pindah`-nya.
+    /// Melepas adegan TERAKHIR ditolak: panggung tanpa adegan tidak punya apa pun untuk digambar.
+    pub fn langkah(self, m: masukan::Masukan, dt: float) -> Panggung {
+        let n = len(self.tumpukan)
+        let a = self.tumpukan[n - 1]
+        let f = a.perbarui
+        let hasil = f(a.keadaan, m, dt)
+        if typeof(hasil) != "array" || len(hasil) != 2 {
+            panik("adegan `" + a.nama + "`: perbarui harus menjawab [keadaan_baru, Pindah], dapat `" + typeof(hasil) + "`")
+        }
+        var t = self.tumpukan
+        var kini = a
+        kini.keadaan = hasil[0]
+        t[n - 1] = kini
+        match hasil[1] {
+            Pindah::Tetap => { return Panggung { tumpukan: t } }
+            Pindah::Dorong(b) => { return Panggung { tumpukan: t + [b] } }
+            Pindah::Ganti(b) => {
+                t[n - 1] = b
+                return Panggung { tumpukan: t }
+            }
+            Pindah::Lepas => {
+                if n == 1 { panik("adegan `" + a.nama + "`: tidak bisa `Lepas` adegan terakhir di panggung") }
+                return Panggung { tumpukan: arr::take(t, n - 1) }
+            }
+        }
+    }
+
+    /// Gambar semua adegan dari bawah ke atas.
+    pub fn gambar(self, c: Canvas) {
+        for _, a in self.tumpukan {
+            let f = a.gambar
+            f(c, a.keadaan)
+        }
+    }
+}

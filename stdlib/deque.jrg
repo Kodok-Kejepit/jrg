@@ -1,0 +1,101 @@
+package std_deque
+
+// Antrean dua-ujung: dua tumpukan dengan panjang LOGIS, jadi menambah dan membuang di
+// kedua ujung amortisasi O(1). Puncak `depan` (indeks `nd - 1`) adalah yang TERDEPAN, puncak
+// `belakang` (indeks `nb - 1`) yang TERBELAKANG. `T` tipe isinya.
+pub struct Deque<T> { pub depan: []T, pub nd: int, pub belakang: []T, pub nb: int }
+
+/// Antrean dua ujung yang kosong.
+pub fn new<T>() -> Deque<T> { return Deque { depan: [], nd: 0, belakang: [], nb: 0 } }
+/// Antrean dua ujung dari sebuah array.
+pub fn from<T>(a: []T) -> Deque<T> { return Deque { depan: [], nd: 0, belakang: a, nb: len(a) } }
+
+impl<T> Deque<T> {
+    /// Masukkan ke depan. Tulis `d = d.push_front(x)`.
+    pub fn push_front(self, x: T) -> Deque<T> {
+        if self.nd < len(self.depan) { self.depan[self.nd] = x } else { self.depan += [x] }
+        self.nd += 1
+        return self
+    }
+
+    /// Masukkan ke belakang. Tulis `d = d.push_back(x)`.
+    pub fn push_back(self, x: T) -> Deque<T> {
+        if self.nb < len(self.belakang) { self.belakang[self.nb] = x } else { self.belakang += [x] }
+        self.nb += 1
+        return self
+    }
+
+    /// Berapa isinya.
+    pub fn len(self) -> int { return self.nd + self.nb }
+    /// Benar kalau kosong.
+    pub fn is_empty(self) -> bool { return self.len() == 0 }
+
+    /// Lihat yang paling depan tanpa mengambilnya.
+    pub fn peek_front(self) -> Option<T> {
+        if self.nd > 0 { return arr::get(self.depan, self.nd - 1) }
+        if self.nb > 0 { return arr::get(self.belakang, 0) }
+        return Option::None
+    }
+
+    /// Lihat yang paling belakang tanpa mengambilnya.
+    pub fn peek_back(self) -> Option<T> {
+        if self.nb > 0 { return arr::get(self.belakang, self.nb - 1) }
+        if self.nd > 0 { return arr::get(self.depan, 0) }
+        return Option::None
+    }
+
+    // Kalau satu sisi habis, SETENGAH sisi lain dipindahkan — bukan seluruhnya, supaya
+    // pemakaian yang bergantian antara dua ujung tidak membalik semua isi tiap kali.
+    /// Deque TANPA yang paling depan. Tulis `d = d.rest_front()`.
+    pub fn rest_front(self) -> Deque<T> {
+        if self.nd == 0 {
+            if self.nb == 0 { return self }
+            let batas = self.nb / 2 + 1
+            self.depan = arr::reverse(arr::take(self.belakang, batas))
+            self.nd = batas
+            self.belakang = arr::skip(arr::take(self.belakang, self.nb), batas)
+            self.nb = self.nb - batas
+        }
+        self.nd -= 1
+        return self
+    }
+
+    /// Deque TANPA yang paling belakang. Tulis `d = d.rest_back()`.
+    pub fn rest_back(self) -> Deque<T> {
+        if self.nb == 0 {
+            if self.nd == 0 { return self }
+            let batas = self.nd / 2 + 1
+            self.belakang = arr::reverse(arr::take(self.depan, batas))
+            self.nb = batas
+            self.depan = arr::skip(arr::take(self.depan, self.nd), batas)
+            self.nd = self.nd - batas
+        }
+        self.nb -= 1
+        return self
+    }
+
+    /// Ambil dari depan: `(deque baru, Option berisi nilainya)`. Tulis `d, v = d.pop_front()`.
+    pub fn pop_front(self) -> (Deque<T>, Option<T>) {
+        let v = self.peek_front()
+        self = self.rest_front()
+        return (self, v)
+    }
+
+    /// Ambil dari belakang: `(deque baru, Option berisi nilainya)`. Tulis `d, v = d.pop_back()`.
+    pub fn pop_back(self) -> (Deque<T>, Option<T>) {
+        let v = self.peek_back()
+        self = self.rest_back()
+        return (self, v)
+    }
+
+    /// Isinya sebagai array, urut dari depan.
+    pub fn to_array(self) -> []T {
+        return arr::concat(arr::reverse(arr::take(self.depan, self.nd)), arr::take(self.belakang, self.nb))
+    }
+
+    /// Jalankan `f` untuk tiap isi, urut dari depan.
+    pub fn each(self, f: fn(T)) { for _, x in self.to_array() { f(x) } }
+
+    /// Bentuk tampilannya, dipakai `wok`.
+    pub fn to_string(self) -> string { return "Deque" + fmt::sprint(self.to_array()) }
+}

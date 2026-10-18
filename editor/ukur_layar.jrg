@@ -1,0 +1,50 @@
+package main
+
+import "sunting/keadaan"
+import "sunting/penyangga"
+import "sunting/layar"
+import "sunting/berkas"
+
+pub fn main() {
+    let teks = fs::read(env::args()[1])
+    var baris = []
+    for _, i in [0, 1, 2] { baris = baris + berkas::pecah(teks)[0] }
+    var e = keadaan::baru([penyangga::baru("uji.jrg", baris)])
+    e.lebar = 160
+    e.tinggi = 50
+    wok("baris:", len(baris))
+    let t0 = time::now_ms()
+    e = layar::siapkan(e)
+    let h0 = layar::selisih(layar::bingkai(e), true)
+    let t1 = time::now_ms()
+    wok("gambar pertama:", t1 - t0, "ms,", str::len(h0), "karakter")
+    // Lompat ke tengah berkas lalu ketik 40 huruf, menggambar tiap ketukan.
+    var p = penyangga::ke(keadaan::kini(e), 1300, 0)
+    p = keadaan::gulung(e, p)
+    e = keadaan::ganti(e, p)
+    let t2 = time::now_ms()
+    e = layar::siapkan(e)
+    let h1 = layar::selisih(layar::bingkai(e), false)
+    let t3 = time::now_ms()
+    wok("lompat ke baris 1300:", t3 - t2, "ms,", str::len(h1), "karakter")
+    var total = 0
+    for _, c in str::chars("let jumlah_baru = hitung(a, b) + 12345678") {
+        p = penyangga::ketik(keadaan::kini(e), "" + c)
+        p = keadaan::gulung(e, p)
+        e = keadaan::ganti(e, p)
+        e = layar::siapkan(e)
+        total = total + str::len(layar::selisih(layar::bingkai(e), false))
+    }
+    let t4 = time::now_ms()
+    wok("40 ketukan:", t4 - t3, "ms,", total, "karakter keluaran")
+    // Gulung 40 baris ke bawah satu per satu.
+    for _, i in range(0, 40) {
+        p = penyangga::gerak(keadaan::kini(e), "bawah", false, 47)
+        p = keadaan::gulung(e, p)
+        e = keadaan::ganti(e, p)
+        e = layar::siapkan(e)
+        total = total + str::len(layar::selisih(layar::bingkai(e), false))
+    }
+    let t5 = time::now_ms()
+    wok("40 langkah turun:", t5 - t4, "ms")
+}

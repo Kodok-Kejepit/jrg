@@ -1,0 +1,71 @@
+package std_mesin_partikel
+
+// Sistem partikel. Acaknya dari benih milik sistem sendiri (LCG), bukan `rand::`,
+// jadi hasilnya sama tiap jalan dan sama di interpreter dan VM — sebuah efek
+// yang berbeda tiap diputar ulang tidak bisa diuji.
+import "std/mesin/vek"
+import "std/mesin/warna"
+
+pub struct Partikel { pub pos: vek::Vek2, pub kec: vek::Vek2, pub umur: float, pub maks: float, pub warna: warna::Warna }
+pub struct Sistem { pub isi: []Partikel, pub gravitasi: vek::Vek2, pub benih: int }
+
+/// Sistem kosong dengan gravitasi `g` (`Vek2`) dan benih acak `benih`.
+pub fn baru(g, benih) {
+    if typeof(g) != "struct:Vek2" { panik("partikel::baru: gravitasi harus `Vek2`, dapat `" + typeof(g) + "`") }
+    if typeof(benih) != "int" { panik("partikel::baru: benih harus bilangan bulat, dapat `" + typeof(benih) + "`") }
+    return Sistem { isi: [], gravitasi: g, benih: benih % 2147483647 }
+}
+
+// Satu langkah LCG (Park-Miller): benih baru dan angka 0..1.
+fn _acak(b) {
+    let s = (b * 48271) % 2147483647
+    let t = s <= 0 $ s + 2147483646 : s
+    return [t, (t as float) / 2147483647.0]
+}
+
+impl Sistem {
+    /// Pancarkan `n` partikel di `pos`, arah `sudut` ± `sebar` derajat, laju `laju`,
+    /// hidup `umur` detik, berwarna `warna`.
+    pub fn pancar(self, n, pos, sudut, sebar, laju, umur, warna) {
+        if typeof(n) != "int" || n < 0 { panik("partikel::pancar: jumlah harus bilangan bulat >= 0, dapat " + str(n)) }
+        if umur <= 0 { panik("partikel::pancar: umur harus positif, dapat " + str(umur)) }
+        if typeof(warna) != "struct:Warna" {
+            panik("partikel::pancar: warna harus `Warna` (mis. `warna::rgb(...)`), dapat `" + typeof(warna) + "`")
+        }
+        var s = self
+        for _ in range(0, n) {
+            let a = _acak(s.benih)
+            let b = _acak(a[0])
+            s.benih = b[0]
+            let arah = vek::dari_sudut(sudut + (a[1] * 2.0 - 1.0) * sebar)
+            let v = arah.mul(laju * (0.5 + b[1] * 0.5))
+            s.isi = s.isi + [Partikel { pos: pos, kec: v, umur: 0.0, maks: umur as float, warna: warna }]
+        }
+        return s
+    }
+    /// Maju `dt` detik; partikel yang umurnya habis dibuang.
+    pub fn maju(self, dt) {
+        let k = dt as float
+        var hidup = []
+        for _, p in self.isi {
+            let umur = p.umur + k
+            if umur < p.maks {
+                let kec = p.kec.add(self.gravitasi.mul(k))
+                hidup = hidup + [Partikel { pos: p.pos.add(kec.mul(k)), kec: kec, umur: umur, maks: p.maks, warna: p.warna }]
+            }
+        }
+        var s = self
+        s.isi = hidup
+        return s
+    }
+    /// Berapa partikel yang masih hidup.
+    pub fn jumlah(self) { return len(self.isi) }
+    /// Gambar tiap partikel sebagai kotak `ukuran` piksel yang memudar menurut umurnya.
+    pub fn gambar(self, c, ukuran) {
+        for _, p in self.isi {
+            let sisa = 1.0 - p.umur / p.maks
+            let a = math::round(sisa * (p.warna.a as float)) as int
+            canvas::fill_rect(c, p.pos.x, p.pos.y, ukuran, ukuran, p.warna.alfa(a))
+        }
+    }
+}

@@ -1,0 +1,38 @@
+package main
+
+import "sunting/tombol"
+import "sunting/aksara"
+
+fn test_tiap_tombol_terpetakan_dan_bantuan_menyebutnya() {
+    assert_eq(tombol::perintah("ctrl-s"), "simpan")
+    assert_eq(tombol::perintah("f5"), "jalankan")
+    assert_eq(tombol::perintah("ctrl-shift-kanan"), "pilih_kata_kanan")
+    assert_eq(tombol::perintah("x"), "")
+    assert_eq(tombol::perintah("tidak-ada"), "")
+    // Peta lebar tampil dan peta tombol tidak boleh saling mengisi: dulu keduanya bernama
+    // sama, dan di `--vm` nama tingkat-modul yang sama dipakai bersama.
+    assert_eq(aksara::lebar("日本"), 4)
+    assert_eq(tombol::perintah("ctrl-q"), "keluar")
+    let b = arr::join(tombol::bantuan(), "\n")
+    for _, t in ["^S", "^O", "^V", "^T", "^Q", "F1", "Alt-S", "^Spasi", "Shift-Tab"] {
+        assert(str::contains(b, t), "bantuan tidak menyebut " + t)
+    }
+}
+
+fn test_cara_menulis_tombol() {
+    assert_eq(tombol::tulis("ctrl-s"), "^S")
+    assert_eq(tombol::tulis("alt-s"), "Alt-S")
+    assert_eq(tombol::tulis("ctrl-spasi"), "^Spasi")
+    assert_eq(tombol::tulis("ctrl-shift-kanan"), "^Shift-Kanan")
+    assert_eq(tombol::tulis("ctrl-pgdn"), "^PgDn")
+    assert_eq(tombol::tulis("alt-/"), "Alt-/")
+    assert_eq(tombol::tulis("alt-]"), "Alt-]")
+    assert_eq(tombol::tulis("f3"), "F3")
+    assert_eq(tombol::tulis("shift-tab"), "Shift-Tab")
+}
+
+fn test_pintasan_genap_dan_pendek() {
+    let p = tombol::pintasan()
+    assert_eq(len(p) % 2, 0)
+    for _, b in p { assert(str::len(b[0]) + str::len(b[1]) <= 12, b[1]) }
+}

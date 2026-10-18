@@ -1,0 +1,307 @@
+package main
+
+// Uji penyangga teks editor: tiap operasi diperiksa ISI dan POSISI kursornya, di dua mesin.
+import "sunting/penyangga"
+
+fn buat(baris, br, kol) {
+    return penyangga::ke(penyangga::baru("uji.jrg", baris), br, kol)
+}
+
+fn ketik_semua(p, teks) {
+    var x = p
+    for _, c in str::chars(teks) { x = penyangga::ketik(x, "" + c) }
+    return x
+}
+
+fn test_berkas_kosong_punya_satu_baris() {
+    let p = penyangga::baru("x", [])
+    assert_eq(p.baris, [""])
+    assert_eq(penyangga::jumlah(p), 1)
+}
+
+fn test_ketik_dan_urung_per_kata() {
+    var p = buat([""], 0, 0)
+    p = ketik_semua(p, "let x")
+    assert_eq(p.baris, ["let x"])
+    assert_eq(p.kol, 5)
+    assert(p.kotor)
+    // Spasi memutus kelompok, jadi `x` dan `let` dua langkah urung.
+    p = penyangga::urungkan(p)
+    assert_eq(p.baris, ["let "])
+    p = penyangga::urungkan(p)
+    assert_eq(p.baris, ["let"])
+    p = penyangga::urungkan(p)
+    assert_eq(p.baris, [""])
+    assert_eq(p.kol, 0)
+    assert(!penyangga::bisa_urung(p))
+    p = penyangga::ulangi(p)
+    assert_eq(p.baris, ["let"])
+    assert_eq(p.kol, 3)
+    p = penyangga::ulangi(p)
+    p = penyangga::ulangi(p)
+    assert_eq(p.baris, ["let x"])
+    assert(!penyangga::bisa_ulang(p))
+}
+
+fn test_kurung_menutup_dan_dilewati() {
+    var p = buat([""], 0, 0)
+    p = penyangga::ketik(p, "f")
+    p = penyangga::ketik(p, "(")
+    assert_eq(p.baris, ["f()"])
+    assert_eq(p.kol, 2)
+    p = penyangga::ketik(p, ")")
+    assert_eq(p.baris, ["f()"])
+    assert_eq(p.kol, 3)
+    // Di depan kata yang sudah ada, pembuka tidak menyisipkan penutup.
+    var q = buat(["abc"], 0, 0)
+    q = penyangga::ketik(q, "(")
+    assert_eq(q.baris, ["(abc"])
+}
+
+fn test_kutip_menutup_kecuali_menempel_kata() {
+    var p = buat(["x = "], 0, 4)
+    p = penyangga::ketik(p, "\"")
+    assert_eq(p.baris, ["x = \"\""])
+    assert_eq(p.kol, 5)
+    p = penyangga::ketik(p, "a")
+    p = penyangga::ketik(p, "\"")
+    assert_eq(p.baris, ["x = \"a\""])
+    assert_eq(p.kol, 7)
+    // Apostrof sesudah huruf (mis. `don't`) tidak digandakan.
+    var q = buat(["don"], 0, 3)
+    q = penyangga::ketik(q, "'")
+    assert_eq(q.baris, ["don'"])
+}
+
+fn test_seleksi_dibungkus_pembuka() {
+    var p = buat(["abc def"], 0, 0)
+    p = penyangga::pilih_rentang(p, 0, 4, 0, 7)
+    p = penyangga::ketik(p, "(")
+    assert_eq(p.baris, ["abc (def)"])
+    p = penyangga::urungkan(p)
+    assert_eq(p.baris, ["abc def"])
+}
+
+fn test_enter_membawa_indentasi() {
+    var p = buat(["    let a = 1"], 0, 13)
+    p = penyangga::enter(p)
+    assert_eq(p.baris, ["    let a = 1", "    "])
+    assert_eq(p.br, 1)
+    assert_eq(p.kol, 4)
+    var q = buat(["fn f() {"], 0, 8)
+    q = penyangga::enter(q)
+    assert_eq(q.baris, ["fn f() {", "    "])
+    assert_eq(q.kol, 4)
+    // Di antara `{` dan `}`: penutupnya turun ke barisnya sendiri.
+    var r = buat(["fn f() {}"], 0, 8)
+    r = penyangga::enter(r)
+    assert_eq(r.baris, ["fn f() {", "    ", "}"])
+    assert_eq(r.br, 1)
+    assert_eq(r.kol, 4)
+    // Enter di tengah indentasi tidak menggandakan spasinya.
+    var s = buat(["        x"], 0, 2)
+    s = penyangga::enter(s)
+    assert_eq(s.baris, ["  ", "        x"])
+    assert_eq(s.kol, 2)
+}
+
+fn test_kurawal_tutup_mundur_setingkat() {
+    var p = buat(["fn f() {", "    "], 1, 4)
+    p = penyangga::ketik(p, "}")
+    assert_eq(p.baris, ["fn f() {", "}"])
+    assert_eq(p.kol, 1)
+}
+
+fn test_backspace() {
+    // Di dalam indentasi: satu tingkat.
+    var p = buat(["        x"], 0, 8)
+    p = penyangga::hapus_kiri(p)
+    assert_eq(p.baris, ["    x"])
+    assert_eq(p.kol, 4)
+    // Indentasi ganjil: mundur ke kelipatan TAB.
+    var g = buat(["      x"], 0, 6)
+    g = penyangga::hapus_kiri(g)
+    assert_eq(g.baris, ["    x"])
+    // Pasangan kosong: keduanya ikut.
+    var q = buat(["f()"], 0, 2)
+    q = penyangga::hapus_kiri(q)
+    assert_eq(q.baris, ["f"])
+    // Kolom nol: menyambung ke baris atas.
+    var r = buat(["ab", "cd"], 1, 0)
+    r = penyangga::hapus_kiri(r)
+    assert_eq(r.baris, ["abcd"])
+    assert_eq(r.br, 0)
+    assert_eq(r.kol, 2)
+    // Awal berkas: tidak berubah, dan tidak kotor.
+    var s = buat(["ab"], 0, 0)
+    s = penyangga::hapus_kiri(s)
+    assert_eq(s.baris, ["ab"])
+    assert(!s.kotor)
+}
+
+fn test_delete() {
+    var p = buat(["ab", "cd"], 0, 2)
+    p = penyangga::hapus_kanan(p)
+    assert_eq(p.baris, ["abcd"])
+    assert_eq(p.kol, 2)
+    p = penyangga::hapus_kanan(p)
+    assert_eq(p.baris, ["abd"])
+    var q = buat(["x"], 0, 1)
+    q = penyangga::hapus_kanan(q)
+    assert_eq(q.baris, ["x"])
+    assert(!q.kotor)
+}
+
+fn test_seleksi_lintas_baris() {
+    var p = buat(["satu", "dua", "tiga"], 0, 2)
+    p = penyangga::gerak(p, "bawah", true, 10)
+    p = penyangga::gerak(p, "bawah", true, 10)
+    assert_eq(penyangga::teks_seleksi(p), "tu\ndua\nti")
+    // Seleksi mundur menjawab teks yang sama.
+    var q = buat(["satu", "dua", "tiga"], 2, 2)
+    q = penyangga::pilih_rentang(q, 2, 2, 0, 2)
+    assert_eq(penyangga::teks_seleksi(q), "tu\ndua\nti")
+    q = penyangga::hapus_kiri(q)
+    assert_eq(q.baris, ["saga"])
+    assert_eq(q.br, 0)
+    assert_eq(q.kol, 2)
+    q = penyangga::urungkan(q)
+    assert_eq(q.baris, ["satu", "dua", "tiga"])
+}
+
+fn test_tempel_multi_baris_tanpa_indentasi_otomatis() {
+    var p = buat(["    awal"], 0, 8)
+    p = penyangga::sisip(p, "\nfn f() {\n    let a = 1\n}")
+    assert_eq(p.baris, ["    awal", "fn f() {", "    let a = 1", "}"])
+    assert_eq(p.br, 3)
+    assert_eq(p.kol, 1)
+    p = penyangga::urungkan(p)
+    assert_eq(p.baris, ["    awal"])
+}
+
+fn test_gerak() {
+    var p = buat(["abc", "", "日本語 x"], 0, 3)
+    p = penyangga::gerak(p, "kanan", false, 10)
+    assert_eq([p.br, p.kol], [1, 0])
+    p = penyangga::gerak(p, "kiri", false, 10)
+    assert_eq([p.br, p.kol], [0, 3])
+    // Kolom yang dituju diingat melewati baris pendek.
+    p = penyangga::gerak(p, "bawah", false, 10)
+    assert_eq([p.br, p.kol], [1, 0])
+    p = penyangga::gerak(p, "bawah", false, 10)
+    assert_eq([p.br, p.kol], [2, 1])
+    p = penyangga::gerak(p, "end", false, 10)
+    assert_eq(p.kol, 5)
+    p = penyangga::gerak(p, "kata_kiri", false, 10)
+    assert_eq(p.kol, 4)
+    p = penyangga::gerak(p, "awal", false, 10)
+    assert_eq([p.br, p.kol], [0, 0])
+    p = penyangga::gerak(p, "akhir", false, 10)
+    assert_eq([p.br, p.kol], [2, 5])
+    p = penyangga::gerak(p, "pgup", false, 3)
+    assert_eq(p.br, 0)
+}
+
+fn test_home_pintar() {
+    var p = buat(["    isi"], 0, 7)
+    p = penyangga::gerak(p, "home", false, 10)
+    assert_eq(p.kol, 4)
+    p = penyangga::gerak(p, "home", false, 10)
+    assert_eq(p.kol, 0)
+    p = penyangga::gerak(p, "home", false, 10)
+    assert_eq(p.kol, 4)
+}
+
+fn test_kiri_kanan_atas_seleksi_ke_tepinya() {
+    var p = buat(["abcdef"], 0, 0)
+    p = penyangga::pilih_rentang(p, 0, 1, 0, 4)
+    let k = penyangga::gerak(p, "kiri", false, 10)
+    assert_eq(k.kol, 1)
+    assert(!k.bertanda)
+    let n = penyangga::gerak(p, "kanan", false, 10)
+    assert_eq(n.kol, 4)
+}
+
+fn test_baris_hapus_gandakan_pindah() {
+    var p = buat(["a", "b", "c"], 1, 0)
+    p = penyangga::gandakan_baris(p)
+    assert_eq(p.baris, ["a", "b", "b", "c"])
+    assert_eq(p.br, 2)
+    p = penyangga::hapus_baris(p)
+    assert_eq(p.baris, ["a", "b", "c"])
+    p = penyangga::pindah_baris(p, -1)
+    assert_eq(p.baris, ["a", "c", "b"])
+    assert_eq(p.br, 1)
+    p = penyangga::pindah_baris(p, 1)
+    assert_eq(p.baris, ["a", "b", "c"])
+    assert_eq(p.br, 2)
+    // Di tepi: tidak berubah.
+    let q = penyangga::pindah_baris(p, 1)
+    assert_eq(q.baris, ["a", "b", "c"])
+    var satu = buat(["cuma"], 0, 2)
+    satu = penyangga::hapus_baris(satu)
+    assert_eq(satu.baris, [""])
+    assert_eq(satu.kol, 0)
+}
+
+fn test_tab_dan_tab_balik() {
+    var p = buat(["ab"], 0, 1)
+    p = penyangga::tab(p)
+    assert_eq(p.baris, ["a   b"])
+    assert_eq(p.kol, 4)
+    var q = buat(["x", "", "y"], 0, 0)
+    q = penyangga::pilih_rentang(q, 0, 0, 2, 1)
+    q = penyangga::tab(q)
+    assert_eq(q.baris, ["    x", "", "    y"])
+    q = penyangga::tab_balik(q)
+    assert_eq(q.baris, ["x", "", "y"])
+    let r = penyangga::tab_balik(q)
+    assert_eq(r.baris, ["x", "", "y"])
+}
+
+fn test_alih_komentar() {
+    var p = buat(["    let a = 1", "", "        let b = 2"], 0, 0)
+    p = penyangga::pilih_rentang(p, 0, 0, 2, 5)
+    p = penyangga::alih_komentar(p)
+    assert_eq(p.baris, ["    // let a = 1", "", "    //     let b = 2"])
+    p = penyangga::alih_komentar(p)
+    assert_eq(p.baris, ["    let a = 1", "", "        let b = 2"])
+    // Baris kosong saja: tidak ada yang berubah.
+    let k = penyangga::alih_komentar(buat([""], 0, 0))
+    assert(!k.kotor)
+}
+
+fn test_pasangan_kurung() {
+    let p = buat(["f(a, [b, c])", "{", "  x", "}"], 0, 1)
+    assert_eq(penyangga::pasangan_kurung(p, 3000), Option::Some([0, 11]))
+    assert_eq(penyangga::pasangan_kurung(buat(p.baris, 0, 12), 3000), Option::Some([0, 1]))
+    assert_eq(penyangga::pasangan_kurung(buat(p.baris, 0, 5), 3000), Option::Some([0, 10]))
+    assert_eq(penyangga::pasangan_kurung(buat(p.baris, 1, 0), 3000), Option::Some([3, 0]))
+    assert_eq(penyangga::pasangan_kurung(buat(p.baris, 3, 1), 3000), Option::Some([1, 0]))
+    assert_eq(penyangga::pasangan_kurung(buat(p.baris, 2, 2), 3000), Option::None)
+    assert_eq(penyangga::pasangan_kurung(buat(["(("], 0, 0), 3000), Option::None)
+}
+
+fn test_pilih_kata_dan_semua() {
+    var p = buat(["let nama_panjang = 1"], 0, 7)
+    p = penyangga::pilih_kata(p)
+    assert_eq(penyangga::teks_seleksi(p), "nama_panjang")
+    var q = buat(["a", "bc"], 0, 0)
+    q = penyangga::pilih_semua(q)
+    assert_eq(penyangga::teks_seleksi(q), "a\nbc")
+}
+
+fn test_isi_teks_dan_akhir_baris() {
+    var p = buat(["a", "b"], 0, 0)
+    assert_eq(penyangga::isi_teks(p), "a\nb\n")
+    p.crlf = true
+    assert_eq(penyangga::isi_teks(p), "a\r\nb\r\n")
+}
+
+fn test_urung_tidak_mengubah_salinan_lama() {
+    // Nilai tidak beralias: penyangga lama tetap utuh sesudah yang baru disunting.
+    let lama = buat(["satu"], 0, 4)
+    let baru = penyangga::ketik(lama, "!")
+    assert_eq(lama.baris, ["satu"])
+    assert_eq(baru.baris, ["satu!"])
+}

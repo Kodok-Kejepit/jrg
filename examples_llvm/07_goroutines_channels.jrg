@@ -1,0 +1,25 @@
+package main
+
+fn worker(id: int, out: chan int) {
+    var sum: int = 0
+    for i in 0..1000000 {
+        sum += i
+    }
+    out <- sum + id
+}
+
+pub fn main() {
+    let ch: chan int = make_chan(int, 4)
+    for i in 0..4 {
+        spawn |i: int, ch: chan int| {
+            worker(i, ch)
+        }
+    }
+    var total: int = 0
+    for i in 0..4 {
+        let v: int = <- ch
+        total += v
+    }
+    wok("total dari 4 goroutine:", total)
+    wok("num_cpus:", num_cpus())
+}

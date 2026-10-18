@@ -1,0 +1,14 @@
+package main
+
+fn hypotenuse(a: float, b: float) -> float {
+    sqrt(a * a + b * b)
+}
+
+pub fn main() {
+    let lo: f32 = 2.0
+    let hi: f32 = 7.0
+
+    wok("hypotenuse:", hypotenuse(3.0, 4.0))
+    wok("f32 min/max:", math::min(lo, hi), math::max(lo, hi))
+    wok("pow:", 2.0 ** 10.0)
+}

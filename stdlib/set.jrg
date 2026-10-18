@@ -1,0 +1,98 @@
+package std_set
+
+// Himpunan berbasis dict: keanggotaan O(1), sementara `arr::contains` O(n).
+pub struct Set<T> { pub d: dict<T> }
+
+/// Himpunan kosong. Keanggotaan O(1), bukan O(n) seperti `arr::contains`.
+pub fn new<T>() -> Set<T> { return Set { d: dict::new() } }
+
+/// Himpunan dari sebuah array; duplikatnya dibuang.
+pub fn from<T>(a: []T) -> Set<T> {
+    var d: dict<T> = dict::new()
+    for _, x in a { d[x] = x }
+    return Set { d: d }
+}
+
+impl<T> Set<T> {
+    /// Himpunan baru dengan `x` ikut di dalamnya.
+    pub fn add(self, x: T) -> Set<T> {
+        self.d[x] = x
+        return self
+    }
+    /// Himpunan baru tanpa `x`.
+    pub fn remove(self, x: T) -> Set<T> { return Set { d: dict::remove(self.d, x) } }
+    /// Benar kalau `x` anggotanya. O(1), bukan O(n).
+    pub fn has(self, x: T) -> bool { return dict::has(self.d, x) }
+    /// Berapa anggotanya.
+    pub fn len(self) -> int { return dict::len(self.d) }
+    /// Benar kalau belum ada anggotanya.
+    pub fn is_empty(self) -> bool { return dict::len(self.d) == 0 }
+    /// Anggotanya sebagai array, nilai ASLINYA (bukan bentuk kuncinya).
+    pub fn to_array(self) -> []T { return dict::values(self.d) }
+
+    /// Gabungan: semua anggota kedua himpunan.
+    pub fn union(self, lain: Set<T>) -> Set<T> {
+        var d = self.d
+        for _, v in dict::values(lain.d) { d[v] = v }
+        return Set { d: d }
+    }
+
+    /// Irisan: yang ada di kedua himpunan.
+    pub fn intersect(self, lain: Set<T>) -> Set<T> {
+        var d: dict<T> = dict::new()
+        for _, v in dict::values(self.d) {
+            if dict::has(lain.d, v) { d[v] = v }
+        }
+        return Set { d: d }
+    }
+
+    /// Selisih: yang ada di sini dan tidak di sana.
+    pub fn difference(self, lain: Set<T>) -> Set<T> {
+        var d: dict<T> = dict::new()
+        for _, v in dict::values(self.d) {
+            if !dict::has(lain.d, v) { d[v] = v }
+        }
+        return Set { d: d }
+    }
+
+    /// Benar kalau semua anggotanya ada di `lain`.
+    pub fn is_subset(self, lain: Set<T>) -> bool {
+        for _, v in dict::values(self.d) {
+            if !dict::has(lain.d, v) { return false }
+        }
+        return true
+    }
+
+    /// Benar kalau anggotanya sama persis.
+    pub fn equals(self, lain: Set<T>) -> bool {
+        if dict::len(self.d) != dict::len(lain.d) { return false }
+        return self.is_subset(lain)
+    }
+
+    /// Jalankan `f` untuk tiap anggota.
+    pub fn each(self, f: fn(T)) { for _, v in dict::values(self.d) { f(v) } }
+
+    /// Himpunan baru dengan tiap anggota diubah.
+    pub fn map(self, f) {
+        var d = dict::new()
+        for _, v in dict::values(self.d) {
+            let y = f(v)
+            d[y] = y
+        }
+        return Set { d: d }
+    }
+
+    /// Himpunan baru berisi yang memenuhi syarat.
+    pub fn filter(self, f: fn(T) -> bool) -> Set<T> {
+        var d: dict<T> = dict::new()
+        for _, v in dict::values(self.d) {
+            if f(v) { d[v] = v }
+        }
+        return Set { d: d }
+    }
+
+    /// Bentuk tampilannya, dipakai `wok`.
+    pub fn to_string(self) -> string {
+        return "Set{" + str::join(arr::map(dict::values(self.d), |v| fmt::sprint(v)), ", ") + "}"
+    }
+}

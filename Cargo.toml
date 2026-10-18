@@ -1,0 +1,56 @@
+[package]
+name        = "jrgc"
+version     = "0.2.0"
+edition     = "2021"
+description = "JawaRustGo++ Compiler/Interpreter — jrgc & jrgm"
+authors     = ["JRG Team"]
+license     = "MIT"
+repository  = "https://github.com/Kodok-Kejepit/jrg"
+
+[lib]
+name = "jrgc"
+path = "src/lib.rs"
+
+[[bin]]
+name = "jrgc"
+path = "src/main.rs"
+
+[[bin]]
+name = "jrgm"
+path = "src/jrgm/main.rs"
+
+[dependencies]
+unicode-xid = "=0.2.4"
+clap        = { version = "=4.3.24", features = ["derive"] }
+indexmap    = "=2.0.2"
+smallvec    = "=1.11.2"
+bitflags    = "=2.4.2"
+
+# minifb tidak mendukung Android; di sana mode `"tab"` digambar lewat pengantar APK.
+[target.'cfg(not(target_os = "android"))'.dependencies]
+minifb      = { version = "0.27", optional = true }
+
+[features]
+# Jendela ikut bawaan: minifb memuat X11/Wayland saat JALAN (`dlopen`), jadi build tetap tanpa
+# pustaka sistem; kanvas cuma membuka jendela kalau programnya minta mode `"tab"`.
+default = ["canvas"]
+canvas  = ["minifb"]
+
+[profile.release]
+opt-level     = 3
+lto           = "thin"
+codegen-units = 1
+# Deliberately *not* `panic = "abort"`: goroutines — both the tree-
+# walking interpreter's (`spawn_goroutine` in interpreter/mod.rs) and
+# the bytecode VM's own (`vm/channel.rs` already uses
+# `std::thread::spawn`) — run as real OS threads. An abort panic
+# strategy would mean a single panicking goroutine immediately
+# terminates the whole process instead of failing in isolation the way
+# `std::thread::spawn` is designed to let it; `JoinHandle::join()` needs
+# the default "unwind" strategy to be able to observe and report a
+# goroutine panic without taking the rest of the program down with it.
+
+[profile.dev]
+opt-level       = 0
+debug           = true
+overflow-checks = true

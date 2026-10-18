@@ -1,0 +1,80 @@
+package main
+
+// Aplikasi web utuh dalam satu berkas: route, middleware, template, sesi
+// bertanda tangan, sandi ter-hash, dan penyimpanan SQLite.
+
+const RAHASIA: string = "ganti-ini-di-produksi"
+// `{{#each}}` mengulang dan `{{ x }}` melolosi HTML sendiri, jadi daftar
+// tidak perlu dirakit dengan penyambungan string — cara yang lebih mudah salah.
+const HALAMAN: string = """<!doctype html><meta charset=utf-8>
+<title>{{ judul }}</title>
+<style>body{font-family:system-ui;max-width:38rem;margin:3rem auto;line-height:1.6}</style>
+<h1>{{ judul }}</h1>
+<p>{{ pesan }}</p>
+<ul>
+{{#each catatan}}  <li>{{ isi }}</li>
+{{/each}}</ul>
+{{#if kosong}}<p><em>Belum ada catatan.</em></p>{{/if}}"""
+
+fn siapkan_db() {
+    let db = dok::db_open(":memory:")?
+    dok::db_exec(db, "CREATE TABLE catatan (id INTEGER PRIMARY KEY, isi TEXT)", [])?
+    // Parameter diikat lewat `?` — teks apa pun aman, termasuk tanda kutip.
+    dok::db_exec(db, "INSERT INTO catatan (isi) VALUES (?)", ["catatan pertama"])?
+    dok::db_exec(db, "INSERT INTO catatan (isi) VALUES (?)", ["<script>alert(1)</script>"])?
+    return db
+}
+
+fn ambil_catatan(db) {
+    return dok::db_query(db, "SELECT isi FROM catatan ORDER BY id", []).unwrap_or([])
+}
+
+pub fn main() {
+    if !dok::db_tersedia() {
+        wok("libsqlite3 tidak ada — contoh ini butuh SQLite.")
+        return
+    }
+    let db = siapkan_db()
+    let r = dok::router_new()
+
+    // Middleware: jalan SEBELUM route mana pun, termasuk berkas statis.
+    dok::router_use(r, fn(req) => catat(req))
+
+    dok::router_get(r, "/", fn(req) => beranda(db))
+    dok::router_get(r, "/api/catatan", fn(req) => api(db))
+    dok::router_post(r, "/masuk", fn(req) => masuk(req))
+    dok::router_not_found(r, fn(req) => dok::response(404, "tidak ada"))
+
+    wok("server jalan di http://127.0.0.1:7080")
+    dok::serve(r, 7080, "127.0.0.1")
+}
+
+fn catat(req) {
+    dok::log_info("permintaan masuk")
+    return nil        // nil = lanjutkan ke route berikutnya
+}
+
+fn beranda(db) {
+    let baris = ambil_catatan(db)
+    let isi = dok::render(HALAMAN, {
+        "judul": "Catatan",
+        "pesan": "Teks di bawah datang dari database dan dilolosi otomatis.",
+        "catatan": baris,
+        "kosong": len(baris) == 0,
+    }).unwrap_or("<p>gagal render</p>")
+    return dok::html(isi)
+}
+
+fn api(db) {
+    let baris = dok::db_query(db, "SELECT id, isi FROM catatan", []).unwrap_or([])
+    return dok::json_response({"jumlah": len(baris), "data": baris})
+}
+
+fn masuk(req) {
+    // Sandi disimpan sebagai hash PBKDF2, tidak pernah sebagai teks asli.
+    let hash = dok::password_hash("rahasia123")
+    let cocok = dok::password_verify("rahasia123", hash)
+    let sesi = dok::session_encode({"user": "sari"}, RAHASIA)
+    let resp = dok::json_response({"masuk": cocok})
+    return dok::cookie_set(resp, "sesi", sesi, {"Max-Age": "3600"})
+}

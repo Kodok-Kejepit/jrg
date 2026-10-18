@@ -1,0 +1,850 @@
+// src/llvm/lapis.jrg — lapis ketiga backend LLVM: builtin pustaka yang ditulis dalam JRG.
+// `ns::nama` yang tidak punya penurun asli dicari di sini sebagai `ns_nama`; kalimat gagalnya
+// sama dengan builtin aslinya di interpreter.
+package lapis
+
+pub fn arr_count_if<T, B>(a: []T, f: fn(T) -> B) -> int {
+    var n = 0
+    for _, x in a { if f(x) { n += 1 } }
+    return n
+}
+
+pub fn arr_count<T, B>(a: []T, f: fn(T) -> B) -> int { return arr_count_if(a, f) }
+
+pub fn arr_index_of<T>(a: []T, nilai: T) -> Option<int> {
+    for i, x in a { if x == nilai { return Some(i) } }
+    return None
+}
+
+pub fn arr_find_idx<T, B>(a: []T, f: fn(T) -> B) -> Option<int> {
+    for i, x in a { if f(x) { return Some(i) } }
+    return None
+}
+
+pub fn arr_is_empty<T>(a: []T) -> bool { return len(a) == 0 }
+
+pub fn arr_chunks<T>(a: []T, ukuran: int) -> [][]T {
+    if ukuran < 0 { panik("arr::chunks: ukuran tidak boleh negatif, dapat " + str(ukuran)) }
+    if ukuran == 0 { panik("arr::chunks: ukuran harus lebih dari 0") }
+    var keluar: [][]T = []
+    var kini: []T = []
+    for _, x in a {
+        kini += [x]
+        if len(kini) == ukuran {
+            keluar += [kini]
+            kini = []
+        }
+    }
+    if len(kini) > 0 { keluar += [kini] }
+    return keluar
+}
+
+pub fn arr_windows<T>(a: []T, lebar: int) -> [][]T {
+    if lebar < 0 { panik("arr::windows: ukuran tidak boleh negatif, dapat " + str(lebar)) }
+    if lebar == 0 { panik("arr::windows: ukuran harus lebih dari 0") }
+    var keluar: [][]T = []
+    var i = 0
+    while i + lebar <= len(a) {
+        keluar += [a[i:i + lebar]]
+        i += 1
+    }
+    return keluar
+}
+
+pub fn arr_dedup<T>(a: []T) -> []T {
+    var keluar: []T = []
+    for i, x in a {
+        if i == 0 || a[i - 1] != x { keluar += [x] }
+    }
+    return keluar
+}
+
+fn _kunci_tak_sebanding<K>(nama: string, a: K, b: K) -> bool {
+    if a != a || b != b {
+        panik(nama + ": kunci bertipe `" + typeof(a) + "` dan `" + typeof(b) + "` tidak bisa dibandingkan, jadi urutannya tidak terdefinisi")
+    }
+    return false
+}
+
+fn _punya<T>(a: []T, nilai: T) -> bool {
+    for _, x in a { if x == nilai { return true } }
+    return false
+}
+
+pub fn arr_unique<T>(a: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { if !_punya(keluar, x) { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_union<T>(a: []T, b: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { if !_punya(keluar, x) { keluar += [x] } }
+    for _, x in b { if !_punya(keluar, x) { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_intersect<T>(a: []T, b: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { if _punya(b, x) && !_punya(keluar, x) { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_difference<T>(a: []T, b: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { if !_punya(b, x) && !_punya(keluar, x) { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_enumerate<T>(a: []T) -> [](int, T) {
+    var keluar: [](int, T) = []
+    for i, x in a { keluar += [(i, x)] }
+    return keluar
+}
+
+pub fn arr_flatten<T>(a: [][]T) -> []T {
+    var keluar: []T = []
+    for _, dalam in a { for _, x in dalam { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_flat_map<T, K>(a: []T, f: fn(T) -> []K) -> []K {
+    var keluar: []K = []
+    for _, x in a { for _, y in f(x) { keluar += [y] } }
+    return keluar
+}
+
+pub fn arr_insert<T>(a: []T, i0: int, v: T) -> []T {
+    let i = i0 < 0 $ i0 + len(a) : i0
+    if i < 0 || i > len(a) { panik("arr::insert: index " + str(i0) + " di luar batas (panjang " + str(len(a)) + ")") }
+    var keluar: []T = []
+    for j, x in a {
+        if j == i { keluar += [v] }
+        keluar += [x]
+    }
+    if i == len(a) { keluar += [v] }
+    return keluar
+}
+
+pub fn arr_remove<T>(a: []T, i0: int) -> ([]T, T) {
+    let i = i0 < 0 $ i0 + len(a) : i0
+    if i < 0 || i >= len(a) { panik("arr::remove: index " + str(i0) + " di luar batas (panjang " + str(len(a)) + ")") }
+    var keluar: []T = []
+    for j, x in a { if j != i { keluar += [x] } }
+    return (keluar, a[i])
+}
+
+pub fn arr_repeat<T>(a: []T, n: int) -> []T {
+    if n < 0 { panik("arr::repeat: jumlah tidak boleh negatif, dapat " + str(n)) }
+    var keluar: []T = []
+    for _ in 0..n { for _, x in a { keluar += [x] } }
+    return keluar
+}
+
+pub fn arr_fill<T>(v: T, n: int) -> []T {
+    if n < 0 { panik("arr::fill: jumlah tidak boleh negatif, dapat " + str(n)) }
+    var keluar: []T = []
+    for _ in 0..n { keluar += [v] }
+    return keluar
+}
+
+pub fn arr_rotate<T>(a: []T, n: int) -> []T {
+    let p = len(a)
+    if p == 0 { return a }
+    let k = ((n % p) + p) % p
+    var keluar: []T = []
+    for i in 0..p { keluar += [a[(i + k) % p]] }
+    return keluar
+}
+
+pub fn arr_rotate_left<T>(a: []T, n: int = 1) -> []T { return arr_rotate(a, n) }
+
+pub fn arr_rotate_right<T>(a: []T, n: int = 1) -> []T { return arr_rotate(a, 0 - n) }
+
+pub fn arr_join<T>(a: []T, pemisah: string) -> string {
+    var keluar = ""
+    for i, x in a {
+        if i > 0 { keluar += pemisah }
+        keluar += str(x)
+    }
+    return keluar
+}
+
+pub fn arr_max_by<T, K>(a: []T, f: fn(T) -> K) -> T {
+    if len(a) == 0 { panik("arr::max_by: array kosong tidak punya nilai terbesar") }
+    var terbaik = a[0]
+    var kunci = f(a[0])
+    for i, x in a {
+        if i > 0 {
+            let k = f(x)
+            _kunci_tak_sebanding("arr::max_by", k, kunci)
+            if k > kunci {
+                terbaik = x
+                kunci = k
+            }
+        }
+    }
+    return terbaik
+}
+
+pub fn arr_min_by<T, K>(a: []T, f: fn(T) -> K) -> T {
+    if len(a) == 0 { panik("arr::min_by: array kosong tidak punya nilai terkecil") }
+    var terbaik = a[0]
+    var kunci = f(a[0])
+    for i, x in a {
+        if i > 0 {
+            let k = f(x)
+            _kunci_tak_sebanding("arr::min_by", k, kunci)
+            if k < kunci {
+                terbaik = x
+                kunci = k
+            }
+        }
+    }
+    return terbaik
+}
+
+pub fn arr_partition<T, B>(a: []T, f: fn(T) -> B) -> ([]T, []T) {
+    var ya: []T = []
+    var tidak: []T = []
+    for _, x in a { if f(x) { ya += [x] } else { tidak += [x] } }
+    return (ya, tidak)
+}
+
+pub fn arr_zip<A, B>(a: []A, b: []B) -> [](A, B) {
+    var keluar: [](A, B) = []
+    for i, x in a { if i < len(b) { keluar += [(x, b[i])] } }
+    return keluar
+}
+
+pub fn arr_zip_with<A, B, C>(a: []A, b: []B, f: fn(A, B) -> C) -> []C {
+    var keluar: []C = []
+    for i, x in a { if i < len(b) { keluar += [f(x, b[i])] } }
+    return keluar
+}
+
+pub fn arr_mean<T>(a: []T) -> float {
+    if len(a) == 0 { panik("arr::mean: array kosong tidak punya rata-rata") }
+    var jumlah = 0.0
+    for _, x in a { jumlah += x as float }
+    return jumlah / (len(a) as float)
+}
+
+pub fn arr_variance<T>(a: []T) -> float {
+    if len(a) == 0 { panik("arr::variance: array kosong tidak punya variansi") }
+    let m = arr_mean(a)
+    var jumlah = 0.0
+    for _, x in a {
+        let d = (x as float) - m
+        jumlah += d * d
+    }
+    return jumlah / (len(a) as float)
+}
+
+pub fn arr_std_dev<T>(a: []T) -> float {
+    if len(a) == 0 { panik("arr::std_dev: array kosong tidak punya simpangan baku") }
+    return math::sqrt(arr_variance(a))
+}
+
+pub fn arr_median<T>(a: []T) -> float {
+    if len(a) == 0 { panik("arr::median: array kosong tidak punya median") }
+    for _, x in a { if x != x { panik("arr::median: array mengandung NaN, urutannya tidak terdefinisi") } }
+    let s = arr::sort(a)
+    let p = len(s)
+    if p % 2 == 1 { return s[p / 2] as float }
+    return ((s[p / 2 - 1] as float) + (s[p / 2] as float)) / 2.0
+}
+
+pub fn arr_sort_desc<T>(a: []T) -> []T {
+    if len(a) > 1 {
+        for _, x in a {
+            if x != x {
+                panik("arr::sort_desc: tidak bisa membandingkan `" + typeof(x) + "` dengan `" + typeof(x) + "`, jadi urutannya tidak terdefinisi. Samakan dulu tipe isinya, atau pakai `sort_by_key` untuk menentukan sendiri dasar pengurutannya")
+            }
+        }
+    }
+    return arr::reverse(arr::sort(a))
+}
+
+pub fn arr_binary_search<T>(a: []T, v: T) -> Option<int> {
+    var lo = 0
+    var hi = len(a)
+    while lo < hi {
+        let m = (lo + hi) / 2
+        if a[m] != a[m] || v != v {
+            panik("binary_search: `" + str(a[m]) + "` (tipe " + typeof(a[m]) + ") tidak bisa dibandingkan dengan yang dicari `" + str(v) + "` (tipe " + typeof(v) + ")")
+        }
+        if a[m] == v { return Some(m) }
+        if a[m] < v { lo = m + 1 } else { hi = m }
+    }
+    return None
+}
+
+pub fn arr_group_by<T, K>(a: []T, f: fn(T) -> K) -> dict<[]T> {
+    var keluar: dict<[]T> = dict::new()
+    for _, x in a {
+        let k = str(f(x))
+        var isi: []T = dict::get_or(keluar, k, [])
+        isi += [x]
+        keluar[k] = isi
+    }
+    return keluar
+}
+
+pub fn arr_sort_by_key<T, K>(a: []T, f: fn(T) -> K) -> []T {
+    var kunci: []K = []
+    for _, x in a { kunci += [f(x)] }
+    var urut: []int = []
+    for i in 0..len(a) {
+        var j = len(urut)
+        urut += [i]
+        if j > 0 { _kunci_tak_sebanding("arr::sort_by_key", kunci[urut[j - 1]], kunci[i]) }
+        while j > 0 && kunci[urut[j - 1]] > kunci[i] {
+            urut[j] = urut[j - 1]
+            j -= 1
+        }
+        urut[j] = i
+    }
+    var keluar: []T = []
+    for _, i in urut { keluar += [a[i]] }
+    return keluar
+}
+
+pub fn arr_sort_by<T>(a: []T, f: fn(T, T) -> int) -> []T {
+    var keluar: []T = []
+    for _, x in a {
+        var lo = 0
+        var hi = len(keluar)
+        while lo < hi {
+            let tengah = (lo + hi) / 2
+            if f(x, keluar[tengah]) < 0 { hi = tengah } else { lo = tengah + 1 }
+        }
+        keluar = arr_insert(keluar, lo, x)
+    }
+    return keluar
+}
+
+pub fn dict_items<V>(d: dict<V>) -> [](string, V) {
+    var keluar: [](string, V) = []
+    for k, v in d { keluar += [(k, v)] }
+    return keluar
+}
+
+pub fn str_len(s: string) -> int { return len(s) }
+
+pub fn str_is_empty(s: string) -> bool { return len(s) == 0 }
+
+pub fn str_to_lowercase(s: string) -> string { return str::lower(s) }
+
+pub fn str_to_uppercase(s: string) -> string { return str::upper(s) }
+
+pub fn str_strip_prefix(s: string, awalan: string) -> string {
+    if str::starts_with(s, awalan) { return s[len(awalan):] }
+    return s
+}
+
+pub fn str_strip_suffix(s: string, akhiran: string) -> string {
+    if str::ends_with(s, akhiran) { return s[:len(s) - len(akhiran)] }
+    return s
+}
+
+pub fn str_char_at(s: string, i0: int) -> rune {
+    let i = i0 < 0 $ i0 + len(s) : i0
+    if i < 0 || i >= len(s) { panik("str::char_at: index " + str(i0) + " di luar batas (panjang " + str(len(s)) + ")") }
+    return s[i]
+}
+
+pub fn str_chars(s: string) -> []rune {
+    var keluar: []rune = []
+    for _, c in s { keluar += [c] }
+    return keluar
+}
+
+pub fn str_count(s: string, bagian: string) -> int {
+    if len(bagian) == 0 { return len(s) + 1 }
+    return len(str::split(s, bagian)) - 1
+}
+
+pub fn str_lines(s: string) -> []string {
+    var keluar: []string = []
+    let potong = str::split(s, "\n")
+    for i, baris in potong {
+        if i == len(potong) - 1 && len(baris) == 0 { continue }
+        if i < len(potong) - 1 && str::ends_with(baris, "\r") { keluar += [baris[:len(baris) - 1]] } else { keluar += [baris] }
+    }
+    return keluar
+}
+
+fn _isi_pad<I>(nama: string, isi: I) -> string {
+    let t = str(isi)
+    if len(t) != 1 {
+        panik(nama + ": isinya harus tepat satu karakter, dapat " + str(len(t)) + " karakter\n  bantuan: untuk pola berulang, bangun dulu dengan `str::repeat`, lalu potong dengan `str::slice`")
+    }
+    return t
+}
+
+fn _lebar_pad(lebar: int) -> int {
+    if lebar < 0 { panik("index tidak boleh negatif: " + str(lebar)) }
+    return lebar
+}
+
+pub fn str_pad_left<T, I>(v: T, lebar: int, isi: I = " ") -> string {
+    let s = str(v)
+    let w = _lebar_pad(lebar)
+    let c = _isi_pad("str::pad_left", isi)
+    if len(s) >= w { return s }
+    return str::repeat(c, w - len(s)) + s
+}
+
+pub fn str_pad_right<T, I>(v: T, lebar: int, isi: I = " ") -> string {
+    let s = str(v)
+    let w = _lebar_pad(lebar)
+    let c = _isi_pad("str::pad_right", isi)
+    if len(s) >= w { return s }
+    return s + str::repeat(c, w - len(s))
+}
+
+pub fn str_center<T, I>(v: T, lebar: int, isi: I = " ") -> string {
+    let s = str(v)
+    let w = _lebar_pad(lebar)
+    let c = _isi_pad("str::center", isi)
+    if len(s) >= w { return s }
+    let total = w - len(s)
+    let kiri = total / 2
+    return str::repeat(c, kiri) + s + str::repeat(c, total - kiri)
+}
+
+// Argumen angka `math::`: `x as float` menerima `bool` dan teks, acuannya tidak.
+fn _angka<A>(nama: string, x: A) -> float {
+    let t = typeof(x)
+    if t != "int" && t != "float" { panik(nama + ": butuh angka, dapat `" + t + "`") }
+    return x as float
+}
+
+pub fn math_log<A, B>(x: A, basis: B) -> float {
+    let v = _angka("math::log", x)
+    return math::ln(v) / math::ln(_angka("math::log", basis))
+}
+
+pub fn math_degrees<A>(x: A) -> float { return _angka("math::degrees", x) * (180.0 / math::PI) }
+
+pub fn math_radians<A>(x: A) -> float { return _angka("math::radians", x) * (math::PI / 180.0) }
+
+pub fn math_is_finite<A>(x: A) -> bool {
+    let v = _angka("math::is_finite", x)
+    return v - v == 0.0
+}
+
+pub fn str_ljust<T, I>(v: T, lebar: int, isi: I = " ") -> string {
+    let s = str(v)
+    let w = _lebar_pad(lebar)
+    let c = _isi_pad("str::ljust", isi)
+    if len(s) >= w { return s }
+    return s + str::repeat(c, w - len(s))
+}
+
+pub fn str_rjust<T, I>(v: T, lebar: int, isi: I = " ") -> string {
+    let s = str(v)
+    let w = _lebar_pad(lebar)
+    let c = _isi_pad("str::rjust", isi)
+    if len(s) >= w { return s }
+    return str::repeat(c, w - len(s)) + s
+}
+
+pub fn rand_int(lo: int, hi: int) -> int {
+    if hi < lo { panik("rand::int: hi (" + str(hi) + ") harus >= lo (" + str(lo) + ")") }
+    return lo + lapis::acak() % (hi - lo + 1)
+}
+
+pub fn rand_float() -> float { return ((lapis::acak() / 1024) as float) / 9007199254740992.0 }
+
+pub fn rand_bool() -> bool { return lapis::acak() % 2 == 1 }
+
+pub fn rand_choice<T>(a: []T) -> T {
+    if len(a) == 0 { panik("rand::choice: array kosong, tidak ada yang bisa dipilih") }
+    return a[lapis::acak() % len(a)]
+}
+
+pub fn rand_shuffle<T>(a: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { keluar += [x] }
+    var i = len(keluar) - 1
+    while i > 0 {
+        let j = lapis::acak() % (i + 1)
+        let t = keluar[i]
+        keluar[i] = keluar[j]
+        keluar[j] = t
+        i -= 1
+    }
+    return keluar
+}
+
+pub fn rand_sample<T>(a: []T, n: int) -> []T {
+    if n < 0 { panik("index tidak boleh negatif: " + str(n)) }
+    let acak = rand_shuffle(a)
+    if n >= len(acak) { return acak }
+    return acak[0:n]
+}
+
+pub fn arr_shuffle<T>(a: []T) -> []T { return rand_shuffle(a) }
+
+pub fn arr_sample<T>(a: []T, n: int = 1) -> []T { return rand_sample(a, n) }
+
+pub fn str_substr(s: string, mulai: int, panjang: int = 9223372036854775807) -> string {
+    let p = len(s)
+    let tulis = mulai
+    if mulai < 0 { mulai = p + mulai }
+    if mulai < 0 || mulai > p { panik("str::substr: posisi awal " + str(tulis) + " di luar jangkauan — string ini cuma " + str(p) + " karakter") }
+    if panjang < 0 { panik("index tidak boleh negatif: " + str(panjang)) }
+    if panjang >= p - mulai { return s[mulai:] }
+    return s[mulai:mulai + panjang]
+}
+
+fn _lantai(a: int, b: int) -> int {
+    let q = a / b
+    if a % b != 0 && (a < 0) != (b < 0) { return q - 1 }
+    return q
+}
+
+fn _sisa(a: int, b: int) -> int { return a - _lantai(a, b) * b }
+
+// Howard Hinnant, `civil_from_days`: hari sejak epoch -> (tahun, bulan, tanggal).
+fn _tanggal(hari: int) -> (int, int, int) {
+    let z = hari + 719468
+    let era = _lantai(z, 146097)
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let y = yoe + era * 400
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let d = doy - (153 * mp + 2) / 5 + 1
+    var m = mp - 9
+    if mp < 10 { m = mp + 3 }
+    if m <= 2 { return (y + 1, m, d) }
+    return (y, m, d)
+}
+
+fn _hari(ms: int) -> int { return _lantai(_lantai(ms, 1000), 86400) }
+
+fn _detik_hari(ms: int) -> int { return _sisa(_lantai(ms, 1000), 86400) }
+
+pub fn time_year(ms: int = time_now_ms()) -> int { return _tanggal(_hari(ms)).0 }
+pub fn time_month(ms: int = time_now_ms()) -> int { return _tanggal(_hari(ms)).1 }
+pub fn time_day(ms: int = time_now_ms()) -> int { return _tanggal(_hari(ms)).2 }
+pub fn time_hour(ms: int = time_now_ms()) -> int { return _detik_hari(ms) / 3600 }
+pub fn time_minute(ms: int = time_now_ms()) -> int { return (_detik_hari(ms) % 3600) / 60 }
+pub fn time_second(ms: int = time_now_ms()) -> int { return _detik_hari(ms) % 60 }
+
+pub fn time_weekday(ms: int = time_now_ms()) -> string {
+    let nama = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+    return nama[((_hari(ms) % 7) + 10) % 7]
+}
+
+fn _nol(n: int, lebar: int) -> string {
+    var s = str(n)
+    while len(s) < lebar { s = "0" + s }
+    return s
+}
+
+pub fn time_format(ms: int = time_now_ms(), pola: string = "%Y-%m-%d %H:%M:%S") -> string {
+    let bulan = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"]
+    let t = _tanggal(_hari(ms))
+    var keluar = ""
+    var persen = false
+    for _, c in pola {
+        let k = str(c)
+        if !persen {
+            if k == "%" { persen = true } else { keluar += k }
+            continue
+        }
+        persen = false
+        if k == "Y" { keluar += _nol(t.0, 4) }
+        else if k == "y" { keluar += _nol((t.0 % 100 + 100) % 100, 2) }
+        else if k == "m" { keluar += _nol(t.1, 2) }
+        else if k == "d" { keluar += _nol(t.2, 2) }
+        else if k == "H" { keluar += _nol(time_hour(ms), 2) }
+        else if k == "M" { keluar += _nol(time_minute(ms), 2) }
+        else if k == "S" { keluar += _nol(time_second(ms), 2) }
+        else if k == "L" { keluar += _nol(_sisa(ms, 1000), 3) }
+        else if k == "A" { keluar += time_weekday(ms) }
+        else if k == "B" { keluar += bulan[t.1 - 1] }
+        else if k == "%" { keluar += "%" }
+        else {
+            panik("time::format: arahan `%" + k + "` tidak dikenal.\n  bantuan: yang ada — %Y tahun, %y dua digit, %m bulan, %d tanggal, %H jam, %M menit, %S detik, %L milidetik, %A nama hari, %B nama bulan, %% tanda persen")
+        }
+    }
+    if persen { panik("time::format: pola berakhir dengan `%` menggantung") }
+    return keluar
+}
+
+
+// Padanan `host::galat_io` untuk nomor errno Linux; kalimatnya harus sama persis.
+fn _galat_os(kode: int) -> string {
+    let n = 0 - kode
+    if n == 2 { return "berkas atau direktorinya tidak ada" }
+    if n == 13 || n == 1 { return "tidak diizinkan (izin aksesnya kurang)" }
+    if n == 17 { return "sudah ada" }
+    if n == 21 { return "itu direktori, bukan berkas" }
+    if n == 20 { return "itu bukan direktori" }
+    if n == 39 { return "direktorinya tidak kosong" }
+    if n == 30 { return "sistem berkasnya cuma bisa dibaca" }
+    if n == 28 { return "penyimpanannya penuh" }
+    if n == 27 { return "berkasnya terlalu besar" }
+    if n == 36 { return "nama berkasnya tidak sah" }
+    if n == 16 { return "sedang dipakai" }
+    if n == 18 { return "asal dan tujuannya di perangkat berbeda" }
+    if n == 12 { return "memorinya habis" }
+    if n == 32 { return "pipanya sudah putus" }
+    return "ditolak sistem operasi (galat nomor " + str(n) + ")"
+}
+
+// Durasi seperti `{}` milik Rust menulisnya: pecahan bulat tanpa `.0`.
+fn _durasi(d: float) -> string {
+    if d == math::floor(d) && d < 9000000000000000000.0 && d > -9000000000000000000.0 { return str(d as int) }
+    return str(d)
+}
+
+pub fn time_now_ms() -> int { return lapis::os(14, "", "", 0).0 / 1000 }
+
+pub fn time_now() -> float { return (time_now_ms() as float) / 1000.0 }
+
+pub fn time_sleep_ms<T>(ms: T) {
+    let d = ms as float
+    if d > 315360000000.0 { panik("time::sleep_ms: durasi `" + _durasi(d) + "` milidetik tidak masuk akal — pakai angka yang wajar (0 untuk tanpa delay)") }
+    if d > 0.0 { lapis::os(15, "", "", (d * 1000.0) as int) }
+}
+
+pub fn time_sleep<T>(detik: T) {
+    let d = detik as float
+    if d != d || d - d != 0.0 || d > 315360000.0 { panik("time::sleep: durasi `" + _durasi(d) + "` detik tidak masuk akal — pakai angka detik yang wajar (0 untuk tanpa delay)") }
+    if d > 0.0 { lapis::os(15, "", "", (d * 1000000.0) as int) }
+}
+
+pub fn env_get(nama: string) -> Option<string> {
+    let r = lapis::os(12, nama, "", 0)
+    if r.0 == 1 { return Some(r.1) }
+    return None
+}
+
+pub fn env_get_or<V>(nama: string, cadangan: V) -> string {
+    let r = lapis::os(12, nama, "", 0)
+    if r.0 == 1 { return r.1 }
+    return str(cadangan)
+}
+
+pub fn env_set<V>(nama: string, nilai: V) { let _ = lapis::os(13, nama, str(nilai), 0) }
+
+pub fn fs_read(path: string) -> string {
+    let r = lapis::os(1, path, "", 0)
+    if r.0 < 0 { panik("fs::read '" + path + "': " + _galat_os(r.0)) }
+    return r.1
+}
+
+pub fn fs_write<V>(path: string, isi: V) {
+    let r = lapis::os(2, path, str(isi), 0)
+    if r.0 < 0 { panik("fs::write '" + path + "': " + _galat_os(r.0)) }
+}
+
+pub fn fs_append<V>(path: string, isi: V) {
+    let r = lapis::os(3, path, str(isi), 0)
+    if r.0 < 0 { panik("fs::append '" + path + "': " + _galat_os(r.0)) }
+}
+
+pub fn fs_exists(path: string) -> bool { return lapis::os(4, path, "", 0).0 == 1 }
+
+pub fn fs_is_dir(path: string) -> bool { return lapis::os(7, path, "", 0).0 == 1 }
+
+pub fn fs_is_file(path: string) -> bool { return lapis::os(8, path, "", 0).0 == 1 }
+
+pub fn fs_is_symlink(path: string) -> bool { return lapis::os(18, path, "", 0).0 == 1 }
+
+pub fn fs_delete(path: string) -> bool { return lapis::os(5, path, "", 0).0 == 0 }
+
+pub fn fs_rmdir(path: string) -> bool { return lapis::os(24, path, "", 0).0 == 0 }
+
+pub fn fs_mkdir(path: string) -> bool { return lapis::os(9, path, "", 0).0 == 0 }
+
+pub fn fs_rename(dari: string, ke: string) -> bool { return lapis::os(10, dari, ke, 0).0 == 0 }
+
+pub fn fs_copy(dari: string, ke: string) -> bool {
+    let r = lapis::os(1, dari, "", 0)
+    if r.0 < 0 { return false }
+    return lapis::os(2, ke, r.1, 0).0 == 0
+}
+
+pub fn fs_size(path: string) -> int {
+    let r = lapis::os(6, path, "", 0)
+    if r.0 < 0 { panik("fs::size '" + path + "': " + _galat_os(r.0)) }
+    return r.0
+}
+
+pub fn fs_cwd() -> string { return lapis::os(17, "", "", 0).1 }
+
+pub fn fs_temp_dir() -> string {
+    let r = lapis::os(12, "TMPDIR", "", 0)
+    if r.0 == 1 && len(r.1) > 0 { return r.1 }
+    return "/tmp"
+}
+
+fn _nama_isi(teks: string, jumlah: int) -> []string {
+    if jumlah == 0 {
+        let kosong: []string = []
+        return kosong
+    }
+    return str::split(teks, "\n")
+}
+
+pub fn fs_ls(path: string) -> []string {
+    let r = lapis::os(11, path, "", 0)
+    if r.0 < 0 { panik("fs::ls '" + path + "': " + _galat_os(r.0)) }
+    return _nama_isi(r.1, r.0)
+}
+
+pub fn fs_read_lines(path: string) -> []string {
+    let r = lapis::os(1, path, "", 0)
+    if r.0 < 0 { panik("fs::read_lines '" + path + "': " + _galat_os(r.0)) }
+    return str_lines(r.1)
+}
+
+pub fn fs_write_lines<V>(path: string, baris: []V) {
+    var isi = ""
+    for _, b in baris { isi += str(b) + "\n" }
+    let r = lapis::os(2, path, isi, 0)
+    if r.0 < 0 { panik("fs::write_lines '" + path + "': " + _galat_os(r.0)) }
+}
+
+pub fn fs_basename(p: string) -> string {
+    var s = p
+    while len(s) > 1 && str::ends_with(s, "/") { s = s[:len(s) - 1] }
+    let bagian = str::split(s, "/")
+    return bagian[len(bagian) - 1]
+}
+
+pub fn fs_dirname(p: string) -> string {
+    var s = p
+    while len(s) > 1 && str::ends_with(s, "/") { s = s[:len(s) - 1] }
+    if len(s) == 0 || s == "/" { return "." }
+    let bagian = str::split(s, "/")
+    if len(bagian) == 1 { return "" }
+    var induk = s[:len(s) - len(bagian[len(bagian) - 1]) - 1]
+    while len(induk) > 1 && str::ends_with(induk, "/") { induk = induk[:len(induk) - 1] }
+    if len(induk) == 0 { return "/" }
+    return induk
+}
+
+pub fn fs_join(a: string, b: string) -> string {
+    if str::starts_with(b, "/") || len(a) == 0 { return b }
+    if str::ends_with(a, "/") { return a + b }
+    return a + "/" + b
+}
+
+pub fn file_read(path: string) -> Result<string, string> {
+    let r = lapis::os(1, path, "", 0)
+    if r.0 < 0 { return Err("file::read: gagal baca `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(r.1)
+}
+
+pub fn file_read_lines(path: string) -> Result<[]string, string> {
+    let r = lapis::os(1, path, "", 0)
+    if r.0 < 0 { return Err("file::read_lines: gagal baca `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(str_lines(r.1))
+}
+
+pub fn file_write<V>(path: string, isi: V) -> Result<(), string> {
+    let r = lapis::os(2, path, str(isi), 0)
+    if r.0 < 0 { return Err("file::write: gagal tulis `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(())
+}
+
+pub fn file_append<V>(path: string, isi: V) -> Result<(), string> {
+    let r = lapis::os(3, path, str(isi), 0)
+    if r.0 < 0 { return Err("file::append: gagal tambah isi ke `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(())
+}
+
+pub fn file_delete(path: string) -> Result<(), string> {
+    let r = lapis::os(23, path, "", 0)
+    if r.0 < 0 { return Err("file::delete: gagal hapus `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(())
+}
+
+pub fn file_exists(path: string) -> bool { return lapis::os(4, path, "", 0).0 == 1 }
+
+pub fn file_list_dir(path: string) -> Result<[]string, string> {
+    let r = lapis::os(11, path, "", 0)
+    if r.0 < 0 { return Err("file::list_dir: gagal buka folder `" + path + "` — " + _galat_os(r.0)) }
+    return Ok(_nama_isi(r.1, r.0))
+}
+
+pub fn json_get(objek, kunci: string) { return dict::get(objek, kunci) }
+
+pub fn json_has(objek, kunci: string) -> bool { return dict::has(objek, kunci) }
+
+pub fn json_keys(objek) -> []string { return dict::keys(objek) }
+
+pub fn json_values(objek) { return dict::values(objek) }
+
+pub fn json_set(objek, kunci: string, nilai) { return dict::set(objek, kunci, nilai) }
+
+pub fn json_merge(a, b) { return dict::merge(a, b) }
+
+fn _telusuri(keluar: []string, d: string, sisa: int) -> []string {
+    if sisa == 0 { return keluar }
+    let r = lapis::os(11, d, "", 0)
+    if r.0 < 0 { return keluar }
+    var hasil = keluar
+    for _, n in _nama_isi(r.1, r.0) {
+        let f = fs_join(d, n)
+        if lapis::os(7, f, "", 0).0 == 1 && lapis::os(18, f, "", 0).0 != 1 {
+            hasil = _telusuri(hasil, f, sisa - 1)
+        } else {
+            hasil += [f]
+        }
+    }
+    return hasil
+}
+
+pub fn fs_walk(dir: string) -> []string {
+    if lapis::os(4, dir, "", 0).0 != 1 { panik("fs::walk '" + dir + "': " + _galat_os(0 - 2)) }
+    if lapis::os(7, dir, "", 0).0 != 1 { panik("fs::walk '" + dir + "': bukan direktori — `fs::walk` menelusuri isi sebuah direktori") }
+    let kosong: []string = []
+    return _telusuri(kosong, dir, 64)
+}
+
+pub fn fs_abs(path: string) -> string {
+    var bagian: []string = []
+    if !str::starts_with(path, "/") {
+        for _, b in str::split(fs_cwd(), "/") { if len(b) > 0 { bagian += [b] } }
+    }
+    for _, b in str::split(path, "/") {
+        if len(b) == 0 || b == "." { continue }
+        if b == ".." {
+            if len(bagian) > 0 { bagian = bagian[:len(bagian) - 1] }
+            continue
+        }
+        bagian += [b]
+    }
+    return "/" + str::join(bagian, "/")
+}
+
+pub fn fs_is_writable(path: string) -> bool { return lapis::os(19, path, "", 0).0 == 1 }
+
+pub fn fs_chmod(path: string, mode: int) {
+    if mode < 0 || mode > 4294967295 { panik("fs::chmod: mode `" + str(mode) + "` di luar jangkauan") }
+    let r = lapis::os(20, path, "", mode)
+    if r.0 < 0 { panik("fs::chmod '" + path + "': " + _galat_os(r.0)) }
+}
+
+pub fn env_args() -> []string {
+    var keluar: []string = []
+    for i in 0..lapis::os(21, "", "", 0).0 { keluar += [lapis::os(22, "", "", i).1] }
+    return keluar
+}
+
+// Isi `jawa::buffer_from_hex` (`codegen_panggil` membangun buffer runtime-nya di sekelilingnya):
+// lewat jembatan buffer-nya lahir di registri `jrgc`, dan pegangannya ditolak `buffer_get`.
+fn _isi_buffer_hex(teks: string) -> []int {
+    let r = crypto::hex_decode_bytes(teks)
+    if r.is_err() { panik("jawa::buffer_from_hex: " + r.unwrap_err()) }
+    return r.unwrap()
+}

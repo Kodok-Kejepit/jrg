@@ -1,0 +1,199 @@
+# Membangun biner untuk tiap platform, lalu melampirkannya ke sebuah GitHub
+# Release berikut manifes dan checksum-nya.
+#
+# Dijalankan dengan mendorong tag `v*` (mis. `v0.2.0`), atau manual dari tab
+# Actions. Tidak ada yang terbit tanpa tag — sebuah rilis yang terjadi karena
+# seseorang men-push ke main adalah rilis yang tidak diputuskan siapa pun.
+#
+# Gerbang mutunya suite penuh plus sapuan di mesin pengembang (pipeline-nya
+# memakai perkakas Linux: PTY, `unshare`, Xvfb, chromium). Di sini tiap biner
+# JADI diuji asap di sistemnya sendiri (`rilis/uji_asap.sh`): versi, konformans
+# di dua mesin, satu siklus `jrgm`. Yang tidak bisa dijalankan runnernya
+# (Termux) disebut apa adanya, tidak dilewati diam-diam.
+
+name: rilis
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      versi:
+        description: "Versi tanpa awalan v (mis. 0.2.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  bangun:
+    name: ${{ matrix.plat }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - plat: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - plat: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - plat: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          # Runner macOS Intel sedang dihapus GitHub; biner x86_64 dibangun di runner ARM
+          # (SDK yang sama) dan diuji lewat Rosetta kalau runnernya punya.
+          - plat: macos-x86_64
+            os: macos-latest
+            target: x86_64-apple-darwin
+            rosetta: true
+          - plat: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+          # Termux: biner Android (bionic, API 26), bukan glibc.
+          - plat: android-aarch64
+            os: ubuntu-latest
+            target: aarch64-linux-android
+            ndk: true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang toolchain
+        shell: bash
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add ${{ matrix.target }}
+
+      - name: NDK untuk Termux
+        if: matrix.ndk
+        uses: nttld/setup-ndk@v1
+        id: ndk
+        with:
+          ndk-version: r27c
+
+      - name: Penaut NDK
+        if: matrix.ndk
+        shell: bash
+        run: |
+          bin="${{ steps.ndk.outputs.ndk-path }}/toolchains/llvm/prebuilt/linux-x86_64/bin"
+          {
+            echo "CARGO_TARGET_AARCH64_LINUX_ANDROID_LINKER=$bin/aarch64-linux-android26-clang"
+            echo "CC_aarch64_linux_android=$bin/aarch64-linux-android26-clang"
+            echo "AR_aarch64_linux_android=$bin/llvm-ar"
+          } >> "$GITHUB_ENV"
+
+      - name: Bangun
+        shell: bash
+        run: cargo build --release --bins --target ${{ matrix.target }}
+
+      # Pustaka `--emit-llvm` ikut arsip: tanpa ini biner rilis mencari sumber `runtime/` dan
+      # `jembatan/` di jalur mesin PEMBANGUNNYA. Windows: runtime saja (jembatannya belum).
+      - name: Pustaka --emit-llvm
+        shell: bash
+        run: |
+          (cd runtime && cargo build --release --target ${{ matrix.target }})
+          if [ "${{ runner.os }}" != "Windows" ]; then
+            (cd jembatan && cargo build --release --target ${{ matrix.target }})
+          fi
+          mkdir -p pustaka
+          for f in runtime/target/${{ matrix.target }}/release/libjrgrt.a \
+                   runtime/target/${{ matrix.target }}/release/jrgrt.lib \
+                   jembatan/target/${{ matrix.target }}/release/libjrgjembatan.so \
+                   jembatan/target/${{ matrix.target }}/release/libjrgjembatan.dylib; do
+            if [ -f "$f" ]; then cp "$f" pustaka/; fi
+          done
+          ls -la pustaka
+          cp pustaka/* target/${{ matrix.target }}/release/
+
+      - name: Versi
+        id: versi
+        shell: bash
+        run: echo "v=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Uji asap
+        if: '!matrix.ndk'
+        shell: bash
+        run: |
+          if [ "${{ matrix.rosetta }}" = "true" ] && ! arch -x86_64 /usr/bin/true 2>/dev/null; then
+            echo "::warning::runner ini tanpa Rosetta — biner macos-x86_64 dibangun tapi TIDAK diuji di sini"
+            exit 0
+          fi
+          sh rilis/uji_asap.sh target/${{ matrix.target }}/release ${{ steps.versi.outputs.v }}
+
+      - name: Catatan Termux
+        if: matrix.ndk
+        shell: bash
+        run: echo "::notice::android-aarch64 dibangun dengan NDK; runner tidak bisa menjalankan biner bionic, jadi uji asapnya di HP (Termux)"
+
+      - name: Bungkus (Unix)
+        if: runner.os != 'Windows'
+        shell: bash
+        run: |
+          nama="jrg-${{ steps.versi.outputs.v }}-${{ matrix.plat }}"
+          mkdir -p "dist/$nama"
+          cp target/${{ matrix.target }}/release/jrgc "dist/$nama/"
+          cp target/${{ matrix.target }}/release/jrgm "dist/$nama/"
+          cp LICENSE README.md pustaka/* "dist/$nama/"
+          (cd dist && tar czf "$nama.tar.gz" "$nama")
+          (cd dist && shasum -a 256 "$nama.tar.gz" > "$nama.tar.gz.sha256")
+
+      - name: Bungkus (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          nama="jrg-${{ steps.versi.outputs.v }}-${{ matrix.plat }}"
+          mkdir -p "dist/$nama"
+          cp target/${{ matrix.target }}/release/jrgc.exe "dist/$nama/"
+          cp target/${{ matrix.target }}/release/jrgm.exe "dist/$nama/"
+          cp LICENSE README.md pustaka/* "dist/$nama/"
+          (cd dist && 7z a "$nama.zip" "$nama" > /dev/null)
+          (cd dist && sha256sum "$nama.zip" > "$nama.zip.sha256")
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.plat }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+
+  terbitkan:
+    needs: bangun
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: unduhan
+
+      - name: Susun manifes
+        shell: bash
+        run: |
+          mkdir -p dist
+          find unduhan -type f \( -name '*.tar.gz' -o -name '*.zip' -o -name '*.sha256' \) \
+            -exec cp {} dist/ \;
+          versi=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
+          python3 rilis/susun_manifes.py "$versi" dist > dist/manifes.json
+          cat dist/manifes.json
+
+      # Diperiksa DI SINI, bukan dipercaya: sebuah manifes yang checksumnya
+      # meleset membuat tiap pemasangan gagal dengan pesan yang menuduh
+      # unduhannya.
+      - name: Periksa checksum sendiri
+        shell: bash
+        run: |
+          cd dist
+          for f in *.sha256; do shasum -a 256 -c "$f"; done
+          python3 ../rilis/periksa_manifes.py manifes.json .
+
+      - name: Terbitkan
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/*.sha256
+            dist/manifes.json
+          generate_release_notes: true

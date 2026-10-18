@@ -1,0 +1,92 @@
+// ============================================================================
+// JawaRustGo++ — stdlib/testing.jrg
+package std_testing
+
+var _nama_suite = ""
+var _lulus = 0
+var _gagal = 0
+var _pesan_gagal = []
+
+/// Mulai satu kelompok test. Boleh dipanggil beberapa kali.
+pub fn mulai(nama) {
+    _nama_suite = nama
+    wok("=== " + nama + " ===")
+}
+
+/// Catat satu test yang lulus kalau `kondisi` benar.
+pub fn cek(nama, kondisi) {
+    if kondisi {
+        _lulus = _lulus + 1
+        wok("  ok   " + nama)
+        return true
+    }
+    _gagal = _gagal + 1
+    let p = nama + ": kondisi tidak terpenuhi"
+    // `arr::push` mengembalikan array baru, tidak mengubah `_pesan_gagal`
+    // di tempat — hasilnya harus ditampung balik.
+    _pesan_gagal = arr::push(_pesan_gagal, p)
+    wok("  GAGAL " + p)
+    return false
+}
+
+/// Catat satu test yang lulus kalau `dapat` sama dengan `harusnya`.
+pub fn cek_sama(nama, dapat, harusnya) {
+    if dapat == harusnya {
+        _lulus = _lulus + 1
+        wok("  ok   " + nama)
+        return true
+    }
+    _gagal = _gagal + 1
+    let p = nama + ": harusnya `" + str(harusnya) + "` (" + typeof(harusnya) + "), dapat `" + str(dapat) + "` (" + typeof(dapat) + ")"
+    _pesan_gagal = arr::push(_pesan_gagal, p)  // array baru, harus ditampung balik
+    wok("  GAGAL " + p)
+    return false
+}
+
+/// Kebalikan `cek_sama`.
+pub fn cek_beda(nama, a, b) {
+    if a != b {
+        _lulus = _lulus + 1
+        wok("  ok   " + nama)
+        return true
+    }
+    _gagal = _gagal + 1
+    let p = nama + ": harusnya BEDA, tapi dua-duanya `" + str(a) + "`"
+    _pesan_gagal = arr::push(_pesan_gagal, p)  // array baru, harus ditampung balik
+    wok("  GAGAL " + p)
+    return false
+}
+
+/// Test yang lulus kalau `r` adalah `Ok`.
+pub fn cek_ok(nama, r) {
+    match r {
+        Ok(_)  => { return cek(nama, true) }
+        Err(e) => { return cek(nama + " (dapat Err: " + str(e) + ")", false) }
+    }
+}
+
+/// Test yang lulus kalau `r` adalah `Err`.
+pub fn cek_err(nama, r) {
+    match r {
+        Ok(v)  => { return cek(nama + " (dapat Ok: " + str(v) + ")", false) }
+        Err(_) => { return cek(nama, true) }
+    }
+}
+
+/// Berapa test yang sudah lulus dan gagal sejauh ini.
+pub fn hitungan() {
+    return (_lulus, _gagal)
+}
+
+/// Cetak rangkuman, lalu kembalikan kode keluar: 0 kalau semua lulus, 1 kalau
+/// ada yang gagal.
+pub fn selesai() {
+    let total = _lulus + _gagal
+    wok("--- " + str(total) + " test: " + str(_lulus) + " lulus, " + str(_gagal) + " gagal ---")
+    if _gagal > 0 {
+        wok("yang gagal:")
+        for i in _pesan_gagal { wok("  - " + _pesan_gagal[i]) }
+        return 1
+    }
+    return 0
+}

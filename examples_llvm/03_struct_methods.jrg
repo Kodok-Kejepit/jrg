@@ -1,0 +1,34 @@
+package main
+
+struct Point {
+    x: f64,
+    y: f64,
+}
+
+impl Point {
+    fn new(x: f64, y: f64) -> Point {
+        Point { x: x, y: y }
+    }
+
+    fn dist(self, other: Point) -> f64 {
+        let dx: f64 = self.x - other.x
+        let dy: f64 = self.y - other.y
+        math::sqrt(dx * dx + dy * dy)
+    }
+
+    fn scale(self, factor: f64) -> Point {
+        Point { x: self.x * factor, y: self.y * factor }
+    }
+}
+
+pub fn main() {
+    let a: Point = Point::new(0.0, 0.0)
+    let b: Point = Point { x: 3.0, y: 4.0 }
+    wok("jarak a-b =", a.dist(b))
+
+    let c: Point = b.scale(2.0)
+    wok("c =", c)
+
+    let d: Point = Point { y: 9.0, ...a }
+    wok("d (spread) =", d)
+}

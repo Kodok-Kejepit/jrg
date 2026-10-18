@@ -1,0 +1,504 @@
+package sunting_layar
+
+// Menggambar editor. `bingkai(e)` MURNI: menjawab tiap baris layar sebagai teks siap tulis
+// plus letak kursor. `gambar(e)` membandingkannya dengan bingkai yang sudah di layar dan
+// cuma menulis baris yang berubah — satu ketukan biasanya mengubah satu atau dua baris.
+import "sunting/aksara"
+import "sunting/penyangga"
+import "sunting/sorot"
+import "sunting/tema"
+import "sunting/tombol"
+import "sunting/keadaan"
+import "sunting/dialog"
+import "sunting/daftar"
+import "sunting/cari"
+import "sunting/berkas"
+
+const ESC = "\u001b"
+const HAPUS_KANAN = "\u001b[K"
+const S = "\u0001"
+
+// Bingkai yang sudah ditulis ke layar, per nomor baris layar.
+var BINGKAI = dict::new()
+// Baris teks yang sudah dirakit, per isi + keadaan + hiasannya.
+var RAKITAN = dict::new()
+// Hasil sorot per keadaan awal + isi baris.
+var SOROTAN = dict::new()
+// Baris pintasan yang sudah dirakit, per jenis keadaan + lebar + tema.
+var PINTASAN_JADI = dict::new()
+// Pasangan kurung di kursor: dihitung ulang cuma kalau kursor atau isinya berubah.
+var KURUNG_KUNCI = ""
+var KURUNG_HASIL = []
+
+/// Lupakan bingkai di layar: gambar berikutnya menulis ulang semuanya.
+pub fn lupa() {
+    BINGKAI = dict::new()
+}
+
+/// Lupakan semua hasil rakitan (sesudah tema berganti).
+pub fn lupa_rakitan() {
+    RAKITAN = dict::new()
+    BINGKAI = dict::new()
+}
+
+fn sorotan(teks, awal) {
+    let kunci = awal + S + teks
+    if dict::has(SOROTAN, kunci) { return SOROTAN[kunci] }
+    if len(SOROTAN) > 4000 { SOROTAN = dict::new() }
+    let h = sorot::baris(teks, awal)
+    SOROTAN[kunci] = h
+    return h
+}
+
+/// Pastikan keadaan awal sorot tiap baris sampai baris `sampai` sudah dihitung. Baris yang
+/// berubah sejak gambar terakhir (`ubah_dari`) membatalkan semua keadaan sesudahnya.
+pub fn siapkan_sorot(p, sampai) {
+    var x = p
+    var sah = math::min(p.sah_sorot, p.ubah_dari)
+    x.ubah_dari = penyangga::TAK_BERUBAH
+    if !p.bersorot { return x }
+    var st = p.awal_sorot
+    if len(st) == 0 {
+        st = [""]
+        sah = 0
+    }
+    let target = math::min(sampai, len(p.baris) - 1)
+    var i = sah
+    while i < target {
+        let akhir = sorot::keadaan_akhir(p.baris[i], st[i])
+        if i + 1 < len(st) { st[i + 1] = akhir } else { st = st + [akhir] }
+        i = i + 1
+    }
+    x.awal_sorot = st
+    x.sah_sorot = math::max(sah, target)
+    return x
+}
+
+/// Teks `s` dipotong atau ditambah spasi sampai tepat `lebar` kolom layar.
+fn pas(s, lebar) {
+    let w = aksara::lebar(s)
+    if w == lebar { return s }
+    if w < lebar { return s + str::repeat(" ", lebar - w) }
+    let t = aksara::jendela(s, 0, lebar)
+    return t + str::repeat(" ", lebar - aksara::lebar(t))
+}
+
+/// Rakit satu baris teks: kolom nomor, potongan bersorot, dan lapisan (seleksi, hasil
+/// cari, kurung) di atasnya. `lapisan` berisi `[mulai, sampai, lapis]`; yang belakangan
+/// menang. Hasilnya selalu mengisi atau menghapus sampai tepi kanan.
+fn rakit(teks, rentang, nomor, kini, galat, lapisan, ujung, kiri, muat, wn) {
+    let angka = str::pad_left(str::to_string(nomor), wn - 2)
+    var keluar = []
+    if galat { keluar = [tema::warna("nomor_galat"), "!", angka, " "] }
+    else if kini { keluar = [tema::warna("nomor_kini"), " ", angka, " "] }
+    else { keluar = [tema::warna("nomor"), " ", angka, " "] }
+    let dasar = kini $ "baris" : ""
+    let n = str::len(teks)
+    var segmen = []
+    var pos = 0
+    for _, r in rentang {
+        if r[0] > pos { segmen = segmen + [[pos, r[0], "", dasar]] }
+        segmen = segmen + [[r[0], r[1], r[2], dasar]]
+        pos = r[1]
+    }
+    if pos < n { segmen = segmen + [[pos, n, "", dasar]] }
+    for _, o in lapisan {
+        var baru = []
+        for _, s in segmen {
+            if s[1] <= o[0] || s[0] >= o[1] {
+                baru = baru + [s]
+            } else {
+                if s[0] < o[0] { baru = baru + [[s[0], o[0], s[2], s[3]]] }
+                baru = baru + [[math::max(s[0], o[0]), math::min(s[1], o[1]), s[2], o[2]]]
+                if s[1] > o[1] { baru = baru + [[o[1], s[1], s[2], s[3]]] }
+            }
+        }
+        segmen = baru
+    }
+    // Baris ASCII: kolom layar sama dengan indeks karakter, jadi potongannya langsung.
+    let lurus = aksara::polos(teks)
+    let lebar_isi = lurus $ n : aksara::lebar(teks)
+    // Baris yang berlanjut di luar layar ditandai `<` dan `>` di tepinya, seperti nano.
+    let ada_kiri = kiri > 0
+    let ada_kanan = lebar_isi - kiri > muat
+    let mulai = ada_kiri $ kiri + 1 : kiri
+    var jendela = muat
+    if ada_kiri { jendela = jendela - 1 }
+    if ada_kanan { jendela = jendela - 1 }
+    let kanan = mulai + jendela
+    if ada_kiri { keluar = keluar + [tema::warna("kosong"), "<"] }
+    for _, s in segmen {
+        var t = ""
+        if lurus {
+            let a = math::max(s[0], mulai)
+            let b = math::min(s[1], kanan)
+            if a < b { t = str::slice(teks, a, b) }
+        } else {
+            t = aksara::potong(teks, s[0], s[1], mulai, jendela)
+        }
+        if t != "" { keluar = keluar + [tema::gaya(s[2], s[3]), t] }
+    }
+    if ada_kanan { keluar = keluar + [tema::warna("kosong"), ">"] }
+    var sisa = muat - math::min(math::max(lebar_isi - kiri, 0), muat)
+    // Seleksi yang berlanjut ke baris berikutnya ditandai satu kolom di ujung baris,
+    // supaya baris kosong di dalam seleksi tetap terlihat terpilih.
+    if ujung && sisa > 0 {
+        keluar = keluar + [tema::gaya("", "pilih"), " "]
+        sisa = sisa - 1
+    }
+    if dasar != "" {
+        keluar = keluar + [tema::gaya("", dasar), str::repeat(" ", sisa), tema::RESET]
+    } else if sisa > 0 {
+        keluar = keluar + [tema::RESET, HAPUS_KANAN]
+    } else {
+        keluar = keluar + [tema::RESET]
+    }
+    return arr::join(keluar, "")
+}
+
+/// Pasangan kurung di kursor sebagai `[[br, kol], [br, kol]]`, atau `[]`.
+fn kurung(e, p) {
+    if penyangga::ada_seleksi(p) { return [] }
+    let kunci = str::to_string(e.aktif) + ":" + str::to_string(p.br) + ":" + str::to_string(p.kol)
+    if kunci == KURUNG_KUNCI { return KURUNG_HASIL }
+    KURUNG_KUNCI = kunci
+    KURUNG_HASIL = []
+    match penyangga::kurung_di_kursor(p) {
+        Option::None => {}
+        Option::Some(sini) => {
+            match penyangga::pasangan_kurung(p, keadaan::tinggi_teks(e) * 3) {
+                Option::Some(sana) => { KURUNG_HASIL = [sini, sana] }
+                Option::None => {}
+            }
+        }
+    }
+    return KURUNG_HASIL
+}
+
+/// Baris-baris area teks penyangga aktif.
+fn area_teks(e, p) {
+    let t = keadaan::tinggi_teks(e)
+    let wn = keadaan::lebar_nomor(p)
+    let muat = keadaan::lebar_teks(e, p)
+    let n = len(p.baris)
+    let pasangan = kurung(e, p)
+    var sel = []
+    match penyangga::seleksi(p) {
+        Option::Some(r) => { sel = r }
+        Option::None => {}
+    }
+    var pola = ""
+    if e.sorot_cari { pola = e.cari }
+    let np = str::len(pola)
+    var salah = dict::new()
+    for _, g in e.galat {
+        if g[0] == p.nama { salah[g[1]] = true }
+    }
+    let ada_salah = len(salah) > 0
+    let ada_sel = len(sel) > 0
+    // Cuma baris KURSOR yang digulung ke samping; baris lain tetap dari kolom pertama,
+    // supaya konteks di sekitarnya tidak ikut hilang dari layar.
+    let ekor = S + arr::join([str::to_string(muat), str::to_string(wn), pola, tema::nama()], S)
+    let kosong = tema::warna("kosong") + "~" + tema::RESET + HAPUS_KANAN
+    let st = p.awal_sorot
+    let bersorot = p.bersorot
+    var hias_kini = "k" + str::to_string(p.kiri)
+    if np > 0 { hias_kini = hias_kini + "c" + str::to_string(p.kol) }
+    var keluar = []
+    var r = 0
+    while r < t {
+        let i = p.atas + r
+        if i >= n {
+            keluar = keluar + [kosong]
+        } else {
+            let teks = p.baris[i]
+            let awal = bersorot $ st[i] : ""
+            let kini = i == p.br
+            var lapisan = []
+            var hias = kini $ hias_kini : ""
+            var ujung = false
+            let galat = ada_salah && dict::has(salah, i + 1)
+            if galat { hias = hias + "!" }
+            if ada_sel && i >= sel[0] && i <= sel[2] {
+                let a = i == sel[0] $ sel[1] : 0
+                let b = i == sel[2] $ sel[3] : str::len(teks)
+                ujung = i < sel[2]
+                lapisan = lapisan + [[a, b, "pilih"]]
+                hias = hias + "s" + str::to_string(a) + "-" + str::to_string(b) + (ujung $ "+" : "")
+            }
+            for _, pk in pasangan {
+                if pk[0] == i {
+                    lapisan = lapisan + [[pk[1], pk[1] + 1, "kurung"]]
+                    hias = hias + "b" + str::to_string(pk[1])
+                }
+            }
+            let kunci = arr::join([teks, awal, str::to_string(i), hias], S) + ekor
+            if dict::has(RAKITAN, kunci) {
+                keluar = keluar + [RAKITAN[kunci]]
+            } else {
+                var rentang = []
+                if bersorot { rentang = sorotan(teks, awal)[0] }
+                if np > 0 {
+                    // Hasil cari di BAWAH seleksi dan kurung; yang di kursor dibedakan.
+                    var temu = []
+                    for _, k in cari::di_baris(teks, pola) {
+                        let lapis = (kini && k == p.kol) $ "kini" : "cocok"
+                        temu = temu + [[k, k + np, lapis]]
+                    }
+                    lapisan = temu + lapisan
+                }
+                let b = rakit(teks, rentang, i + 1, kini, galat, lapisan, ujung, kini $ p.kiri : 0, muat, wn)
+                if len(RAKITAN) > 3000 { RAKITAN = dict::new() }
+                RAKITAN[kunci] = b
+                keluar = keluar + [b]
+            }
+        }
+        r = r + 1
+    }
+    return keluar
+}
+
+/// Baris-baris daftar yang sedang terbuka, menggantikan area teks.
+fn area_daftar(e) {
+    let d = e.daftar
+    let t = keadaan::tinggi_teks(e)
+    var ekor = ""
+    if d.bisa_pilih { ekor = "  (" + str::to_string(len(d.tampil)) + " dari " + str::to_string(len(d.butir)) + ")" }
+    // Judul yang kepanjangan — path direktori di penjelajah — dipotong dari DEPAN: ujungnya
+    // yang membedakan, dan hitungannya tetap terlihat.
+    var judul = d.judul
+    let ruang = math::max(e.lebar - 1 - aksara::lebar(ekor), 4)
+    if aksara::lebar(judul) > ruang {
+        let muat = math::max(ruang - 2, 1)
+        judul = ".." + aksara::jendela(judul, aksara::lebar(judul) - muat, muat)
+    }
+    var keluar = [tema::warna("judul_redup") + pas(" " + judul + ekor, e.lebar) + tema::RESET]
+    var r = 0
+    while r < t - 1 {
+        match daftar::baris_ke(d, r) {
+            Option::None => { keluar = keluar + [tema::RESET + HAPUS_KANAN] }
+            Option::Some(teks) => {
+                if d.bisa_pilih && d.atas + r == d.pilih {
+                    keluar = keluar + [tema::warna("popup_pilih") + pas(" " + teks, e.lebar) + tema::RESET]
+                } else {
+                    let b = aksara::jendela(" " + teks, 0, e.lebar - 1)
+                    keluar = keluar + [tema::RESET + b + HAPUS_KANAN]
+                }
+            }
+        }
+        r = r + 1
+    }
+    return keluar
+}
+
+fn baris_judul(e, p) {
+    var tanda = ""
+    if p.kotor { tanda = " [+]" }
+    if p.hanya_baca { tanda = tanda + " [baca saja]" }
+    var kanan = str::to_string(p.br + 1) + ":" + str::to_string(p.kol + 1) + "  " + str::to_string(len(p.baris)) + " baris "
+    if len(e.berkas) > 1 {
+        kanan = "[" + str::to_string(e.aktif + 1) + "/" + str::to_string(len(e.berkas)) + "]  " + kanan
+    }
+    let wk = str::len(kanan)
+    if e.lebar <= wk + 4 { return tema::warna("judul") + pas(" " + kanan, e.lebar) + tema::RESET }
+    let nama = berkas::ringkas(p.nama) + tanda
+    var kiri = " jrgedit  " + nama
+    let ruang = e.lebar - wk - 1
+    // Layar sempit: nama berkasnya lebih penting daripada nama editornya.
+    if aksara::lebar(kiri) > ruang { kiri = " " + nama }
+    if aksara::lebar(kiri) > ruang {
+        // Nama yang kepanjangan dipotong dari DEPAN: ujung path yang membedakan berkas.
+        let muat = math::max(ruang - 3, 1)
+        let lebih = aksara::lebar(nama) - muat
+        kiri = " .." + aksara::jendela(nama, math::max(lebih, 0), muat)
+    }
+    return tema::warna("judul") + pas(kiri, ruang + 1) + kanan + tema::RESET
+}
+
+/// Baris pesan: dialog yang sedang terbuka, saringan daftar, atau pesan terakhir.
+/// Menjawab `[teks, kolom_kursor]`; kolom -1 berarti kursornya bukan di baris ini.
+fn baris_pesan(e) {
+    if dialog::aktif(e.dialog) {
+        let h = dialog::tampil(e.dialog, e.lebar)
+        return [tema::warna("tanya") + aksara::jendela(h[0], 0, e.lebar - 1) + tema::RESET + h[1] + HAPUS_KANAN, h[2]]
+    }
+    if daftar::aktif(e.daftar) && e.daftar.bisa_pilih {
+        let label = " saring: "
+        let isi = aksara::jendela(e.daftar.saring, 0, math::max(e.lebar - str::len(label) - 1, 1))
+        return [tema::warna("tanya") + label + tema::RESET + isi + HAPUS_KANAN, str::len(label) + aksara::lebar(isi)]
+    }
+    if e.pesan == "" { return [tema::RESET + HAPUS_KANAN, -1] }
+    let gaya = e.pesan_galat $ "pesan_galat" : "pesan"
+    return [tema::warna(gaya) + aksara::jendela(" " + e.pesan, 0, e.lebar - 1) + tema::RESET + HAPUS_KANAN, -1]
+}
+
+/// Jenis petunjuk untuk keadaan sekarang; baris pintasannya diingat per jenis.
+fn jenis_petunjuk(e) {
+    if dialog::aktif(e.dialog) {
+        if e.dialog.pilihan != "" { return "tanya:" + e.dialog.pilihan }
+        return "masukan"
+    }
+    if daftar::aktif(e.daftar) { return e.daftar.bisa_pilih $ "daftar" : "bacaan" }
+    if len(e.lengkap) > 0 { return "lengkap" }
+    return "utama"
+}
+
+/// Petunjuk tombol untuk satu jenis keadaan: `[tombol, keterangan]`.
+fn petunjuk(jenis) {
+    if str::starts_with(jenis, "tanya:") {
+        var p = []
+        for _, c in str::chars(str::slice(jenis, 6)) {
+            let h = "" + c
+            p = p + [[str::upper(h), keadaan::arti_pilihan(h)]]
+        }
+        // `B Batal` sudah ada di pilihannya; Esc cuma disebut kalau tidak.
+        if str::contains(jenis, "b") { return p }
+        return p + [["Esc", "Batal"]]
+    }
+    if jenis == "masukan" { return [["Enter", "Lanjut"], ["Esc", "Batal"], ["Atas", "Riwayat"], ["^U", "Kosongkan"]] }
+    if jenis == "daftar" { return [["Enter", "Pilih"], ["Esc", "Tutup"], ["Atas", "Naik"], ["Bawah", "Turun"]] }
+    if jenis == "bacaan" { return [["Esc", "Tutup"], ["PgDn", "Lanjut"], ["PgUp", "Kembali"], ["Home", "Awal"]] }
+    if jenis == "lengkap" { return [["Tab", "Terima"], ["Esc", "Batal"], ["Atas", "Naik"], ["Bawah", "Turun"]] }
+    return tombol::pintasan()
+}
+
+/// Baris pintasan ke-`ke` dari `jumlah`, diisi per KOLOM: butir 0 dan 1 di kolom pertama.
+fn baris_pintasan(e, daftar_petunjuk, ke, jumlah) {
+    let n = len(daftar_petunjuk)
+    let perlu = (n + jumlah - 1) / jumlah
+    let kolom = math::max(math::min(e.lebar / 13, perlu), 1)
+    let sel = e.lebar / kolom
+    var keluar = []
+    var k = 0
+    while k < kolom {
+        let i = k * jumlah + ke
+        if i < n {
+            let b = daftar_petunjuk[i]
+            let ket = aksara::jendela(" " + b[1], 0, math::max(sel - str::len(b[0]) - 1, 0))
+            let isi = k + 1 < kolom $ pas(ket, math::max(sel - str::len(b[0]), 0)) : ket
+            keluar = keluar + [tema::warna("tombol"), aksara::jendela(b[0], 0, sel), tema::RESET, tema::warna("ket"), isi]
+        } else if k + 1 < kolom {
+            keluar = keluar + [tema::RESET, str::repeat(" ", sel)]
+        }
+        k = k + 1
+    }
+    return arr::join(keluar, "") + tema::RESET + HAPUS_KANAN
+}
+
+/// Tempelkan kotak pelengkapan ke baris-baris di bawah (atau di atas) kursor.
+fn tempel_lengkap(e, p, baris, kb, kx) {
+    let n = len(e.lengkap)
+    if n == 0 { return baris }
+    let t = keadaan::tinggi_teks(e)
+    let tampil = math::min(n, math::min(8, t - 1))
+    if tampil <= 0 { return baris }
+    var lebar = 8
+    for _, c in e.lengkap { lebar = math::max(lebar, aksara::lebar(c)) }
+    lebar = math::min(math::min(lebar, 48), math::max(e.lebar - 4, 8))
+    // Jendela butir yang tampil mengikuti pilihan.
+    var awal = 0
+    if e.lengkap_ke >= tampil { awal = e.lengkap_ke - tampil + 1 }
+    // Di bawah kursor kalau muat, kalau tidak di atasnya.
+    var mulai = kb + 1
+    if kb + tampil >= t + 1 { mulai = kb - tampil }
+    if mulai < 1 { mulai = 1 }
+    var kol = math::max(kx - (p.kol - e.lengkap_dari), 0)
+    if kol + lebar + 2 > e.lebar { kol = math::max(e.lebar - lebar - 2, 0) }
+    var x = baris
+    var i = 0
+    while i < tampil {
+        let gaya = (awal + i == e.lengkap_ke) $ "popup_pilih" : "popup"
+        let kotak = ESC + "[" + str::to_string(kol + 1) + "G" + tema::warna(gaya) + " " + pas(e.lengkap[awal + i], lebar) + " " + tema::RESET
+        if mulai + i < len(x) { x[mulai + i] = x[mulai + i] + kotak }
+        i = i + 1
+    }
+    return x
+}
+
+/// Seluruh layar sebagai `[baris, kursor_baris, kursor_kolom, kursor_tampak]`; letak
+/// kursor dihitung dari 1. `e` harus sudah lewat `siapkan`.
+pub fn bingkai(e) {
+    let p = keadaan::kini(e)
+    let t = keadaan::tinggi_teks(e)
+    var baris = [baris_judul(e, p)]
+    var kb = 0
+    var kx = 0
+    var tampak = false
+    if daftar::aktif(e.daftar) {
+        baris = baris + area_daftar(e)
+    } else {
+        baris = baris + area_teks(e, p)
+        let r = p.br - p.atas
+        let x = aksara::ke_tampil(p.baris[p.br], p.kol) - p.kiri
+        if r >= 0 && r < t && x >= 0 && x < keadaan::lebar_teks(e, p) {
+            kb = r + 2
+            kx = keadaan::lebar_nomor(p) + x + 1
+            tampak = true
+            baris = tempel_lengkap(e, p, baris, r + 1, kx - 1)
+        }
+    }
+    let ps = baris_pesan(e)
+    baris = baris + [ps[0]]
+    if ps[1] >= 0 {
+        kb = t + 2
+        kx = math::min(ps[1] + 1, e.lebar)
+        tampak = true
+    }
+    let jp = keadaan::baris_pintasan(e)
+    if jp > 0 {
+        // Baris pintasan cuma bergantung pada jenis keadaan, lebar, dan tema: diingat.
+        let jenis = jenis_petunjuk(e)
+        let kunci = arr::join([jenis, str::to_string(e.lebar), str::to_string(jp), tema::nama()], S)
+        if !dict::has(PINTASAN_JADI, kunci) {
+            if len(PINTASAN_JADI) > 200 { PINTASAN_JADI = dict::new() }
+            let pt = petunjuk(jenis)
+            var jadi = []
+            var i = 0
+            while i < jp {
+                jadi = jadi + [baris_pintasan(e, pt, i, jp)]
+                i = i + 1
+            }
+            PINTASAN_JADI[kunci] = jadi
+        }
+        baris = baris + PINTASAN_JADI[kunci]
+    }
+    return [baris, kb, kx, tampak]
+}
+
+/// Siapkan keadaan sorot penyangga aktif untuk bagian yang tampil.
+pub fn siapkan(e) {
+    let p = keadaan::kini(e)
+    // Isi yang berubah membatalkan pasangan kurung yang diingat, walau kursornya diam.
+    if p.ubah_dari != penyangga::TAK_BERUBAH { KURUNG_KUNCI = "" }
+    return keadaan::ganti(e, siapkan_sorot(p, p.atas + keadaan::tinggi_teks(e)))
+}
+
+/// Apa yang harus ditulis supaya layar jadi `baris`: cuma baris yang berbeda dari
+/// bingkai sebelumnya, lalu kursornya.
+pub fn selisih(h, paksa) {
+    var keluar = [ESC + "[?25l"]
+    if paksa {
+        BINGKAI = dict::new()
+        keluar = keluar + [tema::RESET + ESC + "[2J"]
+    }
+    var i = 0
+    for _, b in h[0] {
+        if dict::get_or(BINGKAI, i, nil) != b {
+            keluar = keluar + [ESC + "[" + str::to_string(i + 1) + ";1H", b]
+            BINGKAI[i] = b
+        }
+        i = i + 1
+    }
+    if h[3] {
+        keluar = keluar + [ESC + "[" + str::to_string(h[1]) + ";" + str::to_string(h[2]) + "H" + ESC + "[?25h"]
+    }
+    return arr::join(keluar, "")
+}
+
+/// Gambar editor ke terminal. Menjawab editor dengan keadaan sorot yang sudah diperbarui.
+pub fn gambar(e) {
+    var x = siapkan(e)
+    term::tulis(selisih(bingkai(x), x.paksa))
+    x.paksa = false
+    return x
+}

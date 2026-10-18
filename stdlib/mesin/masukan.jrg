@@ -1,0 +1,204 @@
+package std_mesin_masukan
+
+// Keadaan masukan SATU bingkai sebagai nilai biasa: tombol yang ditahan, yang
+// baru ditekan, yang baru dilepas, dan tetikus. Karena ia nilai, sebuah game bisa
+// diputar ulang dengan masukan rekaman (`masukan::buatan`) tanpa jendela.
+import "std/mesin/vek"
+
+pub struct Masukan {
+    pub ditahan: dict, pub ditekan: dict, pub dilepas: dict,
+    pub tetikus: vek::Vek2, pub klik: []bool, pub klik_baru: []bool,
+}
+
+fn _daftar(nama: string, daftar) -> dict {
+    if typeof(daftar) != "array" {
+        panik(nama + ": daftar tombol harus array teks, dapat `" + typeof(daftar) + "`")
+    }
+    var d = dict::new()
+    for _, t in daftar {
+        if typeof(t) != "string" {
+            panik(nama + ": nama tombol harus teks, dapat `" + typeof(t) + "`")
+        }
+        d = dict::set(d, canvas::nama_tombol(t), true)
+    }
+    return d
+}
+
+/// Tanpa satu tombol pun.
+pub fn kosong() -> Masukan {
+    return Masukan { ditahan: dict::new(), ditekan: dict::new(), dilepas: dict::new(),
+                     tetikus: vek::nol(), klik: [false, false, false], klik_baru: [false, false, false] }
+}
+
+/// Masukan rekaman untuk satu bingkai: tombol yang ditahan, dibanding bingkai `sebelum`.
+/// Yang baru ditekan dan baru dilepas DIHITUNG dari selisihnya, jadi rekaman cukup
+/// menyebut yang ditahan.
+pub fn buatan(sebelum: Masukan, ditahan) -> Masukan {
+    let kini = _daftar("masukan::buatan", ditahan)
+    return _dari_selisih(sebelum, kini, sebelum.tetikus, sebelum.klik)
+}
+
+/// Seperti `buatan`, dengan tetikus di `(x, y)` dan tombol tetikus `klik` (`[kiri, kanan, tengah]`).
+pub fn buatan_tetikus(sebelum: Masukan, ditahan, x, y, klik) -> Masukan {
+    if typeof(klik) != "array" || len(klik) != 3 {
+        panik("masukan::buatan_tetikus: klik harus [kiri, kanan, tengah], dapat `" + typeof(klik) + "`")
+    }
+    let kini = _daftar("masukan::buatan_tetikus", ditahan)
+    return _dari_selisih(sebelum, kini, vek::baru(x, y), klik)
+}
+
+fn _dari_selisih(sebelum: Masukan, kini: dict, tetikus: vek::Vek2, klik: []bool) -> Masukan {
+    var ditekan = dict::new()
+    for _, k in dict::keys(kini) {
+        if !dict::has(sebelum.ditahan, k) { ditekan = dict::set(ditekan, k, true) }
+    }
+    var dilepas = dict::new()
+    for _, k in dict::keys(sebelum.ditahan) {
+        if !dict::has(kini, k) { dilepas = dict::set(dilepas, k, true) }
+    }
+    var baru = [false, false, false]
+    for i in range(0, 3) { baru[i] = klik[i] && !sebelum.klik[i] }
+    return Masukan { ditahan: kini, ditekan: ditekan, dilepas: dilepas, tetikus: tetikus,
+                     klik: klik, klik_baru: baru }
+}
+
+/// Baca kanvas `c` untuk tombol-tombol di `diawasi`, dibanding bingkai `sebelum`.
+pub fn baca(c: Canvas, sebelum: Masukan, diawasi) -> Masukan {
+    return baca_dengan_layar(c, sebelum, diawasi, [])
+}
+
+/// Satu tombol di layar sentuh: jari di dalam kotaknya = tombol `nama` ditahan.
+pub struct TombolLayar { pub nama: string, pub label: string, pub x: float, pub y: float, pub w: float, pub h: float }
+
+fn _label(nama: string) -> string {
+    if nama == "Left" { return "<" }
+    if nama == "Right" { return ">" }
+    if nama == "Up" { return "^" }
+    if nama == "Down" { return "v" }
+    if nama == "Space" { return "O" }
+    if str::starts_with(nama, "Key") { return str::substr(nama, 3, 1) }
+    if len(nama) <= 2 { return nama }
+    return str::substr(nama, 0, 1)
+}
+
+/// Susun tombol layar di PITA di bawah area game `lebar` x `tinggi` (tidak menutupi game): panah di
+/// kiri (silang kalau ada `Up`/`Down`), tombol lain berjajar dari kanan. Ukurannya ikut sisi pendek.
+pub fn susun_tombol_layar(daftar: []string, lebar: int, tinggi: int) -> []TombolLayar {
+    let nama = _daftar("mesin::dengan_tombol_layar", daftar)
+    let pendek = lebar < tinggi $ lebar : tinggi
+    var s: float = (pendek as float) / 6.0
+    if s < 16.0 { s = 16.0 }
+    let m: float = s / 4.0
+    let atas: float = (tinggi as float) + m
+    let silang = dict::has(nama, "Up") || dict::has(nama, "Down")
+    // Dengan silang, pitanya tiga baris: tombol satu baris duduk di baris tengahnya.
+    let baris: float = silang $ atas + s : atas
+    var hasil: []TombolLayar = []
+    var kanan = 0
+    for _, t in daftar {
+        let k = canvas::nama_tombol(t)
+        var x: float = 0.0
+        var y: float = baris
+        if silang && (k == "Left" || k == "Right" || k == "Up" || k == "Down") {
+            if k == "Left" { x = m }
+            if k == "Right" { x = m + s * 2.0 }
+            if k == "Up" { x = m + s
+                           y = atas }
+            if k == "Down" { x = m + s
+                             y = atas + s * 2.0 }
+        } else if k == "Left" || k == "Right" {
+            x = k == "Left" $ m : m * 2.0 + s
+        } else {
+            kanan = kanan + 1
+            x = (lebar as float) - (s + m) * (kanan as float)
+        }
+        hasil = hasil + [TombolLayar { nama: k, label: _label(k), x: x, y: y, w: s, h: s }]
+    }
+    return hasil
+}
+
+/// Tinggi pita tombol di bawah area game setinggi `tinggi` (0 kalau tidak ada tombol).
+pub fn tinggi_pita(tombol: []TombolLayar, tinggi: int) -> int {
+    var bawah: float = 0.0
+    for _, t in tombol {
+        let b: float = t.y + t.h + t.h / 4.0
+        if b > bawah { bawah = b }
+    }
+    if bawah <= (tinggi as float) { return 0 }
+    return (bawah as int) - tinggi
+}
+
+/// Nama tombol layar yang sedang disentuh jari mana pun.
+pub fn layar_ditahan(c: Canvas, tombol: []TombolLayar) -> dict {
+    var d = dict::new()
+    let n = canvas::jumlah_sentuhan(c)
+    for i in range(0, n) {
+        let p = canvas::sentuhan(c, i)
+        for _, t in tombol {
+            if p.x >= t.x && p.x < t.x + t.w && p.y >= t.y && p.y < t.y + t.h { d = dict::set(d, t.nama, true) }
+        }
+    }
+    return d
+}
+
+/// Gambar tombol layar; yang sedang ditahan di `m` menyala.
+pub fn gambar_tombol_layar(c: Canvas, tombol: []TombolLayar, m: Masukan) {
+    for _, t in tombol {
+        let isi = dict::has(m.ditahan, t.nama) $ 0x90FFFFFF : 0x40FFFFFF
+        canvas::fill_round_rect(c, t.x, t.y, t.w, t.h, t.w / 5.0, isi)
+        canvas::draw_round_rect(c, t.x, t.y, t.w, t.h, t.w / 5.0, 0xC0FFFFFF)
+        var skala = ((t.h / 16.0) as int)
+        if skala < 1 { skala = 1 }
+        let lebar_teks: float = ((len(t.label) * 6 * skala) as float)
+        canvas::draw_text_scaled(c, t.x + (t.w - lebar_teks) / 2.0, t.y + (t.h - (7 * skala) as float) / 2.0,
+                                 t.label, skala, 0xFF000000)
+    }
+}
+
+/// Seperti `baca`, ditambah tombol layar yang sedang disentuh (dihitung ditahan).
+pub fn baca_dengan_layar(c: Canvas, sebelum: Masukan, diawasi, tombol: []TombolLayar) -> Masukan {
+    let nama = _daftar("masukan::baca", diawasi)
+    var kini = dict::new()
+    for _, k in dict::keys(nama) {
+        if canvas::key_held(c, k) { kini = dict::set(kini, k, true) }
+    }
+    if len(tombol) > 0 {
+        for _, k in dict::keys(layar_ditahan(c, tombol)) { kini = dict::set(kini, k, true) }
+    }
+    let p = canvas::get_mouse_pos(c)
+    let klik = [canvas::get_mouse_button(c, 0), canvas::get_mouse_button(c, 1),
+                canvas::get_mouse_button(c, 2)]
+    return _dari_selisih(sebelum, kini, vek::baru(p.x, p.y), klik)
+}
+
+fn _tombol_tetikus(nama, n) {
+    if typeof(n) != "int" || n < 0 || n > 2 {
+        panik(nama + ": tombol tetikus 0 (kiri), 1 (kanan) atau 2 (tengah), dapat " + str(n))
+    }
+    return n
+}
+
+impl Masukan {
+    /// Sedang ditahan bingkai ini.
+    pub fn tahan(self, t) -> bool { return dict::has(self.ditahan, canvas::nama_tombol(t)) }
+    /// Baru ditekan bingkai ini (tidak ditahan bingkai sebelumnya).
+    pub fn tekan(self, t) -> bool { return dict::has(self.ditekan, canvas::nama_tombol(t)) }
+    /// Baru dilepas bingkai ini.
+    pub fn lepas(self, t) -> bool { return dict::has(self.dilepas, canvas::nama_tombol(t)) }
+    /// Arah dari empat tombol, sudah dinormalkan (diagonal tidak lebih cepat).
+    pub fn arah(self, kiri, kanan, atas, bawah) -> vek::Vek2 {
+        var x = 0.0
+        var y = 0.0
+        if self.tahan(kiri) { x = x - 1.0 }
+        if self.tahan(kanan) { x = x + 1.0 }
+        if self.tahan(atas) { y = y - 1.0 }
+        if self.tahan(bawah) { y = y + 1.0 }
+        let v = vek::baru(x, y)
+        if x == 0.0 && y == 0.0 { return v }
+        return v.normal()
+    }
+    /// Tombol tetikus sedang ditahan: 0 kiri, 1 kanan, 2 tengah.
+    pub fn tetikus_tahan(self, n) -> bool { return self.klik[_tombol_tetikus("masukan::tetikus_tahan", n)] }
+    /// Tombol tetikus BARU ditekan bingkai ini.
+    pub fn tetikus_tekan(self, n) -> bool { return self.klik_baru[_tombol_tetikus("masukan::tetikus_tekan", n)] }
+}

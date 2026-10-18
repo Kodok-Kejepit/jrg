@@ -1,0 +1,36 @@
+package main
+
+fn sum_arr(data: array) -> int {
+    var total: int = 0
+    for _, x in data {
+        total += x
+    }
+    return total
+}
+
+fn sum_arr_f(data: array) -> f64 {
+    var total: f64 = 0.0
+    for _, x in data {
+        total += x
+    }
+    return total
+}
+
+pub fn main() {
+    let nama: string = "Surya"
+    let umur: int = 25
+    let pesan: string = str::format("Halo {}, umur kamu {} tahun.", nama, umur)
+    wok(pesan)
+
+    let ints: [4]int = [10, 20, 30, 40]
+    let floats: [3]f64 = [1.5, 2.5, 3.0]
+    wok("sum ints =", sum_arr(ints))
+    wok("sum floats =", sum_arr_f(floats))
+
+    wok("upper:", str::upper("halo dunia"))
+    wok("trim: [", str::trim("   spasi   "), "]")
+    wok("contains:", str::contains("halo dunia", "dunia"))
+
+    let arr: [3]int = [1, 2, 3]
+    wok("akses valid arr[2] =", arr[2])
+}

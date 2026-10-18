@@ -1,0 +1,7 @@
+package helpers
+
+pub fn greet(name: string) -> string {
+    str::format("Halo, {}!", name)
+}
+
+pub fn add(a: int, b: int) -> int { a + b }

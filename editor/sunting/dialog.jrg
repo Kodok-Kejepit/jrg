@@ -1,0 +1,154 @@
+package sunting_dialog
+
+// Baris tanya di bawah layar: masukan satu baris (cari, ke baris, nama berkas) dan
+// pertanyaan pilihan (ya/tidak/batal). Murni nilai — tidak menyentuh terminal.
+import "sunting/aksara"
+
+pub struct Dialog {
+    pub jenis: string = "",
+    pub label: string = "",
+    pub isi: string = "",
+    pub kur: int = 0,
+    pub pilihan: string = "",
+    pub riwayat: array = [],
+    pub ke: int = -1,
+    pub simpanan: string = "",
+}
+
+/// Masukan teks berlabel `label`, diisi awal `awal`; `riwayat` dijelajahi panah atas/bawah.
+pub fn teks(jenis, label, awal, riwayat) {
+    return Dialog { jenis: jenis, label: label, isi: awal, kur: str::len(awal), riwayat: riwayat }
+}
+
+/// Pertanyaan yang dijawab satu huruf dari `pilihan` (huruf kecil), mis. "ytb".
+pub fn tanya(jenis, label, pilihan) {
+    return Dialog { jenis: jenis, label: label, pilihan: pilihan }
+}
+
+pub fn aktif(d) { return d.jenis != "" }
+
+fn kiri(s, n) { return str::slice(s, 0, n) }
+fn kanan(s, n) { return str::slice(s, n) }
+
+fn awal_kata(s, kur) {
+    let k = str::chars(s)
+    var i = kur
+    while i > 0 && !aksara::kata(k[i - 1]) { i = i - 1 }
+    while i > 0 && aksara::kata(k[i - 1]) { i = i - 1 }
+    return i
+}
+
+fn akhir_kata(s, kur) {
+    let k = str::chars(s)
+    let n = len(k)
+    var i = kur
+    while i < n && !aksara::kata(k[i]) { i = i + 1 }
+    while i < n && aksara::kata(k[i]) { i = i + 1 }
+    return i
+}
+
+fn sisip(d, t) {
+    var x = d
+    x.isi = kiri(d.isi, d.kur) + t + kanan(d.isi, d.kur)
+    x.kur = d.kur + str::len(t)
+    x.ke = -1
+    return x
+}
+
+/// Terapkan satu tombol. Menjawab `[dialog, aksi]`; aksi: "" (tidak ada yang berubah),
+/// "ubah" (isinya berubah), "kirim", "batal", atau "pilih:<huruf>" untuk pertanyaan.
+pub fn terapkan(d, t) {
+    if t == "esc" || t == "ctrl-c" { return [d, "batal"] }
+    if d.pilihan != "" {
+        if str::len(t) == 1 && str::contains(d.pilihan, str::lower(t)) { return [d, "pilih:" + str::lower(t)] }
+        // Enter memilih huruf PERTAMA: pilihan yang paling aman ditaruh di depan.
+        if t == "enter" { return [d, "pilih:" + str::slice(d.pilihan, 0, 1)] }
+        return [d, ""]
+    }
+    if t == "enter" { return [d, "kirim"] }
+    var x = d
+    let n = str::len(d.isi)
+    if str::len(t) == 1 { return [sisip(d, t), "ubah"] }
+    if str::starts_with(t, "tempel:") {
+        // Cuma baris pertama tempelan: dialog ini satu baris.
+        let baris = str::split(str::slice(t, 7), "\n")
+        if len(baris) == 0 || baris[0] == "" { return [d, ""] }
+        return [sisip(d, baris[0]), "ubah"]
+    }
+    if t == "backspace" {
+        if d.kur == 0 { return [d, ""] }
+        x.isi = kiri(d.isi, d.kur - 1) + kanan(d.isi, d.kur)
+        x.kur = d.kur - 1
+        x.ke = -1
+        return [x, "ubah"]
+    }
+    if t == "delete" {
+        if d.kur >= n { return [d, ""] }
+        x.isi = kiri(d.isi, d.kur) + kanan(d.isi, d.kur + 1)
+        x.ke = -1
+        return [x, "ubah"]
+    }
+    if t == "alt-backspace" || t == "ctrl-w" {
+        let a = awal_kata(d.isi, d.kur)
+        x.isi = kiri(d.isi, a) + kanan(d.isi, d.kur)
+        x.kur = a
+        x.ke = -1
+        return [x, "ubah"]
+    }
+    if t == "ctrl-u" {
+        x.isi = kanan(d.isi, d.kur)
+        x.kur = 0
+        x.ke = -1
+        return [x, "ubah"]
+    }
+    if t == "kiri" { x.kur = math::max(d.kur - 1, 0); return [x, ""] }
+    if t == "kanan" { x.kur = math::min(d.kur + 1, n); return [x, ""] }
+    if t == "home" || t == "ctrl-a" { x.kur = 0; return [x, ""] }
+    if t == "end" || t == "ctrl-e" { x.kur = n; return [x, ""] }
+    if t == "ctrl-kiri" { x.kur = awal_kata(d.isi, d.kur); return [x, ""] }
+    if t == "ctrl-kanan" { x.kur = akhir_kata(d.isi, d.kur); return [x, ""] }
+    if t == "atas" {
+        if len(d.riwayat) == 0 { return [d, ""] }
+        if d.ke < 0 { x.simpanan = d.isi; x.ke = len(d.riwayat) - 1 }
+        else if d.ke > 0 { x.ke = d.ke - 1 }
+        x.isi = d.riwayat[x.ke]
+        x.kur = str::len(x.isi)
+        return [x, "ubah"]
+    }
+    if t == "bawah" {
+        if d.ke < 0 { return [d, ""] }
+        if d.ke + 1 < len(d.riwayat) {
+            x.ke = d.ke + 1
+            x.isi = d.riwayat[x.ke]
+        } else {
+            x.ke = -1
+            x.isi = d.simpanan
+        }
+        x.kur = str::len(x.isi)
+        return [x, "ubah"]
+    }
+    return [d, ""]
+}
+
+/// Yang digambar di baris pesan selebar `lebar` kolom. Menjawab `[label, isi, kolom_kursor]`:
+/// isinya digeser supaya kursor selalu tampil; kolom kursor dihitung dari awal baris.
+pub fn tampil(d, lebar) {
+    if d.pilihan != "" { return [d.label, "", aksara::lebar(d.label)] }
+    let label = d.label + ": "
+    let wl = aksara::lebar(label)
+    let muat = math::max(lebar - wl - 1, 4)
+    let kx = aksara::ke_tampil(d.isi, d.kur)
+    var geser = 0
+    if kx >= muat { geser = kx - muat + 1 }
+    return [label, aksara::jendela(d.isi, geser, muat), wl + kx - geser]
+}
+
+/// Riwayat dengan `baru` di ujungnya, tanpa salinan berurutan dan paling banyak 50 butir.
+pub fn ingat(riwayat, baru) {
+    if baru == "" { return riwayat }
+    var r = []
+    for _, x in riwayat { if x != baru { r = r + [x] } }
+    r = r + [baru]
+    if len(r) > 50 { r = r[len(r) - 50:] }
+    return r
+}

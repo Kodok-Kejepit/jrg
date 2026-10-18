@@ -1,0 +1,9 @@
+package main
+
+pub fn main() {
+    wok("Halo dari JRG!", "LLVM backend jalan.")
+    wok_("angka:")
+    wok(42)
+    wok(3.5)
+    wok(true)
+}

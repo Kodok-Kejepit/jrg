@@ -1,0 +1,36 @@
+package main
+
+// Microbenchmark for the by-index string scan path (`str::char_at` in a `for
+// i in 0..len(s)` loop) — the only way to visit characters by position …
+
+fn fnv(h: uint, s: str) -> uint {
+    var acc: uint = h
+    for i in 0..len(s) {
+        acc = math::wrap_mul(acc ^ (str::char_at(s, i) as uint), 1099511628211)
+    }
+    return acc
+}
+
+pub fn main() {
+    // Three lengths, ~4M characters scanned each. A quadratic char_at makes
+    // the long-string pass dominate; a linear one keeps all three close.
+    let short: str = "abcdefghijklmnopqrst"
+    let medium: str = "abcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzabcdefghijklmnopqrstuvwxyzab"
+    // Multi-byte on purpose: guards against anyone "optimizing" this into
+    // byte indexing, which would silently corrupt non-ASCII text.
+    let uni: str = "héllo wörld ☃ 𝔘 çà mixed widths here ☃☃ 𝔘𝔘 ééé"
+
+    var hash: uint = 1469598103934665603
+
+    for r in 0..200000 {
+        hash = fnv(hash, short)
+    }
+    for r in 0..50000 {
+        hash = fnv(hash, medium)
+    }
+    for r in 0..90000 {
+        hash = fnv(hash, uni)
+    }
+
+    wok(hash)
+}

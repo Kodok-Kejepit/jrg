@@ -1,0 +1,68 @@
+package main
+
+// ============================================================================
+// dok_demo.jrg — contoh pemakaian library `dok` (networking, HTTP server …
+
+pub fn main() {
+    wok("=== dok::log — logging leveled + berwarna + terstruktur ===")
+    dok::log_set_name("dok-demo")
+    dok::log_info("server akan start di port 7070")
+    dok::log_warn("ini contoh warning")
+    dok::log_with("info", "user login", [("user", "budi"), ("ip", "127.0.0.1")])
+
+    wok("")
+    wok("=== dok::vec_* / mat_* — aljabar linear ===")
+    let a = [3.0, 4.0]
+    let b = [1.0, 2.0]
+    wok("vec_add:", dok::vec_add(a, b))
+    wok("vec_norm [3,4] (harus 5):", dok::vec_norm(a))
+    let m = [[2.0, 0.0], [0.0, 2.0]]
+    wok("mat_det (harus 4):", dok::mat_det(m))
+    wok("mat_inverse:", dok::mat_inverse(m))
+
+    wok("")
+    wok("=== dok::stat_* — statistik lanjutan ===")
+    let xs = [1.0, 2.0, 3.0, 4.0, 5.0]
+    let ys = [2.1, 3.9, 6.2, 7.8, 10.1]
+    let reg = dok::stat_linreg(xs, ys)
+    wok("regresi linear slope/intercept/r2:", reg.slope, reg.intercept, reg.r2)
+
+    wok("")
+    wok("=== dok::num_* — teori bilangan + solver numerik ===")
+    wok("apakah 97 prima?", dok::num_is_prime(97))
+    wok("faktor prima 360:", dok::num_prime_factors(360))
+    let akar_dua = dok::num_solve(|x: f64| x * x - 2.0, 1.0, 2.0)?
+    wok("akar x^2-2=0 (secant method):", akar_dua)
+
+    wok("")
+    wok("=== dok::json_* ===")
+    let data = dok::json_decode("{\"nama\":\"jrg\",\"versi\":3}")?
+    wok("nama:", data.nama, " versi:", data.versi)
+
+    wok("")
+    wok("=== dok::tcp_* — raw socket, request langsung ke server sendiri ===")
+    let listener = dok::tcp_listen("127.0.0.1", 7071)?
+    let selesai = make_chan(bool)
+    spawn {
+        let conn = dok::tcp_accept(listener)?
+        let pesan = dok::tcp_recv_line(conn)?
+        dok::tcp_send(conn, "echo: " + pesan + "\n")
+        dok::tcp_close(conn)
+        selesai <- true
+    }
+    let klien = dok::tcp_connect("127.0.0.1", 7071)?
+    dok::tcp_send(klien, "halo dari dok!\n")
+    wok("balasan server:", dok::tcp_recv_line(klien)?)
+    dok::tcp_close(klien)
+    <-selesai
+
+    wok("")
+    wok("=== dok::serve — HTTP server sungguhan (BLOCKING, Ctrl+C untuk stop) ===")
+    let router = dok::router_new()
+    dok::router_get(router, "/", |req: DokRequest| dok::html("<h1>Halo dari dok::serve!</h1>"))
+    dok::router_get(router, "/hello/:nama", |req: DokRequest| dok::json_response(dok::json_decode("{\"pesan\":\"halo\"}")?))
+    dok::router_post(router, "/echo", |req: DokRequest| dok::text(req.body))
+
+    dok::log_info("buka http://localhost:7070/ atau http://localhost:7070/hello/budi di browser")
+    dok::serve(router, 7070)
+}

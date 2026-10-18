@@ -1,0 +1,136 @@
+package main
+
+// Konformansi: nilai, operator, dan konversi.
+
+struct Kotak { pub isi: int }
+
+pub fn main() {
+    // ── aritmetika integer ──────────────────────────────────────────────
+    assert_eq(7 + 3, 10)
+    assert_eq(7 - 3, 4)
+    assert_eq(7 * 3, 21)
+    assert_eq(7 / 3, 2)          // pembagian integer dipotong ke arah nol
+    assert_eq(7 % 3, 1)
+    assert_eq(2 ** 10, 1024)
+
+    // pembagian negatif dipotong ke arah NOL, bukan ke bawah:
+    // -7/2 adalah -3 (bukan -4), dan sisanya ikut tanda pembilang
+    assert_eq(-7 / 2, -3)
+    assert_eq(-7 % 2, -1)
+    assert_eq(7 / -2, -3)
+    assert_eq(7 % -2, 1)
+
+    // negatif
+    assert_eq(0 - 5, -5)
+    assert_eq(-5 + 2, -3)
+
+    // ── float ───────────────────────────────────────────────────────────
+    assert_eq(1.5 + 2.5, 4.0)
+    assert_eq(10.0 / 4.0, 2.5)
+
+    // campur int dan float menghasilkan float
+    assert_eq(1 + 0.5, 1.5)
+
+    // ── presedensi ──────────────────────────────────────────────────────
+    assert_eq(2 + 3 * 4, 14)
+    assert_eq((2 + 3) * 4, 20)
+    assert_eq(10 - 2 - 3, 5)     // kiri ke kanan
+
+    // ── perbandingan ────────────────────────────────────────────────────
+    assert_eq(1 < 2, true)
+    assert_eq(2 <= 2, true)
+    assert_eq(3 > 4, false)
+    assert_eq(1 == 1, true)
+    assert_eq(1 != 2, true)
+    assert_eq("a" == "a", true)
+    assert_eq([1, 2] == [1, 2], true)
+
+    // ── logika (short-circuit) ──────────────────────────────────────────
+    assert_eq(true && false, false)
+    assert_eq(true || false, true)
+    assert_eq(!true, false)
+
+    // ── bitwise ─────────────────────────────────────────────────────────
+    assert_eq(6 & 3, 2)
+    assert_eq(6 | 3, 7)
+    assert_eq(6 ^ 3, 5)
+    assert_eq(1 << 4, 16)
+    assert_eq(16 >> 2, 4)
+
+    // ── compound assignment ─────────────────────────────────────────────
+    var n: int = 10
+    n += 5;  assert_eq(n, 15)
+    n -= 3;  assert_eq(n, 12)
+    n *= 2;  assert_eq(n, 24)
+    n /= 4;  assert_eq(n, 6)
+    n %= 4;  assert_eq(n, 2)
+
+    // ── konversi tipe ───────────────────────────────────────────────────
+    assert_eq(int("42"), 42)
+    assert_eq(str(42), "42")
+    assert_eq(float("2.5"), 2.5)
+    assert_eq(int(2.9), 2)       // memotong, bukan membulatkan
+    assert_eq(str(true), "true")
+
+    // ── truthiness ──────────────────────────────────────────────────────
+    // Aturannya eksplisit supaya tidak berubah diam-diam.
+    assert_eq(bool(0), false)
+    assert_eq(bool(1), true)
+    assert_eq(bool(""), false)
+    assert_eq(bool("x"), true)
+
+    // ── penggabungan string dengan `+` ──────────────────────────────────
+    // JRG sengaja mengizinkan string + nilai apa pun (gaya Python-ish).
+    assert_eq("n=" + str(5), "n=5")
+    assert_eq("n=" + 5, "n=5")
+    assert_eq(5 + "=n", "5=n")
+
+    // ── string * int mengulang ──────────────────────────────────────────
+    assert_eq("ab" * 3, "ababab")
+
+    // ── penggabungan array dengan `+` ─────────────────────────────────────
+    // Konsisten dengan string: array/array dan array/array sama-sama
+    // koleksi terurut, jadi `+` berarti "gabungkan" untuk keduanya.
+    assert_eq([1, 2] + [3, 4], [1, 2, 3, 4])
+    assert_eq([] + [1], [1])
+    assert_eq([1] + [], [1])
+    var akum = [1, 2]
+    akum += [3]
+    assert_eq(akum, [1, 2, 3])
+    // hasilnya array BARU, bukan alias — konsisten dengan value semantics
+    let asal = [1, 2]
+    let gabungan = asal + [3]
+    assert_eq(asal, [1, 2])
+
+    // ── struct ──────────────────────────────────────────────────────────
+    let k = Kotak { isi: 7 }
+    assert_eq(k.isi, 7)
+
+    // struct punya value semantics
+    var a = Kotak { isi: 1 }
+    var b = a
+    b.isi = 99
+    assert_eq(a.isi, 1)
+
+    // ── ternary ─────────────────────────────────────────────────────────
+    // Pembukanya `$`, bukan `?`. `?` sekarang cuma berarti satu hal:
+    // propagasi error (`f()?`).
+    let t = 5 > 3 $ "ya" : "tidak"
+    assert_eq(t, "ya")
+
+    // ── math ────────────────────────────────────────────────────────────
+    assert_eq(math::abs(-5), 5)
+    assert_eq(math::max(3, 9), 9)
+    assert_eq(math::min(3, 9), 3)
+    assert_eq(math::sqrt(16.0), 4.0)
+    assert_eq(math::floor(2.9), 2.0)
+    assert_eq(math::ceil(2.1), 3.0)
+
+    // ── typeof ──────────────────────────────────────────────────────────
+    assert_eq(typeof(1), "int")
+    assert_eq(typeof("s"), "string")
+    assert_eq(typeof(true), "bool")
+    assert_eq(typeof([1]), "array")
+
+    wok("values_and_operators OK")
+}

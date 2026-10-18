@@ -1,0 +1,30 @@
+package main
+
+// string-heavy + allocation-heavy: every iteration builds a fresh string by
+// concatenation (each `+` allocates a new buffer in the runtime), transforms …
+
+fn fnv(h: uint, s: str) -> uint {
+    var acc: uint = h
+    for i in 0..len(s) {
+        acc = math::wrap_mul(acc ^ (str::char_at(s, i) as uint), 1099511628211)
+    }
+    return acc
+}
+
+pub fn main() {
+    let rounds: int = 600000
+    var hash: uint = 1469598103934665603
+
+    for r in 0..(rounds) {
+        let base: str = "item-" + str(r % 997) + ":" + str(r % 31)
+        let upper: str = str::upper(base)
+        let flipped: str = str::reverse(upper)
+        let swapped: str = str::replace(flipped, "-", "_")
+
+        hash = fnv(hash, base)
+        hash = fnv(hash, swapped)
+        hash = math::wrap_add(hash, len(swapped) as uint)
+    }
+
+    wok(hash)
+}

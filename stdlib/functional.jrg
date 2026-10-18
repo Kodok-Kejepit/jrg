@@ -1,0 +1,116 @@
+package std_functional
+
+// Penjaga argumen. Tanpa ini sebuah `functional::compose(5, 5)` DITERIMA dan baru gagal waktu
+// hasilnya dipanggil — dengan caret di dalam berkas ini, menunjuk baris yang
+// tidak salah, di berkas yang pembacanya tidak pernah buka.
+fn _wajib_fungsi(nama, ke, v) {
+    let t = typeof(v)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str::to_string(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+    return true
+}
+
+// Perkakas gaya fungsional yang tidak bisa ditulis sebagai builtin.
+
+/// Kembalikan argumennya apa adanya. Berguna sebagai fungsi kunci yang tidak mengubah apa pun.
+pub fn identity(x) { return x }
+
+/// Fungsi yang selalu menjawab `x`, apa pun argumennya.
+pub fn constant(x) { return |_| x }
+
+/// `compose(f, g)(x)` sama dengan `f(g(x))` — kanan dulu, arah baca matematika.
+pub fn compose(f, g) {
+    _wajib_fungsi("functional::compose", 1, f)
+    _wajib_fungsi("functional::compose", 2, g)
+    return |x| f(g(x)) }
+
+/// Terapkan sederet fungsi berurutan dari KIRI ke kanan.
+pub fn pipe(fungsi) {
+    return |x| {
+        var v = x
+        for _, f in fungsi { v = f(v) }
+        return v
+    }
+}
+
+/// Tukar urutan dua argumen: `flip(f)(a, b)` sama dengan `f(b, a)`.
+pub fn flip(f) {
+    _wajib_fungsi("functional::flip", 1, f)
+    return |a, b| f(b, a) }
+
+/// Isi sebagian argumen sekarang, sisanya nanti.
+pub fn partial(f, a) {
+    _wajib_fungsi("functional::partial", 1, f)
+    return |b| f(a, b) }
+
+/// Ubah `f(a, b)` jadi `f(a)(b)`.
+pub fn curry2(f) {
+    _wajib_fungsi("functional::curry2", 1, f)
+    return |a| |b| f(a, b) }
+
+// Ingat hasil per argumen.
+/// Ingat jawaban tiap argumen, jadi pemanggilan kedua tidak menghitung ulang.
+pub fn memoize(f) {
+    _wajib_fungsi("functional::memoize", 1, f)
+    var cache = dict::new()
+    return |x| {
+        if dict::has(cache, x) { return dict::get_or(cache, x, nil) }
+        let y = f(x)
+        cache = dict::set(cache, x, y)
+        return y
+    }
+}
+
+// Panggil paling banyak sekali; panggilan berikutnya mengembalikan hasil
+// yang sama tanpa memanggil `f` lagi.
+/// Jalankan paling banyak sekali; pemanggilan berikutnya mengembalikan jawaban pertama.
+pub fn once(f) {
+    _wajib_fungsi("functional::once", 1, f)
+    var sudah = false
+    var hasil = nil
+    return |x| {
+        if sudah { return hasil }
+        hasil = f(x)
+        sudah = true
+        return hasil
+    }
+}
+
+// Berapa kali `f` benar-benar dipanggil — supaya "di-cache" jadi sesuatu
+// yang bisa DIPERIKSA, bukan dipercaya.
+/// Bungkus `f` sambil menghitung berapa kali ia benar-benar dipanggil. Dipakai untuk MEMBUKTIKAN `memoize` bekerja, bukan mempercayainya.
+pub fn counted(f) {
+    _wajib_fungsi("functional::counted", 1, f)
+    var n = 0
+    let terbungkus = |x| {
+        n = n + 1
+        return f(x)
+    }
+    return (terbungkus, || n)
+}
+
+/// Terapkan `f` sebanyak `n` kali berturut-turut.
+pub fn apply_n(f, n, x) {
+    _wajib_fungsi("functional::apply_n", 1, f)
+    var v = x
+    var i = 0
+    while i < n { v = f(v); i = i + 1 }
+    return v
+}
+
+// Batasnya WAJIB: perulangan yang tidak berhenti tidak memberi pesan apa pun.
+/// Terapkan `f` berulang sampai `syarat` terpenuhi, dengan batas supaya tidak berputar selamanya.
+pub fn until(f, syarat, x, batas) {
+    _wajib_fungsi("functional::until", 1, f)
+    _wajib_fungsi("functional::until", 2, syarat)
+    var v = x
+    var i = 0
+    while i < batas {
+        if syarat(v) { return Option::Some(v) }
+        v = f(v)
+        i = i + 1
+    }
+    if syarat(v) { return Option::Some(v) }
+    return Option::None
+}

@@ -1,0 +1,73 @@
+package std_mesin_warna
+
+// Warna RGBA yang langsung diterima tiap fungsi `canvas::`. Komponennya
+// bilangan bulat 0-255; `a` bawaan 255 (opak).
+pub struct Warna { pub r: int, pub g: int, pub b: int, pub a: int = 255 }
+
+fn _komponen(nama, k, v) {
+    if typeof(v) != "int" {
+        panik(nama + ": komponen `" + k + "` harus bilangan bulat 0-255, dapat `" + typeof(v) + "`")
+    }
+    if v < 0 || v > 255 {
+        panik(nama + ": komponen `" + k + "` harus 0-255, dapat " + str(v))
+    }
+    return v
+}
+
+fn _jepit(v) {
+    let n = math::round(v) as int
+    if n < 0 { return 0 }
+    if n > 255 { return 255 }
+    return n
+}
+
+/// Warna opak dari tiga komponen 0-255.
+pub fn rgb(r, g, b) {
+    return Warna { r: _komponen("warna::rgb", "r", r), g: _komponen("warna::rgb", "g", g),
+                   b: _komponen("warna::rgb", "b", b) }
+}
+
+/// Warna dengan alfa 0 (tembus) sampai 255 (opak).
+pub fn rgba(r, g, b, a) {
+    return Warna { r: _komponen("warna::rgba", "r", r), g: _komponen("warna::rgba", "g", g),
+                   b: _komponen("warna::rgba", "b", b), a: _komponen("warna::rgba", "a", a) }
+}
+
+/// Dari angka `0xRRGGBB` (opak).
+pub fn hex(n) {
+    if typeof(n) != "int" || n < 0 || n > 0xFFFFFF {
+        panik("warna::hex: harus 0x000000 sampai 0xFFFFFF, dapat " + str(n))
+    }
+    return Warna { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 }
+}
+
+pub const HITAM = Warna { r: 0, g: 0, b: 0 }
+pub const PUTIH = Warna { r: 255, g: 255, b: 255 }
+pub const MERAH = Warna { r: 220, g: 50, b: 47 }
+pub const HIJAU = Warna { r: 60, g: 180, b: 75 }
+pub const BIRU = Warna { r: 38, g: 139, b: 210 }
+pub const KUNING = Warna { r: 250, g: 210, b: 50 }
+pub const ABU = Warna { r: 128, g: 128, b: 128 }
+pub const TEMBUS = Warna { r: 0, g: 0, b: 0, a: 0 }
+
+impl Warna {
+    /// Campuran linear: `t = 0` warna ini, `t = 1` warna `o`.
+    pub fn campur(self, o, t) {
+        if typeof(t) != "int" && typeof(t) != "float" { panik("warna::campur: `t` harus angka") }
+        let k = t as float
+        return Warna { r: _jepit(self.r + (o.r - self.r) * k), g: _jepit(self.g + (o.g - self.g) * k),
+                       b: _jepit(self.b + (o.b - self.b) * k), a: _jepit(self.a + (o.a - self.a) * k) }
+    }
+    /// Lebih gelap sebesar `t` (0 sampai 1).
+    pub fn gelap(self, t) { return self.campur(Warna { r: 0, g: 0, b: 0, a: self.a }, t) }
+    /// Lebih terang sebesar `t` (0 sampai 1).
+    pub fn terang(self, t) { return self.campur(Warna { r: 255, g: 255, b: 255, a: self.a }, t) }
+    /// Warna yang sama dengan alfa lain.
+    pub fn alfa(self, a) {
+        return Warna { r: self.r, g: self.g, b: self.b, a: _komponen("warna::alfa", "a", a) }
+    }
+    /// Tampilan: `Warna(220, 50, 47, 255)`.
+    pub fn to_string(self) {
+        return "Warna(" + str(self.r) + ", " + str(self.g) + ", " + str(self.b) + ", " + str(self.a) + ")"
+    }
+}

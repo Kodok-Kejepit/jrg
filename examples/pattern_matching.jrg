@@ -1,0 +1,128 @@
+// JawaRustGo++ — Demo: Pattern Matching (match)
+package main
+
+import "std/fmt"
+
+// Enum dengan tiga bentuk variant sekaligus: - Circle / Square : tuple
+// variant (membawa satu nilai) - Rectangle : tuple variant dua nilai - …
+enum Shape {
+    Circle(f64),
+    Rectangle(f64, f64),
+    Square(f64),
+    Triangle { base: f64, height: f64 },
+    Empty,
+}
+
+// `impl` pada enum bekerja sama seperti pada struct — method
+// dipanggil lewat `self`, dan di dalamnya `match self { ... }`
+// membongkar variant yang sedang aktif.
+impl Shape {
+    fn area(self) -> f64 {
+        return match self {
+            Shape::Circle(r)            => 3.14159265 * r * r,
+            Shape::Rectangle(w, h)      => w * h,
+            Shape::Square(s)            => s * s,
+            Shape::Triangle { base, height } => 0.5 * base * height,
+            Shape::Empty                 => 0.0,
+        }
+    }
+
+    fn nama(self) -> string {
+        return match self {
+            Shape::Circle(_)       => "lingkaran",
+            Shape::Rectangle(_, _) => "persegi panjang",
+            Shape::Square(_)       => "persegi",
+            Shape::Triangle { .. } => "segitiga",
+            Shape::Empty           => "kosong",
+        }
+    }
+}
+
+// Range pattern (`90..=100`, dst.) untuk klasifikasi nilai — jauh lebih
+// ringkas daripada rantai if-else.
+fn ke_huruf(nilai: int) -> string {
+    return match nilai {
+        90..=100 => "A",
+        80..=89  => "B",
+        70..=79  => "C",
+        60..=69  => "D",
+        _        => "E",
+    }
+}
+
+// Guard clause (`if kondisi` setelah pattern) dan or-pattern (`pat1 | pat2`).
+fn klasifikasi(n: int) -> string {
+    return match n {
+        0           => "nol",
+        n if n < 0  => "negatif",
+        1 | 3 | 5 | 7 | 9 => "ganjil satu digit",
+        2 | 4 | 6 | 8     => "genap satu digit",
+        _           => "lainnya",
+    }
+}
+
+// Tuple pattern: cocokkan beberapa nilai sekaligus.
+fn posisi(x: int, y: int) -> string {
+    return match (x, y) {
+        (0, 0) => "titik asal",
+        (_, 0) => "di sumbu-x",
+        (0, _) => "di sumbu-y",
+        (a, b) if a == b => "di garis diagonal",
+        _      => "di luar sumbu",
+    }
+}
+
+pub fn main() {
+    wok("=== Variant enum (tuple & unit) ===")
+    let bentuk = [
+        Shape::Circle(3.0),
+        Shape::Rectangle(4.0, 5.0),
+        Shape::Square(2.0),
+        Shape::Empty,
+    ]
+    for _, b in bentuk {
+        wok(b.nama(), "-> luas =", b.area())
+    }
+
+    wok("")
+    wok("=== match sebagai ekspresi ===")
+    // Nilai dari match langsung di-assign ke variabel — tidak perlu
+    // variabel sementara yang di-assign di tiap cabang if-else.
+    let r = Shape::Circle(10.0)
+    let pesan = match r {
+        Shape::Circle(jari) if jari > 5.0 => str::format("lingkaran besar (jari-jari {})", jari),
+        Shape::Circle(jari)               => str::format("lingkaran kecil (jari-jari {})", jari),
+        _                                 => "bukan lingkaran",
+    }
+    wok(pesan)
+
+    wok("")
+    wok("=== Range pattern ===")
+    let nilai_nilai = [95, 82, 71, 60, 40]
+    for _, n in nilai_nilai {
+        wok("nilai", n, "-> huruf", ke_huruf(n))
+    }
+
+    wok("")
+    wok("=== Guard clause & or-pattern ===")
+    for _, n in [0, -5, 3, 4, 17] {
+        wok(n, "->", klasifikasi(n))
+    }
+
+    wok("")
+    wok("=== Tuple pattern ===")
+    wok("(0, 0)  ->", posisi(0, 0))
+    wok("(5, 0)  ->", posisi(5, 0))
+    wok("(0, 9)  ->", posisi(0, 9))
+    wok("(3, 3)  ->", posisi(3, 3))
+    wok("(2, 7)  ->", posisi(2, 7))
+
+    wok("")
+    wok("=== match menyatu dengan Result/Option (Tier 1 lainnya) ===")
+    let opsi = Some(42)
+    match opsi {
+        Some(n) if n % 2 == 0 => wok("dapat angka genap:", n),
+        Some(n)               => wok("dapat angka ganjil:", n),
+        None                  => wok("kosong"),
+    }
+}

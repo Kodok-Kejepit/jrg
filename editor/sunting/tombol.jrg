@@ -1,0 +1,152 @@
+package sunting_tombol
+
+// Peta tombol -> perintah, ditulis SEKALI: layar bantuan dan baris pintasan di bawah
+// dibangun dari tabel ini, jadi keduanya tidak bisa berpisah jalan dari yang benar-benar
+// terpasang.
+
+// [tombol, perintah, keterangan, grup]. Tombol kedua dst. untuk perintah yang sama
+// cukup ditulis di baris berikutnya dengan keterangan kosong.
+const TABEL = [
+    ["ctrl-s", "simpan", "simpan", "BERKAS"],
+    ["alt-s", "simpan_sebagai", "simpan dengan nama lain", "BERKAS"],
+    ["ctrl-o", "buka", "buka berkas (kosongkan untuk menjelajah direktori)", "BERKAS"],
+    ["ctrl-n", "baru", "berkas baru", "BERKAS"],
+    ["ctrl-w", "tutup", "tutup berkas ini", "BERKAS"],
+    ["alt-kanan", "berkas_berikut", "berkas terbuka berikutnya", "BERKAS"],
+    ["ctrl-pgdn", "berkas_berikut", "", "BERKAS"],
+    ["alt-kiri", "berkas_sebelum", "berkas terbuka sebelumnya", "BERKAS"],
+    ["ctrl-pgup", "berkas_sebelum", "", "BERKAS"],
+    ["alt-b", "daftar_berkas", "daftar berkas yang terbuka", "BERKAS"],
+    ["ctrl-q", "keluar", "keluar (menanyakan kalau ada yang belum disimpan)", "BERKAS"],
+
+    ["ctrl-z", "urung", "urungkan", "SUNTING"],
+    ["ctrl-y", "ulang", "ulangi yang diurungkan", "SUNTING"],
+    ["ctrl-c", "salin", "salin seleksi (tanpa seleksi: baris ini)", "SUNTING"],
+    ["ctrl-x", "potong", "potong seleksi (tanpa seleksi: baris ini)", "SUNTING"],
+    ["ctrl-v", "tempel", "tempel", "SUNTING"],
+    ["ctrl-a", "pilih_semua", "pilih semua", "SUNTING"],
+    ["ctrl-b", "tandai", "mulai/akhiri blok seleksi (pengganti Shift+panah)", "SUNTING"],
+    ["ctrl-k", "hapus_baris", "hapus baris", "SUNTING"],
+    ["ctrl-d", "gandakan", "gandakan baris", "SUNTING"],
+    ["alt-atas", "baris_naik", "pindahkan baris ke atas", "SUNTING"],
+    ["alt-bawah", "baris_turun", "pindahkan baris ke bawah", "SUNTING"],
+    ["ctrl-t", "komentar", "beri/buang komentar", "SUNTING"],
+    ["tab", "tab", "jorokkan (dengan seleksi: tiap barisnya)", "SUNTING"],
+    ["shift-tab", "tab_balik", "kurangi jorokan", "SUNTING"],
+    ["alt-backspace", "hapus_kata", "hapus satu kata ke kiri", "SUNTING"],
+    ["ctrl-spasi", "lengkapi", "lengkapi kata (fungsi bawaan, kata di berkas)", "SUNTING"],
+    ["alt-/", "lengkapi", "", "SUNTING"],
+
+    ["ctrl-f", "cari", "cari (hasilnya disorot sambil mengetik)", "CARI"],
+    ["ctrl-g", "cari_lagi", "hasil berikutnya", "CARI"],
+    ["f3", "cari_lagi", "", "CARI"],
+    ["alt-g", "cari_mundur", "hasil sebelumnya", "CARI"],
+    ["shift-f3", "cari_mundur", "", "CARI"],
+    ["ctrl-p", "ganti", "ganti (satu per satu atau semuanya)", "CARI"],
+    ["ctrl-l", "ke_baris", "lompat ke baris (atau baris:kolom)", "CARI"],
+    ["alt-]", "ke_kurung", "lompat ke kurung pasangannya", "CARI"],
+    ["alt-o", "garis_besar", "daftar fungsi dan tipe di berkas ini", "CARI"],
+
+    ["ctrl-r", "jalankan", "jalankan berkas ini", "JALAN"],
+    ["f5", "jalankan", "", "JALAN"],
+    ["alt-r", "jalankan_vm", "jalankan lewat --vm", "JALAN"],
+    ["ctrl-e", "galat_berikut", "lompat ke galat berikutnya", "JALAN"],
+    ["alt-p", "periksa", "periksa sintaks tanpa menjalankan", "JALAN"],
+    ["alt-f", "rapikan", "rapikan berkas (jrgm fmt)", "JALAN"],
+    ["f2", "dok", "penjelasan fungsi di bawah kursor", "JALAN"],
+    ["alt-d", "dok", "", "JALAN"],
+
+    ["f1", "bantuan", "daftar tombol ini", "LAIN"],
+    ["esc", "batal", "batalkan seleksi atau dialog; kalau tidak ada: daftar tombol", "LAIN"],
+    ["alt-t", "tema", "ganti tema gelap/terang", "LAIN"],
+
+    ["kiri", "kiri", "", ""], ["kanan", "kanan", "", ""],
+    ["atas", "atas", "", ""], ["bawah", "bawah", "", ""],
+    ["home", "home", "", ""], ["end", "end", "", ""],
+    ["pgup", "pgup", "", ""], ["pgdn", "pgdn", "", ""],
+    ["ctrl-kiri", "kata_kiri", "", ""], ["ctrl-kanan", "kata_kanan", "", ""],
+    ["ctrl-home", "awal", "", ""], ["ctrl-end", "akhir", "", ""],
+    ["shift-kiri", "pilih_kiri", "", ""], ["shift-kanan", "pilih_kanan", "", ""],
+    ["shift-atas", "pilih_atas", "", ""], ["shift-bawah", "pilih_bawah", "", ""],
+    ["shift-home", "pilih_home", "", ""], ["shift-end", "pilih_end", "", ""],
+    ["shift-pgup", "pilih_pgup", "", ""], ["shift-pgdn", "pilih_pgdn", "", ""],
+    ["ctrl-shift-kiri", "pilih_kata_kiri", "", ""], ["ctrl-shift-kanan", "pilih_kata_kanan", "", ""],
+    ["ctrl-shift-home", "pilih_awal", "", ""], ["ctrl-shift-end", "pilih_akhir", "", ""],
+    ["enter", "enter", "", ""], ["backspace", "hapus_kiri", "", ""], ["delete", "hapus_kanan", "", ""],
+]
+
+// Pintasan di baris terbawah, diisi per KOLOM (dua baris): yang paling penting di kolom
+// paling kiri, karena layar sempit cuma menampilkan beberapa kolom pertama.
+const PINTASAN = [
+    ["^S", "Simpan"], ["^Q", "Keluar"], ["Esc", "Bantuan"], ["^O", "Buka"],
+    ["^F", "Cari"], ["^P", "Ganti"], ["^Z", "Urung"], ["^R", "Jalankan"],
+    ["^C", "Salin"], ["^V", "Tempel"], ["^L", "Ke baris"], ["^Y", "Ulang"],
+]
+
+var PETA_TOMBOL = dict::new()
+
+/// Perintah untuk tombol `t`, atau "" kalau tombol itu tidak dipetakan.
+pub fn perintah(t) {
+    if len(PETA_TOMBOL) == 0 {
+        for _, b in TABEL { PETA_TOMBOL[b[0]] = b[1] }
+    }
+    return dict::get_or(PETA_TOMBOL, t, "")
+}
+
+pub fn pintasan() { return PINTASAN }
+
+fn nama_bagian(b) {
+    if b == "pgup" { return "PgUp" }
+    if b == "pgdn" { return "PgDn" }
+    if b == "" { return "-" }
+    return str::upper(str::slice(b, 0, 1)) + str::slice(b, 1)
+}
+
+/// Tombol ditulis seperti di buku manual: `ctrl-s` jadi `^S`, `ctrl-pgdn` jadi `^PgDn`,
+/// `alt-s` jadi `Alt-S`.
+pub fn tulis(t) {
+    var sisa = t
+    var depan = ""
+    if str::starts_with(sisa, "ctrl-") {
+        depan = "^"
+        sisa = str::slice(sisa, 5)
+    }
+    var bagian = []
+    for _, b in str::split(sisa, "-") { bagian = bagian + [nama_bagian(b)] }
+    return depan + arr::join(bagian, "-")
+}
+
+/// Baris-baris layar bantuan: tiap perintah berketerangan dengan semua tombolnya.
+pub fn bantuan() {
+    var keluar = []
+    var grup = ""
+    var i = 0
+    while i < len(TABEL) {
+        let b = TABEL[i]
+        if b[2] != "" {
+            if b[3] != grup {
+                if grup != "" { keluar = keluar + [""] }
+                grup = b[3]
+                keluar = keluar + ["  " + grup]
+            }
+            var label = tulis(b[0])
+            var j = i + 1
+            while j < len(TABEL) && TABEL[j][1] == b[1] && TABEL[j][2] == "" {
+                label = label + ", " + tulis(TABEL[j][0])
+                j = j + 1
+            }
+            keluar = keluar + ["    " + str::pad_right(label, 20) + " " + b[2]]
+        }
+        i = i + 1
+    }
+    return keluar + [
+        "",
+        "  GERAK",
+        "    panah, Home/End, PgUp/PgDn   gerak; tambah Shift untuk memilih",
+        "    ^Kiri/^Kanan                 per kata        ^Home/^End   awal/akhir berkas",
+        "    tetikus                      klik menaruh kursor, seret memilih, roda menggulung",
+        "",
+        "  Kurung dan kutip menutup sendiri; mengetik penutup yang sudah ada cuma melewatinya.",
+        "  Home sekali ke awal isi baris, sekali lagi ke kolom pertama.",
+    ]
+}

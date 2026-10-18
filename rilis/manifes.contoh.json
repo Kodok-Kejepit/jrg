@@ -1,0 +1,43 @@
+{
+  "skema": 1,
+  "versi": "0.1.0",
+  "tanggal": "2026-09-13",
+  "catatan": "https://github.com/Kodok-Kejepit/jrg/releases/tag/v0.1.0",
+  "berkas": [
+    {
+      "platform": "linux-x86_64",
+      "nama": "jrg-0.1.0-linux-x86_64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ukuran": 0,
+      "isi": ["jrgc", "jrgm"]
+    },
+    {
+      "platform": "linux-aarch64",
+      "nama": "jrg-0.1.0-linux-aarch64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ukuran": 0,
+      "isi": ["jrgc", "jrgm"]
+    },
+    {
+      "platform": "macos-x86_64",
+      "nama": "jrg-0.1.0-macos-x86_64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ukuran": 0,
+      "isi": ["jrgc", "jrgm"]
+    },
+    {
+      "platform": "macos-aarch64",
+      "nama": "jrg-0.1.0-macos-aarch64.tar.gz",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ukuran": 0,
+      "isi": ["jrgc", "jrgm"]
+    },
+    {
+      "platform": "windows-x86_64",
+      "nama": "jrg-0.1.0-windows-x86_64.zip",
+      "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+      "ukuran": 0,
+      "isi": ["jrgc.exe", "jrgm.exe"]
+    }
+  ]
+}

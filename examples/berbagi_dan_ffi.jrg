@@ -1,0 +1,55 @@
+package main
+
+// ============================================================================
+// Berbagi nilai, dan FFI — ditulis ulang.
+
+extern "C" {
+    fn abs(n: i32) -> i32
+    fn getpid() -> i32
+}
+
+fn naikkan(r) {
+    // `r` sampai ke sini sebagai salinan — tapi yang disalin adalah HANDLE-nya,
+    // dan handle itu menunjuk penyimpanan yang sama.
+    ptr::set(r, ptr::get(r) + 1)
+}
+
+pub fn main() {
+    wok("=== nilai biasa: tidak pernah beralias ===")
+    var x = 42
+    var y = x            // salinan, bukan rujukan
+    y = 99
+    wok("x =", x, "| y =", y, "-> menulis `y` tidak menyentuh `x`")
+
+    wok("")
+    wok("=== ptr:: — satu-satunya cara berbagi ===")
+    let p = ptr::new(42)
+    let q = p            // handle disalin, penyimpanannya sama
+    ptr::set(q, 7)
+    wok("lewat q ditulis 7, dibaca lewat p:", ptr::get(p))
+
+    naikkan(p)
+    wok("sesudah naikkan(p):", ptr::get(p), "-> perubahan lintas fungsi terlihat")
+
+    wok("")
+    wok("=== jawa:: — alokasi eksplisit, dengan deteksi use-after-free ===")
+    let h = jawa::alloc(8)
+    jawa::set(h, 1234)
+    wok("jawa::get:", jawa::get(h))
+    jawir::free(h)
+    wok("sudah di-free. Membacanya lagi BUKAN nilai sampah:")
+    wok("  ia galat keras yang menyebut `use-after-free`, dan itu disengaja —")
+    wok("  hasil yang tampak masuk akal dari memori bekas adalah hal yang")
+    wok("  paling sulit dilacak. Baris berikutnya sengaja tidak dijalankan.")
+
+    wok("")
+    wok("=== extern \"C\": hasilnya Result, bukan nilai telanjang ===")
+    match abs(-17) {
+        Ok(v)  => wok("abs(-17) =", v),
+        Err(e) => wok("abs gagal:", e),
+    }
+    match getpid() {
+        Ok(pid) => wok("getpid() > 0:", pid > 0),
+        Err(e)  => wok("getpid gagal:", e),
+    }
+}

@@ -1,0 +1,40 @@
+package main
+
+// Memanggil Kotlin dari JRG.
+
+fn buka(r) { return r.unwrap_or(nil) }
+
+pub fn main() {
+    if !jvm::tersedia() {
+        wok("JVM tidak ada di mesin ini — pasang JDK dulu.")
+        return
+    }
+
+    // `kotlin-stdlib.jar` WAJIB ada di classpath begitu ada fungsi yang
+    // menerima String: Kotlin menyisipkan pemeriksaan null ke dalamnya.
+    let cp = "-Djava.class.path=kelas:/path/ke/kotlin-stdlib.jar"
+    wok("mulai   :", jvm::mulai([cp]))
+
+    wok("")
+    wok("=== fungsi top-level (kelas `UjiKt`) ===")
+    wok("tambah  :", kotlin::fungsi("uji.Uji", "tambah", "(II)I", [3, 4]))
+
+    wok("")
+    wok("=== object (field statis INSTANCE) ===")
+    let kalk = buka(kotlin::objek("uji.Kalkulator"))
+    wok("kali    :", jvm::panggil(kalk, "kali", "(II)I", [6, 7]))
+
+    wok("")
+    wok("=== class, properti, companion ===")
+    let t = buka(jvm::baru("uji.Titik", "(DD)V", [3.0, 4.0]))
+    wok("x       :", kotlin::properti(t, "x", "D"))
+    wok("jarak   :", jvm::panggil(t, "jarak", "()D", []))
+    let comp = buka(kotlin::companion("uji.Titik"))
+    wok("asal    :", jvm::panggil(comp, "asal", "()Luji/Titik;", []))
+
+    // Objek dipegang sebagai global ref, jadi ia TIDAK dilepas sendiri.
+    wok("")
+    wok("hidup   :", jvm::objek_hidup())
+    jvm::lepas(t)
+    wok("sesudah :", jvm::objek_hidup())
+}

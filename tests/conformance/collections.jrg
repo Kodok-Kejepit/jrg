@@ -1,0 +1,221 @@
+package main
+
+// Konformansi: koleksi (array, dict, tuple, string).
+
+pub fn main() {
+    // ── array: dasar ────────────────────────────────────────────────────
+    let a = [1, 2, 3]
+    assert_eq(len(a), 3)
+    assert_eq(a[0], 1)
+    assert_eq(a[2], 3)
+
+    // index negatif dihitung dari belakang
+    assert_eq(a[-1], 3)
+    assert_eq(a[-3], 1)
+
+    // array kosong
+    let kosong = []
+    assert_eq(len(kosong), 0)
+
+    // satu elemen
+    let satu = [9]
+    assert_eq(len(satu), 1)
+    assert_eq(satu[0], 9)
+
+    // ── array: mutasi lewat index ───────────────────────────────────────
+    var m = [1, 2, 3]
+    m[0] = 10
+    assert_eq(m[0], 10)
+    m[-1] = 30
+    assert_eq(m[2], 30)
+
+    // compound assign lewat index
+    m[1] += 5
+    assert_eq(m[1], 7)
+
+    // ── array: value semantics (SALIN, bukan alias) ─────────────────────
+    var asli = [1, 2, 3]
+    var salinan = asli
+    salinan[0] = 99
+    assert_eq(asli[0], 1)      // yang asli TIDAK ikut berubah
+    assert_eq(salinan[0], 99)
+
+    // ── array: bersarang ────────────────────────────────────────────────
+    let nested = [[1, 2], [3, 4]]
+    assert_eq(len(nested), 2)
+    assert_eq(nested[0][1], 2)
+    assert_eq(nested[1][0], 3)
+
+    // ── array: operasi umum ─────────────────────────────────────────────
+    assert_eq(arr::sum([1, 2, 3, 4]), 10)
+    assert_eq(arr::max([3, 1, 7, 2]), 7)
+    assert_eq(arr::min([3, 1, 7, 2]), 1)
+    assert_eq(arr::reverse([1, 2, 3]), [3, 2, 1])
+    assert_eq(arr::sort([3, 1, 2]), [1, 2, 3])
+    assert_eq(arr::push([1, 2], 3), [1, 2, 3])
+    assert_eq(arr::contains([1, 2, 3], 2), true)
+    assert_eq(arr::contains([1, 2, 3], 9), false)
+
+    // operasi pada array kosong tidak boleh meledak
+    assert_eq(arr::sum([]), 0)
+    assert_eq(len(arr::reverse([])), 0)
+
+    // higher-order
+    assert_eq([1, 2, 3].map(|x| x * 2), [2, 4, 6])
+    assert_eq([1, 2, 3, 4].filter(|x| x % 2 == 0), [2, 4])
+    assert_eq([1, 2, 3].reduce(|acc, x| acc + x, 0), 6)   // (fn, init)
+
+    // ── dict ────────────────────────────────────────────────────────────
+    let d = {"nama": "budi", "umur": 17}
+    assert_eq(d["nama"], "budi")
+    assert_eq(d["umur"], 17)
+    assert_eq(dict::len(d), 2)
+
+    // key identifier telanjang sama dengan key string
+    let d2 = {nama: "siti", umur: 20}
+    assert_eq(d2["nama"], "siti")
+    assert_eq(d2.umur, 20)
+
+    // akses lewat titik dan lewat kurung siku setara
+    assert_eq(d["nama"], d.nama)
+
+    // tulis lewat kurung siku, termasuk key BARU
+    var dd = {"a": 1}
+    dd["a"] = 10
+    assert_eq(dd["a"], 10)
+    dd["b"] = 20
+    assert_eq(dd["b"], 20)
+    assert_eq(dict::len(dd), 2)
+
+    // compound assign lewat kurung siku
+    dd["a"] += 5
+    assert_eq(dd["a"], 15)
+
+    // tulis lewat titik
+    dd.c = 30
+    assert_eq(dd["c"], 30)
+
+    // has/remove/keys
+    assert_eq(dict::has(dd, "a"), true)
+    assert_eq(dict::has(dd, "zz"), false)
+    let tanpa_a = dict::remove(dd, "a")
+    assert_eq(dict::has(tanpa_a, "a"), false)
+    assert_eq(len(dict::keys({"x": 1, "y": 2})), 2)
+
+    // dict kosong dibuat lewat dict::new() — `{}` tetap berarti blok
+    let dk = dict::new()
+    assert_eq(dict::len(dk), 0)
+    assert_eq(dict::is_empty(dk), true)
+
+    // nilai dict boleh apa saja, termasuk array dan dict lain
+    let bersarang = {"angka": [1, 2], "dalam": {"k": "v"}}
+    assert_eq(bersarang["angka"][1], 2)
+    assert_eq(bersarang["dalam"]["k"], "v")
+
+    // ── dict: method-style, setara dengan dict:: ─────────────────────────
+    let dm = {"a": 1, "b": 2}
+    assert_eq(dm.len(), dict::len(dm))
+    assert_eq(dm.is_empty(), false)
+    assert_eq(dm.has("a"), true)
+    assert_eq(dm.keys(), dict::keys(dm))
+    assert_eq(dm.values(), dict::values(dm))
+    assert_eq(dm.remove("a"), dict::remove(dm, "a"))
+    assert_eq(dm.merge({"c": 3}), dict::merge(dm, {"c": 3}))
+
+    // ── dict: typeof melaporkan "dict", bukan "struct:dict" ──────────────
+    assert_eq(typeof(dm), "dict")
+
+    // ── dict::get mengembalikan Option, bukan nilai/nil yang ambigu ──────
+    let dg = {"ada": 1, "kosong": nil}
+    assert_eq(dg.get("ada"), Some(1))
+    assert_eq(dg.get("kosong"), Some(nil))
+    assert_eq(dg.get("tidak_ada"), None)
+    assert_eq(dg.get("ada").unwrap(), 1)
+    assert_eq(dg.get("tidak_ada").unwrap_or(0), 0)
+    assert_eq(dg.get("tidak_ada").is_none(), true)
+
+    // ── dict: iterasi ──────────────────────────────────────────────────
+    let di = {"b": 2, "a": 1, "c": 3}
+    var kunci_terkumpul = []
+    for k in di { kunci_terkumpul = kunci_terkumpul + [k] }
+    assert_eq(kunci_terkumpul, ["a", "b", "c"])
+
+    var pasangan = []
+    for k, v in di { pasangan = pasangan + [«${k}=${v}»] }
+    assert_eq(pasangan, ["a=1", "b=2", "c=3"])
+
+    // dict kosong tidak menjalankan badan loop sama sekali
+    var jalan = false
+    for k in dict::new() { jalan = true }
+    assert_eq(jalan, false)
+
+    // ── tuple ───────────────────────────────────────────────────────────
+    let t = (1, "dua", true)
+    assert_eq(len(t), 3)
+
+    // ── string ──────────────────────────────────────────────────────────
+    let s = "halo dunia"
+    assert_eq(len(s), 10)
+    assert_eq(str::upper(s), "HALO DUNIA")
+    assert_eq(str::contains(s, "dunia"), true)
+    assert_eq(str::starts_with(s, "halo"), true)
+    assert_eq(str::ends_with(s, "dunia"), true)
+    assert_eq(str::replace(s, "dunia", "jrg"), "halo jrg")
+    assert_eq(str::trim("  pad  "), "pad")
+    assert_eq(str::repeat("ab", 3), "ababab")
+    assert_eq(str::reverse("abc"), "cba")
+
+    // string kosong
+    assert_eq(len(""), 0)
+    assert_eq(str::is_empty(""), true)
+
+    // len() menghitung KARAKTER, bukan byte
+    assert_eq(len("héllo"), 5)
+    assert_eq(len("☃"), 1)
+
+    // char_at mengembalikan karakter pada posisi karakter ke-i
+    assert_eq(str::char_at("abc", 0), 'a')
+    assert_eq(str::char_at("héllo", 1), 'é')
+
+    // penggabungan
+    assert_eq("a" + "b", "ab")
+    assert_eq("nilai: " + str(42), "nilai: 42")
+
+    // ── akses "mungkin kosong" mengembalikan Option ──────────────────────
+    let isi = [10, 20, 30]
+    assert_eq(isi.first(), Some(10))
+    assert_eq(isi.last(), Some(30))
+    assert_eq(isi.get(1), Some(20))
+    assert_eq(isi.get(99), None)
+    assert_eq(isi.find(|x| x > 15), Some(20))
+    assert_eq(isi.find(|x| x > 999), None)
+
+    let kosong2 = []
+    assert_eq(kosong2.first(), None)
+    assert_eq(kosong2.last(), None)
+
+    // yang membedakan Option dari nil polos: array berisi nil
+    let berisi_nil = [nil]
+    assert_eq(berisi_nil.first(), Some(nil))
+    assert_eq(berisi_nil.first().is_some(), true)
+    assert_eq(kosong2.first().is_none(), true)
+
+    // `.get_or(i, default)` untuk yang cuma butuh nilai + cadangan
+    assert_eq(isi.get_or(1, -1), 20)
+    assert_eq(isi.get_or(99, -1), -1)
+
+    // pop mengembalikan (array_baru, Option)
+    let (sisa, diambil) = isi.pop()
+    assert_eq(sisa, [10, 20])
+    assert_eq(diambil, Some(30))
+    let (masih_kosong, tidak_ada) = kosong2.pop()
+    assert_eq(masih_kosong, [])
+    assert_eq(tidak_ada, None)
+
+    // ── min/max menolak yang tidak sebanding, bukan menebak ──────────────
+    assert_eq([3, 1, 2].min(), 1)
+    assert_eq([3, 1, 2].max(), 3)
+    assert_eq([1, 2.5, 0].min(), 0)      // int campur float tetap sebanding
+
+    wok("collections OK")
+}

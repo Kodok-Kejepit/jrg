@@ -1,0 +1,9 @@
+var d = dict::new()
+for i in 0..100000 {
+    d[str(i % 5000)] = i
+}
+var t = 0
+for i in 0..100000 {
+    t = t + d[str(i % 5000)] % 3
+}
+wok(len(dict::keys(d)), t)

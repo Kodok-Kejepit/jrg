@@ -1,0 +1,112 @@
+package std_mesin_fisika
+
+// Bentuk tabrakan (Kotak sejajar sumbu, Lingkaran) dan Benda yang bergerak.
+// Semuanya nilai: tiap operasi menjawab bentuk BARU.
+import "std/mesin/vek"
+
+pub struct Kotak { pub x: float, pub y: float, pub w: float, pub h: float }
+pub struct Lingkaran { pub pusat: vek::Vek2, pub r: float }
+pub struct Benda { pub pos: vek::Vek2, pub kec: vek::Vek2, pub perc: vek::Vek2 }
+
+fn _angka(nama, ke, v) {
+    let t = typeof(v)
+    if t != "int" && t != "float" {
+        panik(nama + ": argumen ke-" + str(ke) + " harus angka, dapat `" + t + "`")
+    }
+    return v as float
+}
+
+/// Kotak dari sudut kiri-atas dan ukurannya. Ukuran negatif ditolak.
+pub fn kotak(x, y, w, h) {
+    let lw = _angka("fisika::kotak", 3, w)
+    let lh = _angka("fisika::kotak", 4, h)
+    if lw < 0.0 || lh < 0.0 { panik("fisika::kotak: lebar dan tinggi tidak boleh negatif") }
+    return Kotak { x: _angka("fisika::kotak", 1, x), y: _angka("fisika::kotak", 2, y), w: lw, h: lh }
+}
+
+/// Lingkaran dari pusat (`Vek2`) dan jari-jari.
+pub fn lingkaran(pusat, r) {
+    if typeof(pusat) != "struct:Vek2" { panik("fisika::lingkaran: pusat harus `Vek2`, dapat `" + typeof(pusat) + "`") }
+    let jr = _angka("fisika::lingkaran", 2, r)
+    if jr < 0.0 { panik("fisika::lingkaran: jari-jari tidak boleh negatif") }
+    return Lingkaran { pusat: pusat, r: jr }
+}
+
+/// Benda diam di `pos`.
+pub fn benda(pos) {
+    if typeof(pos) != "struct:Vek2" { panik("fisika::benda: pos harus `Vek2`, dapat `" + typeof(pos) + "`") }
+    return Benda { pos: pos, kec: vek::nol(), perc: vek::nol() }
+}
+
+fn _jepit(v, lo, hi) {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+impl Kotak {
+    /// Titik tengahnya.
+    pub fn pusat(self) { return vek::baru(self.x + self.w / 2.0, self.y + self.h / 2.0) }
+    /// Digeser sejauh `v`.
+    pub fn geser(self, v) { return Kotak { x: self.x + v.x, y: self.y + v.y, w: self.w, h: self.h } }
+    /// Apakah titik `p` di dalamnya (tepi kiri/atas termasuk, kanan/bawah tidak).
+    pub fn berisi(self, p) {
+        return p.x >= self.x && p.x < self.x + self.w && p.y >= self.y && p.y < self.y + self.h
+    }
+    /// Apakah bertabrakan dengan `Kotak` atau `Lingkaran` lain. Bersinggungan tepi saja bukan tabrakan.
+    pub fn tabrak(self, o) {
+        let t = typeof(o)
+        if t == "struct:Kotak" {
+            return self.x < o.x + o.w && o.x < self.x + self.w && self.y < o.y + o.h && o.y < self.y + self.h
+        }
+        if t == "struct:Lingkaran" { return o.tabrak(self) }
+        panik("fisika::tabrak: butuh `Kotak` atau `Lingkaran`, dapat `" + t + "`")
+    }
+    /// Pergeseran TERKECIL yang mengeluarkan kotak ini dari `o`; `Option::None` kalau tidak bertabrakan.
+    pub fn dorong_keluar(self, o) {
+        if typeof(o) != "struct:Kotak" { panik("fisika::dorong_keluar: butuh `Kotak`, dapat `" + typeof(o) + "`") }
+        if !self.tabrak(o) { return Option::None }
+        let kiri = o.x - (self.x + self.w)
+        let kanan = (o.x + o.w) - self.x
+        let atas = o.y - (self.y + self.h)
+        let bawah = (o.y + o.h) - self.y
+        let dx = math::abs(kiri) < math::abs(kanan) $ kiri : kanan
+        let dy = math::abs(atas) < math::abs(bawah) $ atas : bawah
+        if math::abs(dx) < math::abs(dy) { return Option::Some(vek::baru(dx, 0.0)) }
+        return Option::Some(vek::baru(0.0, dy))
+    }
+}
+
+impl Lingkaran {
+    /// Apakah bertabrakan dengan `Lingkaran` atau `Kotak`.
+    pub fn tabrak(self, o) {
+        let t = typeof(o)
+        if t == "struct:Lingkaran" {
+            let r = self.r + o.r
+            return self.pusat.sub(o.pusat).panjang_kuadrat() < r * r
+        }
+        if t == "struct:Kotak" {
+            let tx = _jepit(self.pusat.x, o.x, o.x + o.w)
+            let ty = _jepit(self.pusat.y, o.y, o.y + o.h)
+            let dx = self.pusat.x - tx
+            let dy = self.pusat.y - ty
+            return dx * dx + dy * dy < self.r * self.r
+        }
+        panik("fisika::tabrak: butuh `Kotak` atau `Lingkaran`, dapat `" + t + "`")
+    }
+    /// Digeser sejauh `v`.
+    pub fn geser(self, v) { return Lingkaran { pusat: self.pusat.add(v), r: self.r } }
+}
+
+impl Benda {
+    /// Maju `dt` detik (Euler semi-implisit: kecepatan dulu, lalu posisi).
+    pub fn maju(self, dt) {
+        let k = _angka("fisika::maju", 1, dt)
+        let kec = self.kec.add(self.perc.mul(k))
+        return Benda { pos: self.pos.add(kec.mul(k)), kec: kec, perc: self.perc }
+    }
+    /// Benda yang sama dengan kecepatan lain.
+    pub fn dengan_kec(self, v) { return Benda { pos: self.pos, kec: v, perc: self.perc } }
+    /// Benda yang sama dengan percepatan lain (mis. gravitasi).
+    pub fn dengan_perc(self, v) { return Benda { pos: self.pos, kec: self.kec, perc: v } }
+}

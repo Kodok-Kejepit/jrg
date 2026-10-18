@@ -1,0 +1,142 @@
+package std_csv
+
+// CSV dengan aturan kutipnya, bukan sekadar `str::split(baris, ",")`.
+
+/// Urai teks CSV jadi array baris, tiap baris array sel. Pemisahnya koma.
+pub fn parse(teks) { return parse_with(teks, ',') }
+
+/// Sama dengan `parse`, dengan pemisah yang ditentukan sendiri.
+pub fn parse_with(teks, pemisah) {
+    var baris = []
+    var sel = []
+    var buf = ""
+    var dikutip = false
+    var ada_isi = false
+    var i = 0
+    let n = len(teks)
+
+    while i < n {
+        let c = str::char_at(teks, i)
+
+        if dikutip {
+            if c == '"' {
+                if i + 1 < n {
+                    if str::char_at(teks, i + 1) == '"' {
+                        buf = buf + "\""
+                        i = i + 2
+                        continue
+                    }
+                }
+                dikutip = false
+                i = i + 1
+                continue
+            }
+            buf = buf + c
+            i = i + 1
+            continue
+        }
+
+        if c == '"' {
+            dikutip = true
+            ada_isi = true
+            i = i + 1
+            continue
+        }
+
+        if c == pemisah {
+            sel = arr::push(sel, buf)
+            buf = ""
+            ada_isi = true
+            i = i + 1
+            continue
+        }
+
+        if c == '\n' {
+            sel = arr::push(sel, buf)
+            baris = arr::push(baris, sel)
+            sel = []
+            buf = ""
+            ada_isi = false
+            i = i + 1
+            continue
+        }
+
+        if c == '\r' {
+            i = i + 1
+            continue
+        }
+
+        buf = buf + c
+        ada_isi = true
+        i = i + 1
+    }
+
+    // Baris terakhir tanpa baris-baru penutup tetap sebuah baris. Berkas
+    // yang berakhir dengan baris-baru TIDAK menghasilkan baris kosong
+    // tambahan — itu bedanya dengan `str::split(teks, "\n")`.
+    if len(buf) > 0 || ada_isi || len(sel) > 0 {
+        sel = arr::push(sel, buf)
+        baris = arr::push(baris, sel)
+    }
+    return baris
+}
+
+fn perlu_kutip(s, pemisah) {
+    if str::contains(s, "\"") { return true }
+    if str::contains(s, "\n") { return true }
+    if str::contains(s, "\r") { return true }
+    return str::contains(s, fmt::sprint(pemisah))
+}
+
+/// Susun array-of-array jadi teks CSV. Sel yang memuat koma, kutip, atau baris baru dikutip sendiri.
+pub fn format(baris) { return format_with(baris, ',') }
+
+/// Sama dengan `format`, dengan pemisah yang ditentukan sendiri.
+pub fn format_with(baris, pemisah) {
+    var keluar = []
+    for _, r in baris {
+        var kolom = []
+        for _, sel in r {
+            let s = fmt::sprint(sel)
+            if perlu_kutip(s, pemisah) {
+                kolom = arr::push(kolom, "\"" + str::replace(s, "\"", "\"\"") + "\"")
+            } else {
+                kolom = arr::push(kolom, s)
+            }
+        }
+        keluar = arr::push(keluar, str::join(kolom, fmt::sprint(pemisah)))
+    }
+    return str::join(keluar, "\n")
+}
+
+// Kolom yang kurang diisi string kosong, supaya tiap dict berbentuk sama.
+/// Baris pertama jadi nama kolom; sisanya jadi dict per baris.
+pub fn to_dicts(baris) {
+    if len(baris) == 0 { return [] }
+    let kepala = baris[0]
+    var keluar = []
+    for i, r in baris {
+        if i == 0 { continue }
+        var d = dict::new()
+        for j, nama in kepala {
+            if j < len(r) {
+                d = dict::set(d, nama, r[j])
+            } else {
+                d = dict::set(d, nama, "")
+            }
+        }
+        keluar = arr::push(keluar, d)
+    }
+    return keluar
+}
+
+/// Kebalikan `to_dicts`: dict jadi baris, dengan baris kepala di depan.
+pub fn from_dicts(kepala, isi) {
+    var baris = [kepala]
+    for _, d in isi {
+        var r = []
+        for _, k in kepala { r = arr::push(r, dict::get_or(d, k, "")) }
+        baris = arr::push(baris, r)
+    }
+    return baris
+}

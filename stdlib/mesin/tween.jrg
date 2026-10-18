@@ -1,0 +1,93 @@
+package std_mesin_tween
+
+// Pelonggaran (easing): fungsi t -> t di rentang 0..1, dan `Tween` yang
+// memajukannya terhadap waktu. Nama kurvanya sama dengan easings.net.
+
+fn _wajib_fungsi(nama, f) {
+    let t = typeof(f)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-4 harus fungsi kurva, dapat `" + t + "`")
+    }
+}
+
+fn _t(nama, t) {
+    if typeof(t) != "int" && typeof(t) != "float" {
+        panik(nama + ": `t` harus angka, dapat `" + typeof(t) + "`")
+    }
+    let k = t as float
+    if k < 0.0 { return 0.0 }
+    if k > 1.0 { return 1.0 }
+    return k
+}
+
+/// Tanpa pelonggaran.
+pub fn linear(t) { return _t("tween::linear", t) }
+/// Mulai pelan, lalu cepat.
+pub fn masuk_kuad(t) { let k = _t("tween::masuk_kuad", t)
+    return k * k }
+/// Mulai cepat, lalu pelan.
+pub fn keluar_kuad(t) { let k = _t("tween::keluar_kuad", t)
+    return 1.0 - (1.0 - k) * (1.0 - k) }
+/// Pelan di kedua ujung.
+pub fn masuk_keluar_kuad(t) {
+    let k = _t("tween::masuk_keluar_kuad", t)
+    if k < 0.5 { return 2.0 * k * k }
+    let u = -2.0 * k + 2.0
+    return 1.0 - u * u / 2.0
+}
+/// Seperti `masuk_kuad`, lebih tajam.
+pub fn masuk_kubik(t) { let k = _t("tween::masuk_kubik", t)
+    return k * k * k }
+/// Seperti `keluar_kuad`, lebih tajam.
+pub fn keluar_kubik(t) { let k = _t("tween::keluar_kubik", t)
+    let u = 1.0 - k
+    return 1.0 - u * u * u }
+/// Kurva sinus, halus di kedua ujung.
+pub fn sinus(t) { let k = _t("tween::sinus", t)
+    return -(math::cos(math::PI * k) - 1.0) / 2.0 }
+/// Memantul di ujung, seperti bola jatuh.
+pub fn pantul(t) {
+    let k = _t("tween::pantul", t)
+    let n = 7.5625
+    let d = 2.75
+    if k < 1.0 / d { return n * k * k }
+    if k < 2.0 / d { let u = k - 1.5 / d
+        return n * u * u + 0.75 }
+    if k < 2.5 / d { let u = k - 2.25 / d
+        return n * u * u + 0.9375 }
+    let u = k - 2.625 / d
+    return n * u * u + 0.984375
+}
+
+/// Nilai di antara `dari` dan `ke` menurut kurva `f` pada `t` (0..1).
+pub fn antara(dari, ke, t, f: fn(float) -> float) {
+    _wajib_fungsi("tween::antara", f)
+    return dari + (ke - dari) * f(t)
+}
+
+/// Satu tween: dari `dari` ke `ke` selama `durasi` detik dengan kurva `f`.
+pub struct Tween { pub dari: float, pub ke: float, pub durasi: float, pub waktu: float = 0.0, pub kurva: fn(float) -> float }
+
+/// Tween baru. `durasi` harus positif.
+pub fn baru(dari, ke, durasi, kurva: fn(float) -> float) {
+    if typeof(durasi) != "int" && typeof(durasi) != "float" { panik("tween::baru: `durasi` harus angka") }
+    if durasi <= 0 { panik("tween::baru: `durasi` harus positif, dapat " + str(durasi)) }
+    _wajib_fungsi("tween::baru", kurva)
+    return Tween { dari: dari as float, ke: ke as float, durasi: durasi as float, kurva: kurva }
+}
+
+impl Tween {
+    /// Tween yang dimajukan `dt` detik; berhenti di ujungnya.
+    pub fn maju(self, dt) {
+        let w = self.waktu + (dt as float)
+        return Tween { dari: self.dari, ke: self.ke, durasi: self.durasi,
+                       waktu: w > self.durasi $ self.durasi : w, kurva: self.kurva }
+    }
+    /// Nilainya sekarang.
+    pub fn nilai(self) {
+        let f = self.kurva
+        return self.dari + (self.ke - self.dari) * f(self.waktu / self.durasi)
+    }
+    /// Benar kalau sudah sampai ujung.
+    pub fn selesai(self) { return self.waktu >= self.durasi }
+}

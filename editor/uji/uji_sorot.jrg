@@ -1,0 +1,70 @@
+package main
+
+// Uji penyorot: rentang dan keadaan akhir tiap baris, termasuk yang membentang baris.
+import "sunting/sorot"
+
+/// Potongan teks tiap rentang berikut jenisnya, supaya harapan terbaca: `fn:k`.
+fn ringkas(teks, awal) {
+    let h = sorot::baris(teks, awal)
+    var keluar = []
+    for _, r in h[0] { keluar = keluar + [str::slice(teks, r[0], r[1]) + ":" + r[2]] }
+    return [keluar, h[1]]
+}
+
+fn test_kata_kunci_tipe_fungsi() {
+    assert_eq(ringkas("fn tambah(a: int) -> int {", ""),
+              [["fn:k", "tambah:f", "int:t", "int:t"], ""])
+    assert_eq(ringkas("let x = arr::sum(v)", ""), [["let:k", "arr:m", "sum:f"], ""])
+    assert_eq(ringkas("return Titik { x: 1 }", ""), [["return:k", "Titik:t", "1:a"], ""])
+    assert_eq(ringkas("const MAKS = nil", ""), [["const:k", "MAKS:n", "nil:n"], ""])
+}
+
+fn test_string_dan_komentar() {
+    assert_eq(ringkas("wok(\"fn // bukan\") // ya", ""),
+              [["wok:f", "\"fn // bukan\":s", "// ya:c"], ""])
+    assert_eq(ringkas("let s = \"a\\\"b\"", ""), [["let:k", "\"a\\\"b\":s"], ""])
+    assert_eq(ringkas("let c = 'x'", ""), [["let:k", "'x':s"], ""])
+    assert_eq(ringkas("let c = '\\n'", ""), [["let:k", "'\\n':s"], ""])
+    assert_eq(ringkas("break 'luar", ""), [["break:k", "'luar:k"], ""])
+    // String yang belum ditutup tetap disorot sampai ujung baris.
+    assert_eq(ringkas("x = \"belum", ""), [["\"belum:s"], ""])
+}
+
+fn test_angka() {
+    assert_eq(ringkas("x = 42 + 3.14 + 0xFF + 1_000", ""),
+              [["42:a", "3.14:a", "0xFF:a", "1_000:a"], ""])
+    assert_eq(ringkas("for i in 0..10 {", ""), [["for:k", "in:k", "0:a", "10:a"], ""])
+}
+
+fn test_komentar_blok_bersarang_lintas_baris() {
+    assert_eq(ringkas("a /* satu", ""), [["/* satu:c"], "k1"])
+    assert_eq(ringkas("dua /* tiga", "k1"), [["dua /* tiga:c"], "k2"])
+    assert_eq(ringkas("empat */ masih", "k2"), [["empat */ masih:c"], "k1"])
+    assert_eq(ringkas("lima */ let x", "k1"), [["lima */:c", "let:k"], ""])
+    assert_eq(ringkas("/* a */ fn /* b */", ""), [["/* a */:c", "fn:k", "/* b */:c"], ""])
+}
+
+fn test_string_mentah_dan_template_lintas_baris() {
+    assert_eq(ringkas("let s = `mentah", ""), [["let:k", "`mentah:s"], "b"])
+    assert_eq(ringkas("masih fn let", "b"), [["masih fn let:s"], "b"])
+    assert_eq(ringkas("akhir` + x", "b"), [["akhir`:s"], ""])
+    assert_eq(ringkas("let t = \"\"\"halo ${nama} ya", ""),
+              [["let:k", "\"\"\":s", "halo :s", "${nama}:i", " ya:s"], "q"])
+    assert_eq(ringkas("tutup\"\"\" + 1", "q"), [["tutup\"\"\":s", "1:a"], ""])
+    assert_eq(ringkas("let t = «a ${b + 1} c»", ""),
+              [["let:k", "«:s", "a :s", "${b + 1}:i", " c»:s"], ""])
+    assert_eq(ringkas("«belum", ""), [["«:s", "belum:s"], "t"])
+}
+
+fn test_keadaan_akhir_cepat() {
+    assert_eq(sorot::keadaan_akhir("let x = 1", ""), "")
+    assert_eq(sorot::keadaan_akhir("a /* b", ""), "k1")
+    assert_eq(sorot::keadaan_akhir("apa saja", "k1"), "k1")
+    assert_eq(sorot::keadaan_akhir("x */", "k1"), "")
+    assert_eq(sorot::keadaan_akhir("", "b"), "b")
+}
+
+fn test_baris_kosong_dan_spasi() {
+    assert_eq(sorot::baris("", ""), [[], ""])
+    assert_eq(sorot::baris("    ", ""), [[], ""])
+}

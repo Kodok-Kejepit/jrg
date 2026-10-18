@@ -1,0 +1,80 @@
+package main
+
+// Uji pencarian: posisi di baris, maju/mundur berputar, hitungan, dan penggantian.
+import "sunting/penyangga"
+import "sunting/cari"
+
+fn buat(baris, br, kol) {
+    return penyangga::ke(penyangga::baru("uji.jrg", baris), br, kol)
+}
+
+fn test_di_baris() {
+    assert_eq(cari::di_baris("abc abc xabc", "abc"), [0, 4, 9])
+    assert_eq(cari::di_baris("aaaa", "aa"), [0, 2])
+    assert_eq(cari::di_baris("abc", ""), [])
+    assert_eq(cari::di_baris("abc", "zz"), [])
+    assert_eq(cari::di_baris("", "a"), [])
+    assert_eq(cari::di_baris("日本語 本", "本"), [1, 4])
+}
+
+fn test_huruf_besar_kecil() {
+    // Pola huruf kecil semua: tidak peka. Ada huruf besar: peka.
+    assert_eq(cari::di_baris("Wok wok WOK", "wok"), [0, 4, 8])
+    assert_eq(cari::di_baris("Wok wok WOK", "Wok"), [0])
+    assert(!cari::peka("abc"))
+    assert(cari::peka("aBc"))
+}
+
+fn test_maju_berputar() {
+    let p = buat(["x ab", "ab", "zz ab"], 0, 0)
+    assert_eq(cari::maju(p, "ab"), Option::Some([0, 2]))
+    assert_eq(cari::maju(buat(p.baris, 0, 2), "ab"), Option::Some([1, 0]))
+    assert_eq(cari::maju(buat(p.baris, 2, 3), "ab"), Option::Some([0, 2]))
+    assert_eq(cari::maju(p, "tidak"), Option::None)
+    // Satu-satunya kemunculan tepat di kursor: berputar kembali ke situ.
+    assert_eq(cari::maju(buat(["ab"], 0, 0), "ab"), Option::Some([0, 0]))
+}
+
+fn test_mundur_berputar() {
+    let p = buat(["x ab", "ab", "zz ab"], 2, 3)
+    assert_eq(cari::mundur(p, "ab"), Option::Some([1, 0]))
+    assert_eq(cari::mundur(buat(p.baris, 1, 0), "ab"), Option::Some([0, 2]))
+    assert_eq(cari::mundur(buat(p.baris, 0, 2), "ab"), Option::Some([2, 3]))
+    assert_eq(cari::mundur(p, "tidak"), Option::None)
+}
+
+fn test_hitung() {
+    let p = buat(["x ab", "ab", "zz ab"], 0, 0)
+    assert_eq(cari::hitung(p, "ab", 1, 0), [2, 3])
+    assert_eq(cari::hitung(p, "ab", 1, 1), [0, 3])
+    assert_eq(cari::hitung(p, "q", 0, 0), [0, 0])
+}
+
+fn test_ganti() {
+    let p = buat(["a-b-a", "kosong", "a"], 1, 2)
+    let h = cari::ganti_semua(p, "a", "XY")
+    assert_eq(h[1], 3)
+    assert_eq(h[0].baris, ["XY-b-XY", "kosong", "XY"])
+    assert_eq([h[0].br, h[0].kol], [1, 2])
+    // Satu langkah urung mengembalikan semuanya.
+    assert_eq(penyangga::urungkan(h[0]).baris, ["a-b-a", "kosong", "a"])
+    let k = cari::ganti_semua(p, "zzz", "q")
+    assert_eq(k[1], 0)
+    assert(!k[0].kotor)
+    let s = cari::ganti_satu(p, "a", "panjang", 0, 4)
+    assert_eq(s.baris[0], "a-b-panjang")
+    assert_eq([s.br, s.kol], [0, 11])
+}
+
+fn test_dari_menerima_kemunculan_di_kursor() {
+    let p = buat(["abc x", "y abc", "z"], 0, 0)
+    // Tepat di kursor ikut dihitung — beda dengan `maju`, yang mencari SESUDAHNYA.
+    assert_eq(cari::dari(p, "abc", 0, 0), Option::Some([0, 0]))
+    assert_eq(cari::maju(p, "abc"), Option::Some([1, 2]))
+    assert_eq(cari::dari(p, "abc", 0, 1), Option::Some([1, 2]))
+    // Sesudah kemunculan terakhir: berputar ke yang pertama.
+    assert_eq(cari::dari(p, "abc", 1, 3), Option::Some([0, 0]))
+    assert_eq(cari::dari(p, "abc", 2, 0), Option::Some([0, 0]))
+    assert_eq(cari::dari(p, "tidak ada", 0, 0), Option::None)
+    assert_eq(cari::dari(p, "", 0, 0), Option::None)
+}

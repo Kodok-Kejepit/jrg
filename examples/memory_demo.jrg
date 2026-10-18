@@ -1,0 +1,62 @@
+package main
+
+// ============================================================================
+// memory_demo.jrg — jawa::/jawir:: manajemen memori manual ala C/C++.
+
+pub fn main() {
+    wok("=== jawa::alloc / jawir::free — sel tunggal ===")
+    let p = jawa::alloc(42)
+    wok("isi:", jawa::get(p))
+    jawa::set(p, 100)
+    wok("setelah set:", jawa::get(p))
+    jawir::free(p)
+    wok("is_valid setelah free:", jawa::is_valid(p))
+    // jawa::get(p) di sini -> error "use-after-free" (dikomentari biar demo tetap jalan mulus)
+
+    wok("")
+    wok("=== jawa::array — heap array, mutasi in-place O(1) ===")
+    // Beda dari array biasa (value semantics, .push() balikin array BARU),
+    // array heap ini beneran diubah di tempat — cocok buat data besar yang
+    // sering di-update tanpa mau nyalin ulang tiap kali.
+    let arr = jawa::array(3, 0)
+    jawa::array_set(arr, 0, 10)
+    jawa::array_set(arr, 1, 20)
+    jawa::array_set(arr, 2, 30)
+    jawa::array_push(arr, 40)
+    wok("isi:", jawa::array_to_list(arr))   // snapshot ke array biasa buat dipakai .map()/.sort()/dst
+    jawir::free(arr)
+
+    wok("")
+    wok("=== jawa::buffer — buffer byte mentah ala malloc(n) ===")
+    let buf = jawa::buffer(4)
+    jawa::buffer_set(buf, 0, 0xDE)
+    jawa::buffer_set(buf, 1, 0xAD)
+    jawa::buffer_set(buf, 2, 0xBE)
+    jawa::buffer_set(buf, 3, 0xEF)
+    wok("hex:", jawa::buffer_to_hex(buf))
+    jawir::free(buf)
+
+    wok("")
+    wok("=== jawa::stats — intip pemakaian heap ===")
+    let a = jawa::alloc(1)
+    let b = jawa::alloc(2)
+    wok("alive sebelum free:", jawa::stats().alive_total)
+    jawir::free(a)
+    jawir::free(b)
+    wok("alive sesudah free:", jawa::stats().alive_total)
+
+    wok("")
+    wok("=== heap array sebagai shared state lintas goroutine ===")
+    let counter = jawa::array(1, 0)
+    let selesai = make_chan(bool)
+    spawn {
+        for i in [1,2,3,4,5] { jawa::array_set(counter, 0, jawa::array_get(counter, 0) + 1) }
+        selesai <- true
+    }
+    <-selesai
+    wok("counter setelah 5x update dari goroutine lain:", jawa::array_get(counter, 0))
+    jawir::free(counter)
+
+    wok("")
+    wok("SELESAI")
+}

@@ -1,0 +1,30 @@
+# Menjalankan suite di tiap dorongan dan tiap pull request.
+#
+# Terpisah dari `rilis.yml` dengan sengaja: yang ini harus berjalan sering dan
+# cepat, sementara yang itu cuma pada tag dan membangun semua platform.
+
+name: uji
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+
+jobs:
+  suite:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang toolchain
+        run: rustup toolchain install stable --profile minimal
+
+      - uses: Swatinem/rust-cache@v2
+
+      # `JRG_SOPAN` sengaja tidak diset: `tests/nada.rs` menguji sapaan yang
+      # variabel itu matikan.
+      - name: Suite
+        run: cargo test --release -j 2 --no-fail-fast
+
+      - name: Uji asap
+        run: sh rilis/uji_asap.sh target/release "$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"

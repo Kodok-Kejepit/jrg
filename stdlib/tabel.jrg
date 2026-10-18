@@ -1,0 +1,161 @@
+package std_tabel
+
+// `tabel` — mencetak data berkolom yang lurus.
+
+/// Tabel yang sedang disusun.
+pub struct Tabel {
+    pub kepala: array,
+    pub baris: array,
+    pub kanan: dict,
+}
+
+/// Tabel baru dengan judul kolomnya.
+pub fn baru(kepala) {
+    return Tabel { kepala: kepala, baris: [], kanan: dict::new() }
+}
+
+/// Tabel dari kumpulan dict, mengambil kolom yang disebutkan.
+/// `tabel::dari(data, ["kota", "total"])`
+pub fn dari(data, kolom) {
+    var t = Tabel { kepala: kolom, baris: [], kanan: dict::new() }
+    for _, d in data {
+        var b = []
+        for _, k in kolom { b = arr::push(b, dict::get_or(d, k, "")) }
+        t = Tabel { kepala: t.kepala, baris: arr::push(t.baris, b), kanan: t.kanan }
+    }
+    return t
+}
+
+/// Benar kalau teksnya terbaca sebagai angka — dipakai untuk memutuskan rata
+/// kanan. Tanda minus, titik dan koma ikut dihitung angka.
+fn _angka_kah(s) {
+    if len(s) == 0 { return false }
+    // `str::char_at` menjawab sebuah `rune`, dan di JRG perbandingan lintas tipe
+    // (`rune` dengan `string`) DITOLAK — jebakan yang tercatat di Fase SUNTING …
+    var ada_digit = false
+    var i = 0
+    while i < len(s) {
+        let c = str(str::char_at(s, i))
+        if str::contains("0123456789", c) { ada_digit = true }
+        else if c != "." && c != "," && c != "-" && c != " " { return false }
+        i = i + 1
+    }
+    return ada_digit
+}
+
+impl Tabel {
+    /// Tambah satu baris.
+    pub fn baris_baru(self, b) {
+        return Tabel { kepala: self.kepala, baris: arr::push(self.baris, b), kanan: self.kanan }
+    }
+
+    /// Paksa kolom ke-`i` rata kanan (angka sudah otomatis).
+    pub fn rata_kanan(self, i) {
+        return Tabel { kepala: self.kepala, baris: self.baris,
+                       kanan: dict::set(self.kanan, i, true) }
+    }
+
+    /// Berapa barisnya (tanpa kepala).
+    pub fn panjang(self) { return len(self.baris) }
+
+    /// Semua sel sebagai teks, kepala ikut di baris pertama.
+    fn _sel(self) {
+        var semua = [arr::map(self.kepala, |k| str(k))]
+        for _, b in self.baris { semua = arr::push(semua, arr::map(b, |x| str(x))) }
+        return semua
+    }
+
+    /// Lebar tiap kolom: isi TERLEBAR, termasuk judulnya.
+    fn _lebar(self, sel) {
+        var l = []
+        var k = 0
+        while k < len(self.kepala) {
+            var m = 0
+            for _, baris in sel {
+                if k < len(baris) {
+                    // Lebar TAMPIL, bukan jumlah huruf: `東京` dua huruf, empat kolom.
+                    let n = term::lebar(baris[k])
+                    if n > m { m = n }
+                }
+            }
+            l = arr::push(l, m)
+            k = k + 1
+        }
+        return l
+    }
+
+    /// Kolom ke-`k` rata kanan? Angka otomatis, sisanya menurut `rata_kanan`.
+    fn _kanan_kah(self, sel, k) {
+        if dict::has(self.kanan, k) { return true }
+        var punya = false
+        var i = 1
+        while i < len(sel) {
+            let b = sel[i]
+            if k < len(b) && len(b[k]) > 0 {
+                if !_angka_kah(b[k]) { return false }
+                punya = true
+            }
+            i = i + 1
+        }
+        return punya
+    }
+
+    fn _susun(self, baris, lebar, kanan, pemisah) {
+        var potong = []
+        var k = 0
+        while k < len(lebar) {
+            let isi = k < len(baris) $ baris[k] : ""
+            let l = lebar[k]
+            let isian = str::repeat(" ", math::max(l - term::lebar(isi), 0))
+            let sel = kanan[k] $ isian + isi : isi + isian
+            potong = arr::push(potong, sel)
+            k = k + 1
+        }
+        return str::trim_end(str::join(potong, pemisah))
+    }
+
+    /// Tabel polos: kolom dipisah dua spasi, kepala digarisbawahi.
+    pub fn teks(self) {
+        let sel = self._sel()
+        let lebar = self._lebar(sel)
+        var kanan = []
+        var k = 0
+        while k < len(lebar) { kanan = arr::push(kanan, self._kanan_kah(sel, k))  k = k + 1 }
+
+        var keluar = [self._susun(sel[0], lebar, kanan, "  ")]
+        keluar = arr::push(keluar, str::join(arr::map(lebar, |l| str::repeat("-", l)), "  "))
+        var i = 1
+        while i < len(sel) {
+            keluar = arr::push(keluar, self._susun(sel[i], lebar, kanan, "  "))
+            i = i + 1
+        }
+        return str::join(keluar, "\n")
+    }
+
+    /// Tabel bergaris, gaya yang biasa dipakai di terminal.
+    pub fn kotak(self) {
+        let sel = self._sel()
+        let lebar = self._lebar(sel)
+        var kanan = []
+        var k = 0
+        while k < len(lebar) { kanan = arr::push(kanan, self._kanan_kah(sel, k))  k = k + 1 }
+
+        let garis = "+-" + str::join(arr::map(lebar, |l| str::repeat("-", l)), "-+-") + "-+"
+        var keluar = [garis]
+        keluar = arr::push(keluar, "| " + self._susun(sel[0], lebar, kanan, " | ") + " |")
+        keluar = arr::push(keluar, garis)
+        var i = 1
+        while i < len(sel) {
+            keluar = arr::push(keluar, "| " + self._susun(sel[i], lebar, kanan, " | ") + " |")
+            i = i + 1
+        }
+        keluar = arr::push(keluar, garis)
+        return str::join(keluar, "\n")
+    }
+
+    /// Cetak langsung.
+    pub fn cetak(self) { wok(self.teks())  return self }
+
+    /// Bentuk tampilannya (`.teks()`), dipakai `wok`.
+    pub fn to_string(self) { return self.teks() }
+}

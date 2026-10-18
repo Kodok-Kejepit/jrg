@@ -1,0 +1,137 @@
+package sunting_jalan
+
+// Menjalankan, memeriksa, dan merapikan berkas lewat `jrgc`/`jrgm` yang sedang berjalan,
+// dan membaca lokasi galat dari diagnostiknya. Tidak ada yang menyentuh layar di sini.
+import "sunting/aksara"
+import "sunting/lengkap"
+
+fn angka(s) {
+    if s == "" { return false }
+    for _, c in str::chars(s) {
+        if !aksara::digit(c) { return false }
+    }
+    return true
+}
+
+/// `berkas:baris:kolom` jadi `[berkas, baris, kolom]`; nama berkas boleh memuat titik dua.
+fn lokasi(s) {
+    let b = str::split(s, ":")
+    let n = len(b)
+    if n < 3 || !angka(b[n - 2]) || !angka(b[n - 1]) { return Option::None }
+    return Option::Some([arr::join(b[:n - 2], ":"), str::to_int(b[n - 2]), str::to_int(b[n - 1])])
+}
+
+/// Lokasi tiap galat di teks diagnostik `jrgc`: `[berkas, baris, kolom, pesan]`, baris dan
+/// kolom dari 1. Galat tanpa lokasi tidak ikut — tidak ada tempat untuk dilompati.
+pub fn urai_galat(teks) {
+    var keluar = []
+    var pesan = ""
+    for _, b in str::split(teks, "\n") {
+        let t = str::trim(b)
+        if str::starts_with(t, "error") || str::starts_with(t, "peringatan") {
+            match str::find(t, ": ") {
+                Option::Some(i) => { pesan = str::slice(t, i + 2) }
+                Option::None => { pesan = t }
+            }
+        } else {
+            // Lokasi sebuah galat ada TEPAT di baris sesudah judulnya; baris lain memutusnya.
+            if str::starts_with(t, "--> ") && pesan != "" {
+                match lokasi(str::slice(t, 4)) {
+                    Option::Some(l) => { keluar = keluar + [[l[0], l[1], l[2], pesan]] }
+                    Option::None => {}
+                }
+            }
+            pesan = ""
+        }
+    }
+    return keluar
+}
+
+/// Catatan galat yang ditulis `jrgc` ke berkas `JRG_GALAT_KE`: satu galat per baris,
+/// `berkas<TAB>baris<TAB>kolom<TAB>pesan`.
+pub fn urai_catatan(teks) {
+    var keluar = []
+    for _, b in str::split(teks, "\n") {
+        let k = str::split(b, "\t")
+        if len(k) >= 4 && angka(k[1]) && angka(k[2]) && k[0] != "" {
+            keluar = keluar + [[k[0], str::to_int(k[1]), str::to_int(k[2]), arr::join(k[3:], " ")]]
+        }
+    }
+    return keluar
+}
+
+/// Path mutlak tiap galat, supaya bisa dicocokkan dengan nama penyangga.
+pub fn mutlak(galat) {
+    var keluar = []
+    for _, g in galat {
+        var nama = g[0]
+        if !str::starts_with(nama, "<") { nama = fs::abs(nama) }
+        keluar = keluar + [[nama, g[1], g[2], g[3]]]
+    }
+    return keluar
+}
+
+fn berkas_catatan() {
+    return fs::join(fs::temp_dir(), "jrgedit_galat_" + str::to_string(proses::pid()) + ".txt")
+}
+
+/// Jalankan `berkas` sambil mewarisi terminal. Menjawab `[kode, galat]`; kode -1 kalau
+/// programnya tidak bisa dijalankan sama sekali (pesannya di `galat[0][3]`).
+pub fn jalankan(berkas, vm) {
+    var args = [berkas]
+    if vm { args = args + ["--vm"] }
+    let catatan = berkas_catatan()
+    let _ = file::write(catatan, "")
+    env::set("JRG_GALAT_KE", catatan)
+    let h = proses::status(env::exe(), args)
+    env::set("JRG_GALAT_KE", "")
+    var galat = []
+    match file::read(catatan) {
+        Result::Ok(isi) => { galat = mutlak(urai_catatan(isi)) }
+        Result::Err(_) => {}
+    }
+    let _ = file::delete(catatan)
+    match h {
+        Result::Ok(kode) => { return [kode, galat] }
+        Result::Err(e) => { return [-1, [["", 0, 0, e]]] }
+    }
+}
+
+/// Periksa `berkas` tanpa menjalankannya. Menjawab `[galat, teks_diagnostik]`.
+pub fn periksa(berkas) {
+    match proses::keluaran(env::exe(), [berkas, "--periksa", "--sopan"]) {
+        Result::Ok(h) => { return [mutlak(urai_galat(h.galat)), str::trim(h.galat)] }
+        Result::Err(e) => { return [[], e] }
+    }
+}
+
+/// Penjelasan `jrgc --doc nama`, sebagai baris-baris teks.
+pub fn dok(nama) {
+    match proses::keluaran(env::exe(), ["--doc", nama]) {
+        Result::Ok(h) => { return str::split(str::trim_end(h.keluaran + h.galat), "\n") }
+        Result::Err(e) => { return [e] }
+    }
+}
+
+/// Nama fungsi bawaan untuk pelengkapan, dari biner yang sedang berjalan.
+pub fn daftar_bawaan() {
+    match proses::keluaran(env::exe(), ["--daftar-builtin"]) {
+        Result::Ok(h) => { return lengkap::dari_daftar(h.keluaran) }
+        Result::Err(_) => { return [] }
+    }
+}
+
+/// Rapikan `berkas` lewat `jrgm fmt`. Menjawab `Ok("")` atau `Err(sebab)`.
+pub fn rapikan(berkas) {
+    let jrgm = fs::join(fs::dirname(env::exe()), "jrgm")
+    if !file::exists(jrgm) { return Result::Err("`jrgm` tidak ada di sebelah `jrgc`, jadi berkas tidak bisa dirapikan") }
+    match proses::keluaran(jrgm, ["fmt", berkas]) {
+        Result::Ok(h) => {
+            if h.sukses { return Result::Ok("") }
+            let g = urai_galat(h.galat)
+            if len(g) > 0 { return Result::Err("tidak dirapikan: " + g[0][3]) }
+            return Result::Err("tidak dirapikan: " + str::trim(h.galat))
+        }
+        Result::Err(e) => { return Result::Err(e) }
+    }
+}

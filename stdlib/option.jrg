@@ -1,0 +1,107 @@
+// ============================================================================
+// JawaRustGo++ — stdlib/option.jrg
+package std_option
+
+// Penjaga argumen. Tanpa ini sebuah `option::map_or(o, 1, 5)` DITERIMA dan baru gagal waktu
+// hasilnya dipanggil — dengan caret di dalam berkas ini, menunjuk baris yang
+// tidak salah, di berkas yang pembacanya tidak pernah buka.
+fn _wajib_fungsi(nama, ke, v) {
+    let t = typeof(v)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str::to_string(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+    return true
+}
+
+/// Isi `Some`, atau hasil `f()` kalau `None`.
+pub fn unwrap_or_else(o, f) {
+    _wajib_fungsi("option::unwrap_or_else", 2, f)
+    match o {
+        Some(v) => v,
+        None    => f(),
+    }
+}
+
+/// `f(nilai)` kalau `Some`, `bawaan` kalau `None` — hasilnya nilai biasa.
+pub fn map_or(o, bawaan, f) {
+    _wajib_fungsi("option::map_or", 3, f)
+    match o {
+        Some(v) => f(v),
+        None    => bawaan,
+    }
+}
+
+/// Tetap `Some` hanya kalau isinya lolos `pred`, selain itu jadi `None`.
+pub fn filter(o, pred) {
+    _wajib_fungsi("option::filter", 2, pred)
+    match o {
+        Some(v) => if pred(v) { Some(v) } else { None },
+        None    => None,
+    }
+}
+
+/// Ubah `Option` jadi `Result`: `Some(v)` -> `Ok(v)`, `None` -> `Err(pesan)`.
+pub fn ok_or(o, pesan) {
+    match o {
+        Some(v) => Ok(v),
+        None    => Err(pesan),
+    }
+}
+
+/// `Option` di dalam `Option` jadi satu lapis.
+pub fn flatten(o) {
+    match o {
+        Some(dalam) => dalam,
+        None        => None,
+    }
+}
+
+/// Pilihan pertama yang berisi. `b` baru dihitung kalau `a` kosong.
+pub fn or_else(a, f) {
+    _wajib_fungsi("option::or_else", 2, f)
+    match a {
+        Some(v) => Some(v),
+        None    => f(),
+    }
+}
+
+/// Gabungkan dua Option jadi `Some((a, b))`, atau `None` kalau salah satu kosong.
+pub fn zip(a, b) {
+    match a {
+        Some(x) => match b {
+            Some(y) => Some((x, y)),
+            None    => None,
+        },
+        None => None,
+    }
+}
+
+/// Apakah `Some` dan isinya sama dengan `nilai`?
+pub fn contains(o, nilai) {
+    match o {
+        Some(v) => v == nilai,
+        None    => false,
+    }
+}
+
+/// `[]` kalau `None`, `[isi]` kalau `Some` — biar gampang digabung ke array.
+pub fn to_array(o) {
+    match o {
+        Some(v) => [v],
+        None    => [],
+    }
+}
+
+/// Ambil semua yang `Some` dari sebuah array Option, buang yang `None`.
+pub fn flatten_all(daftar) {
+    // `arr::push` mengembalikan array BARU (value semantics), jadi
+    // hasilnya wajib ditampung balik ke `keluar` di tiap langkah.
+    var keluar = []
+    for i in daftar {
+        match daftar[i] {
+            Some(v) => { keluar = arr::push(keluar, v) },
+            None    => {}
+        }
+    }
+    return keluar
+}

@@ -1,0 +1,83 @@
+// JawaRustGo++ — Demo: numpy lewat py::
+package main
+
+import "std/fmt"
+
+pub fn main() {
+    match py::import("numpy") {
+        Err(e) => {
+            wok("numpy belum ke-install, skip demo ini:", e)
+            wok("pasang dulu: pip install numpy")
+            return
+        }
+        Ok(_) => wok("numpy siap dipakai."),
+    }
+
+    wok("")
+    wok("=== array 1D & agregat ===")
+    match py::call("numpy", "array", [1, 2, 3, 4, 5]) {
+        Ok(v)  => wok("numpy.array([1,2,3,4,5]) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    match py::call("numpy", "sum", [1, 2, 3, 4, 5]) {
+        Ok(v)  => wok("numpy.sum(...) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    match py::call("numpy", "mean", [10.0, 20.0, 30.0]) {
+        Ok(v)  => wok("numpy.mean([10,20,30]) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    match py::call("numpy", "std", [2.0, 4.0, 4.0, 4.0, 5.0, 5.0, 7.0, 9.0]) {
+        Ok(v)  => wok("numpy.std(...) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== matrix 2D — array satu argumen, isinya nested ===")
+    match py::call("numpy", "array", [[1, 2], [3, 4]]) {
+        Ok(v)  => wok("matrix 2x2 =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== dot product — dua array, DUA argumen posisional terpisah ===")
+    match py::call("numpy", "dot", [1, 2, 3], [4, 5, 6]) {
+        Ok(v)  => wok("numpy.dot([1,2,3], [4,5,6]) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== linspace — beberapa argumen posisional terpisah (bukan 1 array) ===")
+    match py::call("numpy", "linspace", 0.0, 1.0, 5) {
+        Ok(v)  => wok("numpy.linspace(0.0, 1.0, 5) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== py::call_kw — sum dengan axis= di matrix 2D ===")
+    match py::call_kw("numpy", "sum", [[[1, 2], [3, 4]]], [["axis", 0]]) {
+        Ok(v)  => wok("numpy.sum(matrix, axis=0) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    match py::call_kw("numpy", "sum", [[[1, 2], [3, 4]]], [["axis", 1]]) {
+        Ok(v)  => wok("numpy.sum(matrix, axis=1) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== py::call_kw — round dengan decimals= ===")
+    match py::call_kw("numpy", "round", [3.14159265], [["decimals", 2]]) {
+        Ok(v)  => wok("numpy.round(3.14159265, decimals=2) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== setelah py::call, numpy juga langsung kepake di py::eval ===")
+    match py::eval("numpy.array([1,2,3]).sum()") {
+        Ok(v)  => wok("numpy.array([1,2,3]).sum() lewat eval =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("Selesai — array, agregat, matrix, dot product, dan kwargs numpy semua kepake dari JRG.")
+}

@@ -1,0 +1,100 @@
+package main
+
+// Konformansi: string, rune, dan template literal `«...»`.
+
+struct Titik { pub x: int, pub y: int }
+
+fn kuadrat(n: int) -> int { return n * n }
+
+pub fn main() {
+    // ── panjang dihitung per karakter, bukan per byte ───────────────────
+    assert_eq("halo".len(), 4)
+    assert_eq("héllo".len(), 5)          // é 2 byte, tetap 1 karakter
+    assert_eq("日本語".len(), 3)          // masing-masing 3 byte
+    assert_eq("".len(), 0)
+
+    // ── index mengembalikan rune, juga per karakter ─────────────────────
+    assert_eq("halo"[0], 'h')
+    assert_eq("halo"[3], 'o')
+    assert_eq("日本語"[1], '本')
+
+    // index negatif menghitung dari belakang
+    assert_eq("halo"[-1], 'o')
+    assert_eq("halo"[-4], 'h')
+    assert_eq("日本語"[-1], '語')
+
+    // ── slice juga per karakter ─────────────────────────────────────────
+    assert_eq("halo dunia"[0:4], "halo")
+    assert_eq("halo dunia"[5:10], "dunia")
+    assert_eq("日本語です"[1:3], "本語")
+    assert_eq("halo"[0:0], "")           // potongan kosong yang sah
+    assert_eq("halo"[4:4], "")           // di ujung, masih sah
+
+    // ── template literal: bagian teks saja ──────────────────────────────
+    assert_eq(«halo», "halo")
+    assert_eq(«», "")
+    assert_eq(«baris\nbaris», "baris\nbaris")
+
+    // ── interpolasi nilai ───────────────────────────────────────────────
+    let nama = "Sarah"
+    let umur = 21
+    assert_eq(«halo ${nama}», "halo Sarah")
+    assert_eq(«${nama} umur ${umur}», "Sarah umur 21")
+    assert_eq(«${umur}», "21")
+
+    // ekspresi apa pun, bukan cuma variabel
+    assert_eq(«${1 + 2 * 3}», "7")
+    assert_eq(«${kuadrat(5)}», "25")
+    assert_eq(«${"teks"}», "teks")
+
+    // ── bentuknya sama dengan yang dicetak `wok` ────────────────────────
+    let xs = [1, 2, 3]
+    assert_eq(«${xs}», "[1, 2, 3]")
+    assert_eq(«${true}», "true")
+    assert_eq(«${nil}», "nil")
+    assert_eq(«${3.5}», "3.5")
+    assert_eq(«${1.0}», "1.0")           // float bulat tetap tampak float
+
+    let t = Titik { x: 1, y: 2 }
+    assert_eq(«${t.x},${t.y}», "1,2")
+
+    // ── `{` di dalam interpolasi tidak menutup interpolasinya ───────────
+    let d = { "a": 1, "b": 2 }
+    assert_eq(«${d["a"]}», "1")
+    assert_eq(«${ { "k": 9 }["k"] }», "9")
+    assert_eq(«${ if umur > 18 { "dewasa" } else { "bocah" } }», "dewasa")
+
+    // ── template bersarang di dalam interpolasi ─────────────────────────
+    assert_eq(«luar ${ «dalam ${1 + 1}» }», "luar dalam 2")
+
+    // ── pembatas template bisa di-escape ────────────────────────────────
+    assert_eq(«\«», "«")
+    assert_eq(«\»», "»")
+    assert_eq(«harga \$100», "harga $100")
+    assert_eq(«\${bukan interpolasi}», "${bukan interpolasi}")
+
+    // ── template adalah ekspresi biasa ──────────────────────────────────
+    let pesan = «halo ${nama}»
+    assert_eq(pesan.len(), 10)
+    assert_eq(pesan.to_uppercase(), "HALO SARAH")
+    let daftar = [«a${1}», «b${2}»]
+    assert_eq(daftar[0], "a1")
+    assert_eq(daftar[1], "b2")
+
+    // template dari dalam fungsi
+    assert_eq(sapa("Budi"), "Halo, Budi!")
+
+    // ── operasi string dasar tetap per karakter ─────────────────────────
+    assert_eq("halo".to_uppercase(), "HALO")
+    assert_eq("HALO".to_lowercase(), "halo")
+    assert_eq("  spasi  ".trim(), "spasi")
+    assert_eq("a,b,c".split(",").len(), 3)
+    assert_eq("halo".contains("al"), true)
+    assert_eq("halo" + " " + "dunia", "halo dunia")
+
+    wok("strings: ok")
+}
+
+fn sapa(siapa: string) -> string {
+    return «Halo, ${siapa}!»
+}

@@ -1,0 +1,60 @@
+package main
+
+// php_ffi_demo.jrg — memanggil PHP dari JRG.
+// Butuh `php` 8.0 ke atas di PATH. Interpreter saja: `--vm` menolaknya
+// dengan alasannya, sama seperti `py::` dan `js::`.
+
+fn demo() {
+    wok("=== php::eval — nilai sebuah ekspresi ===")
+    wok("1+1        :", php::eval("1 + 1")?)
+    wok("float      :", php::eval("[2.0, 1 / 3, INF]")?)
+    wok("array      :", php::eval("array_map(fn($x) => $x * 2, [1, 2, 3])")?)
+    wok("assoc      :", php::eval("['nama' => 'Ani', 'umur' => 21]")?)
+
+    wok("\n=== php::exec — variabel dan fungsi bertahan ===")
+    php::exec("$pajak = 0.11; function harga_akhir($x) { global $pajak; return round($x * (1 + $pajak), 2); }")?
+    wok("harga_akhir:", php::call("harga_akhir", 250000)?)
+    wok("$pajak     :", php::eval("$pajak")?)
+
+    wok("\n=== fungsi JRG sebagai callback PHP ===")
+    wok("array_map  :", php::call("array_map", |x| x * x, [1, 2, 3, 4])?)
+    let daftar = php::ref("['kiwi', 'apel', 'durian']")?
+    php::call("usort", daftar, |a, b| str::len(a) - str::len(b))?
+    wok("usort      :", php::to_jrg(daftar)?)
+
+    wok("\n=== objek PHP sebagai handle ===")
+    let t = php::new("DateTimeImmutable", "2024-02-28")?
+    let besok = php::ref_method(t, "modify", "+1 day")?
+    wok("typeof     :", typeof(t))
+    wok("besok      :", besok.format("l, d F Y")?)
+    wok("kabisat?   :", besok.format("L")?)
+
+    wok("\n=== argumen bernama (PHP 8) ===")
+    wok("str_pad    :", php::call_kw("str_pad", ["42"], {"length": 6, "pad_string": "0", "pad_type": 0})?)
+
+    wok("\n=== templat PHP jadi teks ===")
+    let tpl = "<ul><?php foreach ($buah as $b): ?><li><?= htmlspecialchars($b) ?></li><?php endforeach; ?></ul>"
+    wok(php::render_str(tpl, {"buah": ["apel", "<jeruk>"]})?)
+
+    wok("\n=== galat PHP jadi Err, bukan false/null diam-diam ===")
+    match php::call("file_get_contents", "/berkas/yang/tidak/ada") {
+        Ok(v) => wok("isi:", v),
+        Err(e) => wok("Err:", e),
+    }
+    match php::call("sort", [3, 1, 2]) {
+        Ok(v) => wok("sort:", v),
+        Err(e) => wok("Err:", e),
+    }
+    return Ok(0)
+}
+
+pub fn main() {
+    if !php::tersedia() {
+        wok("`php` tidak ada di mesin ini — demo dilewati")
+        return
+    }
+    match demo() {
+        Ok(_) => wok("\nselesai"),
+        Err(e) => wok("GAGAL:", e),
+    }
+}

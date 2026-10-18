@@ -1,0 +1,117 @@
+package sunting_berkas
+
+// Membaca dan menulis berkas untuk editor. Tidak ada yang melempar di sini: tiap kegagalan
+// jadi `Err(pesan)` yang ditampilkan di baris pesan — editor yang mati saat menyimpan
+// membawa serta semua yang belum tersimpan.
+import "sunting/penyangga"
+
+// Di atas ini berkasnya ditolak: tiap ketukan menyalin-saat-tulis array barisnya.
+const MAKS_BYTE = 20000000
+
+/// Path yang enak dibaca: relatif terhadap direktori kerja kalau ada di dalamnya.
+pub fn ringkas(nama) {
+    if nama == "" { return "(belum bernama)" }
+    let kerja = fs::cwd() + "/"
+    if str::starts_with(nama, kerja) { return str::slice(nama, str::len(kerja)) }
+    return nama
+}
+
+/// Seperti `ringkas`, tapi berkas yang belum bernama menjawab teks kosong.
+pub fn ringkas_atau_kosong(nama) {
+    if nama == "" { return "" }
+    return ringkas(nama)
+}
+
+/// Pecah teks berkas jadi baris. Menjawab `[baris, crlf]`: akhir baris Windows dikenali
+/// supaya ditulis kembali apa adanya, dan baris kosong sesudah newline terakhir dibuang.
+pub fn pecah(teks) {
+    let crlf = str::contains(teks, "\r\n")
+    var baris = str::split(teks, "\n")
+    if len(baris) > 0 && baris[len(baris) - 1] == "" { baris = baris[:len(baris) - 1] }
+    if crlf {
+        var bersih = []
+        for _, b in baris {
+            if str::ends_with(b, "\r") { bersih = bersih + [str::slice(b, 0, str::len(b) - 1)] }
+            else { bersih = bersih + [b] }
+        }
+        baris = bersih
+    }
+    return [baris, crlf]
+}
+
+/// Buka `nama` jadi penyangga. Berkas yang belum ada jadi penyangga kosong bernama itu
+/// (dibuat saat disimpan); direktori, berkas biner, dan berkas raksasa ditolak.
+pub fn buka(nama) {
+    if nama == "" { return Result::Ok(penyangga::baru("", [])) }
+    if fs::is_dir(nama) { return Result::Err("`" + nama + "` adalah direktori") }
+    if !file::exists(nama) { return Result::Ok(penyangga::baru(nama, [])) }
+    if fs::size(nama) > MAKS_BYTE {
+        return Result::Err("`" + nama + "` terlalu besar untuk disunting di sini (lebih dari 20 MB)")
+    }
+    match file::read(nama) {
+        Result::Ok(teks) => {
+            if str::contains(teks, "\u0000") {
+                return Result::Err("`" + nama + "` berkas biner, bukan teks")
+            }
+            let h = pecah(teks)
+            var p = penyangga::baru(nama, h[0])
+            p.crlf = h[1]
+            // Yang tidak bisa ditulis (`/proc/version`, izin 0444) ditandai SEJAK DIBUKA, bukan
+            // ditemukan saat menyimpan sesudah semua ketikan masuk.
+            p.hanya_baca = !fs::is_writable(nama)
+            return Result::Ok(p)
+        }
+        Result::Err(e) => {
+            if str::contains(e, "valid UTF-8") {
+                return Result::Err("`" + nama + "` bukan teks UTF-8 (berkas biner?)")
+            }
+            return Result::Err(sebab(e))
+        }
+    }
+}
+
+/// Bagian pesan sistem sesudah nama fungsinya — yang berguna bagi pembaca.
+fn sebab(e) {
+    match str::find(e, ": ") {
+        Option::Some(i) => { return str::slice(e, i + 2) }
+        Option::None => { return e }
+    }
+}
+
+/// Tulis penyangga ke berkasnya. Menjawab `Ok(penyangga)` yang sudah bersih, atau
+/// `Err(pesan)` dengan penyangga yang tetap utuh di tangan pemanggil.
+pub fn simpan(p) {
+    if p.nama == "" { return Result::Err("berkas ini belum bernama") }
+    match file::write(p.nama, penyangga::isi_teks(p)) {
+        Result::Ok(_) => {
+            var x = p
+            x.kotor = false
+            x.kelompok = ""
+            return Result::Ok(x)
+        }
+        Result::Err(e) => { return Result::Err("tidak tersimpan: " + sebab(e)) }
+    }
+}
+
+/// Isi direktori sebagai `[label, path, direktori?]`: `..` dulu, lalu direktori, lalu
+/// berkas, masing-masing menurut abjad. Yang berawalan titik disembunyikan.
+pub fn isi_direktori(dir) {
+    match file::list_dir(dir) {
+        Result::Err(e) => { return Result::Err(sebab(e)) }
+        Result::Ok(nama) => {
+            var map = []
+            var biasa = []
+            for _, n in arr::sort(nama) {
+                if !str::starts_with(n, ".") {
+                    let path = fs::join(dir, n)
+                    if fs::is_dir(path) { map = map + [[n + "/", path, true]] }
+                    else { biasa = biasa + [[n, path, false]] }
+                }
+            }
+            let induk = fs::dirname(fs::abs(dir))
+            var kepala = []
+            if induk != "" && induk != fs::abs(dir) { kepala = [["../", induk, true]] }
+            return Result::Ok(kepala + map + biasa)
+        }
+    }
+}

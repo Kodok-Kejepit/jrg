@@ -1,0 +1,48 @@
+package main
+
+import "sunting/lengkap"
+
+fn test_awalan_mengenali_nama_dan_namespace() {
+    assert_eq(lengkap::awalan("let x = jum", 11), ["jum", 8])
+    assert_eq(lengkap::awalan("wok(str::le", 11), ["str::le", 4])
+    assert_eq(lengkap::awalan("a + ", 4), ["", 4])
+    assert_eq(lengkap::awalan("abc", 0), ["", 0])
+    // Kolom di luar baris dijepit, bukan galat.
+    assert_eq(lengkap::awalan("ab", 9), ["ab", 0])
+    // Satu titik dua bukan pemisah namespace.
+    assert_eq(lengkap::awalan("x: int", 6), ["int", 3])
+}
+
+fn test_kata_berkas_terdekat_dulu_dan_tanpa_ganda() {
+    let b = ["fn hitung_total(daftar) {", "    let jumlah = 0", "    return jumlah", "}", "let hasil = hitung_total(xs)"]
+    let k = lengkap::kata_berkas(b, 2)
+    // Dari baris kursor ke atas dulu.
+    assert_eq(k[0], "return")
+    assert_eq(k[1], "jumlah")
+    assert(arr::contains(k, "hitung_total"))
+    assert(arr::contains(k, "hasil"))
+    // `fn` dan `xs` kurang dari tiga huruf.
+    assert(!arr::contains(k, "fn"))
+    assert(!arr::contains(k, "xs"))
+    assert_eq(len(arr::unique(k)), len(k))
+}
+
+fn test_calon_berurutan_dan_terbatas() {
+    let kata = ["jumlah", "jumlah_baru", "judul"]
+    let bawaan = ["str::", "str::len", "str::lower", "wok"]
+    assert_eq(lengkap::calon("jum", kata, bawaan, 10), ["jumlah", "jumlah_baru"])
+    // Awalan yang SAMA persis dengan sebuah kata tidak ditawarkan lagi.
+    assert_eq(lengkap::calon("jumlah", kata, bawaan, 10), ["jumlah_baru"])
+    assert_eq(lengkap::calon("str::l", kata, bawaan, 10), ["str::len", "str::lower"])
+    assert_eq(lengkap::calon("st", kata, bawaan, 10), ["str", "string", "struct", "str::", "str::len", "str::lower"])
+    assert_eq(lengkap::calon("st", kata, bawaan, 2), ["str", "string"])
+    assert_eq(lengkap::calon("", kata, bawaan, 10), [])
+    assert_eq(lengkap::calon("zzz", kata, bawaan, 10), [])
+    // Tanpa calon yang peka huruf, huruf besar-kecil diabaikan.
+    assert_eq(lengkap::calon("JUD", kata, bawaan, 10), ["judul"])
+}
+
+fn test_daftar_bawaan_memuat_namespace() {
+    let d = lengkap::dari_daftar("wok\nstr::len\nstr::upper\narr::__metode_fill\n\nmath::abs\n")
+    assert_eq(d, ["math::", "str::", "wok", "str::len", "str::upper", "math::abs"])
+}

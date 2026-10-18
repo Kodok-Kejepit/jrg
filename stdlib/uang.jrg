@@ -1,0 +1,213 @@
+package std_uang
+
+// `uang` — hitungan uang yang TIDAK memakai float.
+
+/// Sejumlah uang: `unit` adalah nilainya dikali 10^`desimal`.
+/// Rp 19.999,50 dengan dua desimal berarti `unit = 1999950`.
+pub struct Uang {
+    pub unit: int,
+    pub desimal: int,
+}
+
+fn _pangkat10(n) {
+    var p = 1
+    var i = 0
+    while i < n { p = p * 10  i = i + 1 }
+    return p
+}
+
+fn _samakan(siapa, a, b) {
+    if a.desimal != b.desimal {
+        panik(siapa + ": jumlah desimalnya beda (" + str(a.desimal) + " lawan "
+              + str(b.desimal) + ") — samakan dulu dengan `.ke_desimal(n)`")
+    }
+}
+
+// ── Membuat ───────────────────────────────────────────────────────────────
+
+/// Dari angka biasa, dibulatkan ke `desimal` angka di belakang koma.
+/// `uang::dari(19.99, 2)` menyimpan `1999`.
+pub fn dari(nilai, desimal) {
+    if desimal < 0 { panik("uang::dari: desimalnya tidak boleh negatif, dapat " + str(desimal)) }
+    let p = _pangkat10(desimal)
+    let t = typeof(nilai)
+    if t == "int" { return Uang { unit: nilai * p, desimal: desimal } }
+    if t == "float" {
+        // Dibulatkan SEKALI di sini, lalu tidak pernah menyentuh float lagi.
+        return Uang { unit: math::round(nilai * (p as float)) as int, desimal: desimal }
+    }
+    panik("uang::dari: butuh angka, dapat `" + t + "`")
+}
+
+/// Rupiah: dua desimal, ejaan Indonesia (titik ribuan, koma desimal).
+pub fn rupiah(nilai) { return dari(nilai, 2) }
+
+/// Langsung dari satuan terkecilnya — `uang::unit(1999, 2)` berarti 19,99.
+/// Dipakai kalau angkanya memang sudah dalam sen, bukan dalam rupiah.
+pub fn unit(u, desimal) { return Uang { unit: u, desimal: desimal } }
+
+/// Nol dengan jumlah desimal yang sama.
+pub fn nol(desimal) { return Uang { unit: 0, desimal: desimal } }
+
+/// Jumlahkan sekumpulan `Uang`. Kumpulan kosong butuh `desimal` supaya
+/// jawabannya punya bentuk yang jelas.
+pub fn jumlah(daftar, desimal) {
+    var t = Uang { unit: 0, desimal: desimal }
+    for _, u in daftar { t = t.tambah(u) }
+    return t
+}
+
+impl Uang {
+    // ── Hitung ────────────────────────────────────────────────────────────
+
+    /// Dijumlah. Jumlah desimalnya harus sama — yang beda ditolak, bukan disamakan diam-diam.
+    pub fn tambah(self, lain) {
+        _samakan("uang.tambah", self, lain)
+        return Uang { unit: self.unit + lain.unit, desimal: self.desimal }
+    }
+
+    /// Dikurangi. Jumlah desimalnya harus sama.
+    pub fn kurang(self, lain) {
+        _samakan("uang.kurang", self, lain)
+        return Uang { unit: self.unit - lain.unit, desimal: self.desimal }
+    }
+
+    /// Dikali bilangan biasa. Kalau pengalinya pecahan, hasilnya dibulatkan ke
+    /// satuan terkecil — dan itu disebutkan di sini supaya tidak jadi kejutan.
+    pub fn kali(self, n) {
+        let t = typeof(n)
+        if t == "int" { return Uang { unit: self.unit * n, desimal: self.desimal } }
+        if t == "float" {
+            return Uang { unit: math::round((self.unit as float) * n) as int, desimal: self.desimal }
+        }
+        panik("uang.kali: butuh angka, dapat `" + t + "`")
+    }
+
+    /// Dibagi bilangan biasa, dibulatkan ke satuan terkecil. Sisanya HILANG —
+    /// untuk membagi tanpa kehilangan sepeser pun pakai `bagi_rata`.
+    pub fn bagi(self, n) {
+        if typeof(n) == "int" && n == 0 { panik("uang.bagi: tidak bisa dibagi nol") }
+        let d = typeof(n) == "int" $ (n as float) : n
+        if d == 0.0 { panik("uang.bagi: tidak bisa dibagi nol") }
+        return Uang { unit: math::round((self.unit as float) / d) as int, desimal: self.desimal }
+    }
+
+    /// Bagi untuk `n` penerima TANPA kehilangan sepeser pun.
+    pub fn bagi_rata(self, n) {
+        if n <= 0 { panik("uang.bagi_rata: jumlah penerimanya harus lebih dari nol, dapat " + str(n)) }
+        let dasar = self.unit / n
+        let sisa = self.unit - dasar * n
+        var keluar = []
+        var i = 0
+        while i < n {
+            let tambahan = i < sisa $ 1 : 0
+            keluar = arr::push(keluar, Uang { unit: dasar + tambahan, desimal: self.desimal })
+            i = i + 1
+        }
+        return keluar
+    }
+
+    /// Sekian persen dari nilai ini. `.persen(15)` berarti 15%.
+    pub fn persen(self, p) {
+        let d = typeof(p) == "int" $ (p as float) : p
+        return Uang { unit: math::round((self.unit as float) * d / 100.0) as int, desimal: self.desimal }
+    }
+
+    /// Lawannya: yang positif jadi negatif, dan sebaliknya.
+    pub fn negatif(self) { return Uang { unit: 0 - self.unit, desimal: self.desimal } }
+    /// Nilainya tanpa tanda minus.
+    pub fn mutlak(self) { return Uang { unit: math::abs(self.unit), desimal: self.desimal } }
+
+    // ── Membandingkan ─────────────────────────────────────────────────────
+
+    /// Benar kalau nilainya sama persis.
+    pub fn sama(self, lain) { _samakan("uang.sama", self, lain)  return self.unit == lain.unit }
+    /// Benar kalau nilainya lebih besar.
+    pub fn lebih_dari(self, lain) { _samakan("uang.lebih_dari", self, lain)  return self.unit > lain.unit }
+    /// Benar kalau nilainya lebih kecil.
+    pub fn kurang_dari(self, lain) { _samakan("uang.kurang_dari", self, lain)  return self.unit < lain.unit }
+    /// Benar kalau nilainya nol.
+    pub fn nol_kah(self) { return self.unit == 0 }
+    /// Benar kalau nilainya di bawah nol.
+    pub fn minus_kah(self) { return self.unit < 0 }
+
+    /// Untuk `arr::sort_by_key` — mengurutkan sekumpulan `Uang`.
+    pub fn kunci(self) { return self.unit }
+
+    // ── Mengubah bentuk ───────────────────────────────────────────────────
+
+    /// Nilainya sebagai float. Dipakai untuk menampilkan atau menyerahkan ke
+    /// fungsi lain — JANGAN dipakai untuk menghitung lagi, karena di situlah
+    /// ketelitiannya hilang.
+    pub fn ke_float(self) { return (self.unit as float) / (_pangkat10(self.desimal) as float) }
+
+    /// Bagian bulatnya saja, dibulatkan ke bawah.
+    pub fn bulat(self) { return self.unit / _pangkat10(self.desimal) }
+
+    /// Ganti jumlah desimalnya. Mengecil berarti dibulatkan.
+    pub fn ke_desimal(self, d) {
+        if d < 0 { panik("uang.ke_desimal: desimalnya tidak boleh negatif, dapat " + str(d)) }
+        if d == self.desimal { return self }
+        if d > self.desimal {
+            return Uang { unit: self.unit * _pangkat10(d - self.desimal), desimal: d }
+        }
+        let p = _pangkat10(self.desimal - d)
+        return Uang { unit: math::round((self.unit as float) / (p as float)) as int, desimal: d }
+    }
+
+    // ── Menampilkan ───────────────────────────────────────────────────────
+
+    /// Angka apa adanya: `19.99`, dengan desimal selalu penuh.
+    pub fn teks(self) {
+        let p = _pangkat10(self.desimal)
+        let minus = self.unit < 0
+        let u = math::abs(self.unit)
+        let depan = str(u / p)
+        if self.desimal == 0 { return (minus $ "-" : "") + depan }
+        let belakang = str::pad_left(str(u % p), self.desimal, "0")
+        return (minus $ "-" : "") + depan + "." + belakang
+    }
+
+    /// Ejaan Indonesia: titik untuk ribuan, koma untuk desimal.
+    /// `uang::rupiah(1999950.5).rupiah()` menjawab `Rp 1.999.950,50`.
+    pub fn rupiah(self) {
+        let p = _pangkat10(self.desimal)
+        let minus = self.unit < 0
+        let u = math::abs(self.unit)
+        var depan = _kelompok(str(u / p), ".")
+        if self.desimal > 0 {
+            depan = depan + "," + str::pad_left(str(u % p), self.desimal, "0")
+        }
+        return (minus $ "-Rp " : "Rp ") + depan
+    }
+
+    /// Ejaan internasional: koma untuk ribuan, titik untuk desimal.
+    pub fn internasional(self, mata) {
+        let p = _pangkat10(self.desimal)
+        let minus = self.unit < 0
+        let u = math::abs(self.unit)
+        var depan = _kelompok(str(u / p), ",")
+        if self.desimal > 0 {
+            depan = depan + "." + str::pad_left(str(u % p), self.desimal, "0")
+        }
+        return (minus $ "-" : "") + mata + depan
+    }
+
+    /// Bentuk tampilannya (`.teks()`), dipakai `wok`.
+    pub fn to_string(self) { return self.teks() }
+}
+
+/// Sisipkan pemisah ribuan tiap tiga angka dari belakang.
+fn _kelompok(s, pemisah) {
+    let n = len(s)
+    if n <= 3 { return s }
+    var keluar = ""
+    var i = 0
+    while i < n {
+        let sisa = n - i
+        if i > 0 && sisa % 3 == 0 { keluar = keluar + pemisah }
+        keluar = keluar + str::char_at(s, i)
+        i = i + 1
+    }
+    return keluar
+}

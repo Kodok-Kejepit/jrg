@@ -1,0 +1,240 @@
+package main
+
+// ============================================================================
+// Konformansi copy-on-write — ditulis untuk jalan di DUA backend.
+
+struct Titik { pub x: int, pub y: int }
+struct Kotak { pub p: Titik, pub isi: []int }
+
+fn ubah_dalam(a) { a[0][0] = 777; return a }
+fn ubah_field(k) { k.p.x = 777; return k }
+
+var global_a = [1, 2]
+fn baca_global() { return global_a }
+
+pub fn main() {
+    // ── A. berbagi lalu menulis ─────────────────────────────────────────
+
+    // A1. bersarang dua lapis
+    var a = [[1, 2], [3, 4]]
+    var b = a
+    b[0][0] = 99
+    assert_eq(a[0][0], 1)
+    assert_eq(b[0][0], 99)
+
+    // A2. bersarang tiga lapis — memisahkan akar saja tidak cukup
+    var t3 = [[[1]]]
+    var u3 = t3
+    u3[0][0][0] = 42
+    assert_eq(t3[0][0][0], 1)
+    assert_eq(u3[0][0][0], 42)
+
+    // A3. elemen dalam diambil keluar lalu diubah
+    var luar = [[1, 2], [3, 4]]
+    var dalam = luar[0]
+    dalam[0] = 55
+    assert_eq(luar[0][0], 1)
+    assert_eq(dalam[0], 55)
+
+    // A4. lewat pemanggilan fungsi — argumen tidak boleh beralias
+    var c = [[1, 2]]
+    let hasil = ubah_dalam(c)
+    assert_eq(c[0][0], 1)
+    assert_eq(hasil[0][0], 777)
+
+    // A5. struct di dalam struct, dan array di dalam struct
+    var k1 = Kotak { p: Titik { x: 1, y: 2 }, isi: [9, 9] }
+    var k2 = k1
+    k2.p.x = 88
+    k2.isi[0] = 88
+    assert_eq(k1.p.x, 1)
+    assert_eq(k1.isi[0], 9)
+    assert_eq(k2.p.x, 88)
+    assert_eq(k2.isi[0], 88)
+
+    // A6. struct lewat fungsi
+    var k3 = Kotak { p: Titik { x: 1, y: 2 }, isi: [0] }
+    let k4 = ubah_field(k3)
+    assert_eq(k3.p.x, 1)
+    assert_eq(k4.p.x, 777)
+
+    // A7. array diambil keluar dari struct
+    var s1 = Kotak { p: Titik { x: 0, y: 0 }, isi: [1, 2, 3] }
+    var arr_keluar = s1.isi
+    arr_keluar[0] = 66
+    assert_eq(s1.isi[0], 1)
+    assert_eq(arr_keluar[0], 66)
+
+    // A8. dict berbagi lalu ditulis
+    var d1 = { "k": [1, 2] }
+    var d2 = d1
+    d2["k"][0] = 33
+    assert_eq(d1["k"][0], 1)
+    assert_eq(d2["k"][0], 33)
+
+    // A9. array di dalam tuple tetap terbaca sama
+    var tp = ([1, 2], 3)
+    var tq = tp
+    assert_eq(tp.0[0], 1)
+    assert_eq(tq.0[0], 1)
+
+    // A10. banyak pemegang, satu menulis
+    var asal = [1, 2, 3]
+    var p1 = asal
+    var p2 = asal
+    var p3 = asal
+    p2[0] = 100
+    assert_eq(asal[0], 1)
+    assert_eq(p1[0], 1)
+    assert_eq(p2[0], 100)
+    assert_eq(p3[0], 1)
+
+    // A11. binding tertangkap closure — SATU-SATUNYA alias yang disengaja.
+    //      Perubahannya terlihat lewat sel bersama, tapi salinan biasa
+    //      tetap tidak ikut berubah.
+    var tangkap = [1, 2, 3]
+    let tulis = || { tangkap[0] = 500 }
+    var salinan = tangkap
+    tulis()
+    assert_eq(tangkap[0], 500)
+    assert_eq(salinan[0], 1)
+
+    // A12. array berisi struct
+    var daftar = [Titik { x: 1, y: 1 }, Titik { x: 2, y: 2 }]
+    var daftar2 = daftar
+    daftar2[0].x = 900
+    assert_eq(daftar[0].x, 1)
+    assert_eq(daftar2[0].x, 900)
+
+    // A13. menulis berulang ke binding yang sama selagi ada pemegang lain
+    var besar = range(50)
+    var pegang = besar
+    var i = 0
+    while i < 50 { besar[i] = i * 2; i = i + 1 }
+    assert_eq(besar[49], 98)
+    assert_eq(pegang[49], 49)
+
+    // ── B. menumbuhkan koleksi ──────────────────────────────────────────
+
+    // B1. sisi kanan menyebut nama yang sama
+    var g1 = [1, 2]
+    g1 = g1 + g1
+    assert_eq(len(g1), 4)
+    assert_eq(g1[0], 1)
+    assert_eq(g1[3], 2)
+
+    // B2. sisi kanan memanggil closure yang MENANGKAP nama itu
+    var g2 = [1]
+    let lihat_g2 = || g2
+    g2 = g2 + lihat_g2()
+    assert_eq(len(g2), 2)
+    assert_eq(g2[1], 1)
+
+    // B3. closure inline yang menyebut nama itu di badannya
+    var g3 = [7]
+    g3 = g3 + (|| g3)()
+    assert_eq(len(g3), 2)
+    assert_eq(g3[0], 7)
+
+    // B4. binding yang ditangkap closure, ditumbuhkan dari dalam closure
+    var g4 = [1]
+    let tumbuh_g4 = || { g4 = g4 + [99] }
+    tumbuh_g4()
+    tumbuh_g4()
+    assert_eq(len(g4), 3)
+    assert_eq(g4[2], 99)
+
+    // B5. global ditumbuhkan sementara fungsi lain membacanya
+    global_a = global_a + baca_global()
+    assert_eq(len(global_a), 4)
+    assert_eq(global_a[0], 1)
+
+    // B6. bentuk `+=`
+    var g6 = [1]
+    g6 += [2]
+    g6 += [3, 4]
+    assert_eq(len(g6), 4)
+    assert_eq(g6[3], 4)
+
+    // B7. `+=` yang sisi kanannya dirinya sendiri
+    var g7 = [5]
+    g7 += g7
+    assert_eq(len(g7), 2)
+    assert_eq(g7[1], 5)
+
+    // B8. pemegang lama TIDAK ikut tumbuh
+    var g8 = [1, 2]
+    var pegang8 = g8
+    g8 = g8 + [3]
+    assert_eq(len(g8), 3)
+    assert_eq(len(pegang8), 2)
+
+    // B9. teks lewat jalur yang sama
+    var s = "a"
+    s = s + "b"
+    s += "c"
+    assert_eq(s, "abc")
+    var t = "x"
+    t = t + t
+    assert_eq(t, "xx")
+
+    // B10. bukan koleksi — `n = n + 1` harus tetap benar
+    var n = 0
+    var j = 0
+    while j < 5 { n = n + 1; j = j + 1 }
+    assert_eq(n, 5)
+
+    // B11. sisi kanan berefek samping harus jalan TEPAT SEKALI
+    var jejak = []
+    var g11 = [0]
+    let satu = || { jejak = jejak + ["x"]; return [1] }
+    g11 = g11 + satu()
+    assert_eq(len(g11), 2)
+    assert_eq(len(jejak), 1)
+
+    // B12. menumbuhkan elemen bersarang, pemegang lama tetap utuh
+    var l12 = [[1]]
+    var salin12 = l12
+    l12[0] = l12[0] + [2]
+    assert_eq(len(l12[0]), 2)
+    assert_eq(len(salin12[0]), 1)
+
+    // B13. tumbuh besar — hasilnya harus UTUH, bukan sekadar cepat
+    var b13 = []
+    var k = 0
+    while k < 2000 { b13 = b13 + [k]; k = k + 1 }
+    assert_eq(len(b13), 2000)
+    assert_eq(b13[0], 0)
+    assert_eq(b13[1999], 1999)
+
+    // ── C. teks yang tumbuh di tempat tetap bernilai ───────────────────
+    var c1 = "a"
+    let c1_lama = c1
+    c1 = c1 + "b"
+    c1 += "c"
+    assert_eq(c1_lama, "a")
+    assert_eq(c1, "abc")
+    assert_eq(teks_k() + teks_k() + teks_k(), "kxkxkx")
+    let c3 = || c1
+    c1 += "d"
+    assert_eq(c3(), "abcd")
+    var c4 = "uv"
+    c4 = c4 + c4
+    c4 += c4
+    assert_eq(c4, "uvuvuvuv")
+    let c5 = "q"
+    assert_eq(tumbuh_teks(c5), "qx")
+    assert_eq(c5, "q")
+    var c6 = "n"
+    c6 = c6 + 1 + true
+    assert_eq(c6, "n1true")
+
+    wok("semantik copy-on-write utuh")
+}
+
+// Literal yang ditumbuhkan tidak boleh berubah antar-panggilan: konstantanya dipegang chunk.
+fn teks_k() { var s = "k"
+    s = s + "x"
+    return s }
+fn tumbuh_teks(p) { p += "x"
+    return p }

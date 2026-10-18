@@ -1,0 +1,78 @@
+// JawaRustGo++ — Demo: Python FFI (py::)
+package main
+
+import "std/fmt"
+
+pub fn main() {
+    wok("=== py::eval: evaluasi satu ekspresi Python ===")
+    match py::eval("2 ** 10") {
+        Ok(v)  => wok("2 ** 10 =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== py::exec: jalankan statement Python (mis. import) ===")
+    match py::exec("import statistics") {
+        Ok(_)  => wok("import statistics: sukses"),
+        Err(e) => wok("import gagal:", e),
+    }
+
+    wok("")
+    wok("=== py::call: panggil fungsi Python dengan argumen dari JRG ===")
+    // statistics.mean() menerima SATU argumen berupa list — makanya
+    // array-nya dibungkus jadi satu argumen JRG (bukan dipecah jadi
+    // lima argumen terpisah). Lihat komentar PyCall di interpreter/mod.rs.
+    match py::call("statistics", "mean", [1, 2, 3, 4, 5]) {
+        Ok(v)  => wok("statistics.mean([1,2,3,4,5]) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    // math.pow(base, exp) memang menerima dua argumen posisional —
+    // di sini keduanya dikirim sebagai dua argumen JRG terpisah.
+    match py::call("math", "pow", 2.0, 10.0) {
+        Ok(v)  => wok("math.pow(2.0, 10.0) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== state Python bertahan antar panggilan, selama 1x run ===")
+    py::exec("x = 41")
+    match py::eval("x + 1") {
+        Ok(v)  => wok("x + 1 =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== dict Python -> struct \"dict\" di JRG, list -> array ===")
+    match py::eval("{'nama': 'budi', 'skor': [90, 85, 88]}") {
+        Ok(v)  => wok("dari python:", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== exception Python jadi Err, bukan crash ===")
+    match py::eval("1 / 0") {
+        Ok(v)  => wok("(seharusnya tidak pernah sampai sini)", v),
+        Err(e) => wok("seperti yang diharapkan, dapat Err:", e),
+    }
+
+    wok("")
+    wok("=== py::call_kw: panggil fungsi Python yang butuh keyword argument ===")
+    // round(number, ndigits=...) — ndigits di sini WAJIB keyword, gak
+    // bisa positional biasa di banyak fungsi Python/numpy. Argumen ke-3
+    // = array args posisional, argumen ke-4 = array pasangan [nama, nilai].
+    match py::call_kw("builtins", "round", [3.14159], [["ndigits", 2]]) {
+        Ok(v)  => wok("round(3.14159, ndigits=2) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== package yang belum ke-install juga aman ===")
+    match py::import("numpy_yang_tidak_terinstall_xyz") {
+        Ok(_)  => wok("(seharusnya tidak pernah sampai sini)"),
+        Err(e) => wok("seperti yang diharapkan, dapat Err:", e),
+    }
+
+    wok("")
+    wok("Selesai — Python asli dipanggil dari JRG, semua kegagalan tertangani rapi.")
+}

@@ -1,0 +1,60 @@
+package main
+
+// struct-heavy: an N-body-free particle integrator.
+
+// Field-nya `pub` karena `main` membacanya dari luar; tanpa `pub` field
+// bersifat private di JRG.
+struct Particle {
+    pub x: f64,
+    pub y: f64,
+    pub vx: f64,
+    pub vy: f64,
+    pub mass: f64,
+}
+
+impl Particle {
+    fn advance(self, dt: f64) -> Particle {
+        return Particle {
+            x: self.x + self.vx * dt,
+            y: self.y + self.vy * dt,
+            vx: self.vx - self.x * dt * 0.001,
+            vy: self.vy - self.y * dt * 0.001,
+            mass: self.mass,
+        }
+    }
+
+    fn energy(self) -> f64 {
+        return 0.5 * self.mass * (self.vx * self.vx + self.vy * self.vy)
+    }
+}
+
+pub fn main() {
+    let count: int = 50000
+    let steps: int = 3000
+    let dt: f64 = 0.01
+
+    var total: f64 = 0.0
+    var seed: uint = 88172645463325252
+
+    for p in 0..count {
+        seed = math::wrap_add(math::wrap_mul(seed, 6364136223846793005), 1442695040888963407)
+        let sx: f64 = ((seed >> 33) % 1000) as f64 * 0.001
+        seed = math::wrap_add(math::wrap_mul(seed, 6364136223846793005), 1442695040888963407)
+        let sy: f64 = ((seed >> 33) % 1000) as f64 * 0.001
+
+        var part: Particle = Particle {
+            x: sx,
+            y: sy,
+            vx: 1.0 - sy,
+            vy: 1.0 - sx,
+            mass: 1.0 + sx,
+        }
+
+        for s in 0..steps {
+            part = part.advance(dt)
+        }
+        total = total + part.energy() + part.x - part.y
+    }
+
+    wok(total)
+}

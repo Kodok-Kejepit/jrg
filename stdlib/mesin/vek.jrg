@@ -1,0 +1,112 @@
+package std_mesin_vek
+
+// Vektor dua dimensi untuk posisi, kecepatan dan arah. Komponennya selalu
+// `float`, jadi `vek::baru(1, 2) == vek::baru(1.0, 2.0)`.
+pub struct Vek2 { pub x: float, pub y: float }
+
+fn _angka(nama, ke, v) {
+    let t = typeof(v)
+    if t != "int" && t != "float" {
+        panik(nama + ": argumen ke-" + str(ke) + " harus angka, dapat `" + t + "`")
+    }
+    return v as float
+}
+
+fn _vek(nama, ke, v) {
+    if typeof(v) != "struct:Vek2" {
+        panik(nama + ": argumen ke-" + str(ke) + " harus `Vek2`, dapat `" + typeof(v) + "`")
+    }
+    return v
+}
+
+/// Vektor baru dari dua angka.
+pub fn baru(x, y) { return Vek2 { x: _angka("vek::baru", 1, x), y: _angka("vek::baru", 2, y) } }
+
+/// Vektor nol, `(0, 0)`.
+pub fn nol() { return Vek2 { x: 0.0, y: 0.0 } }
+
+/// Vektor satuan dari sudut dalam DERAJAT (0 = kanan, 90 = bawah, karena y layar ke bawah).
+pub fn dari_sudut(derajat) {
+    let r = _angka("vek::dari_sudut", 1, derajat) * math::PI / 180.0
+    return Vek2 { x: math::cos(r), y: math::sin(r) }
+}
+
+impl Vek2 {
+    /// `a + b`.
+    pub fn add(self, o) {
+        let b = _vek("vek `+`", 2, o)
+        return Vek2 { x: self.x + b.x, y: self.y + b.y }
+    }
+    /// `a - b`.
+    pub fn sub(self, o) {
+        let b = _vek("vek `-`", 2, o)
+        return Vek2 { x: self.x - b.x, y: self.y - b.y }
+    }
+    /// `v * k` dengan angka (skala) atau `v * w` dengan vektor (per komponen).
+    pub fn mul(self, o) {
+        if typeof(o) == "struct:Vek2" { return Vek2 { x: self.x * o.x, y: self.y * o.y } }
+        let k = _angka("vek `*`", 2, o)
+        return Vek2 { x: self.x * k, y: self.y * k }
+    }
+    /// `v / k`. Pembagi nol ditolak, bukan jadi tak hingga diam-diam.
+    pub fn div(self, o) {
+        let k = _angka("vek `/`", 2, o)
+        if k == 0.0 { panik("vek `/`: pembagi nol") }
+        return Vek2 { x: self.x / k, y: self.y / k }
+    }
+    /// `-v`.
+    pub fn neg(self) { return Vek2 { x: -self.x, y: -self.y } }
+    /// `a == b`: komponen sama persis.
+    pub fn eq(self, o) {
+        if typeof(o) != "struct:Vek2" { return false }
+        return self.x == o.x && self.y == o.y
+    }
+
+    /// Panjangnya.
+    pub fn panjang(self) { return math::sqrt(self.x * self.x + self.y * self.y) }
+    /// Kuadrat panjangnya — lebih murah untuk membandingkan jarak.
+    pub fn panjang_kuadrat(self) { return self.x * self.x + self.y * self.y }
+    /// Vektor searah dengan panjang 1. Vektor nol DITOLAK: ia tidak punya arah.
+    pub fn normal(self) {
+        let p = self.panjang()
+        if p == 0.0 { panik("vek::normal: vektor nol tidak punya arah") }
+        return Vek2 { x: self.x / p, y: self.y / p }
+    }
+    /// Jarak ke vektor lain.
+    pub fn jarak(self, o) { return self.sub(_vek("vek::jarak", 2, o)).panjang() }
+    /// Hasil kali titik.
+    pub fn titik(self, o) {
+        let b = _vek("vek::titik", 2, o)
+        return self.x * b.x + self.y * b.y
+    }
+    /// Hasil kali silang 2D (komponen z-nya).
+    pub fn silang(self, o) {
+        let b = _vek("vek::silang", 2, o)
+        return self.x * b.y - self.y * b.x
+    }
+    /// Diputar sebesar `derajat` (searah jarum jam di layar).
+    pub fn putar(self, derajat) {
+        let r = _angka("vek::putar", 2, derajat) * math::PI / 180.0
+        let c = math::cos(r)
+        let s = math::sin(r)
+        return Vek2 { x: self.x * c - self.y * s, y: self.x * s + self.y * c }
+    }
+    /// Sudutnya dalam derajat, -180 sampai 180.
+    pub fn sudut(self) { return math::atan2(self.y, self.x) * 180.0 / math::PI }
+    /// Titik di antara `self` (t = 0) dan `o` (t = 1).
+    pub fn lerp(self, o, t) {
+        let b = _vek("vek::lerp", 2, o)
+        let k = _angka("vek::lerp", 3, t)
+        return Vek2 { x: self.x + (b.x - self.x) * k, y: self.y + (b.y - self.y) * k }
+    }
+    /// Dipendekkan kalau lebih panjang dari `maks`; arahnya tetap.
+    pub fn batasi(self, maks) {
+        let m = _angka("vek::batasi", 2, maks)
+        if m < 0.0 { panik("vek::batasi: batas tidak boleh negatif") }
+        let p = self.panjang()
+        if p <= m { return self }
+        return Vek2 { x: self.x / p * m, y: self.y / p * m }
+    }
+    /// Tampilan: `Vek2(1.0, 2.0)`.
+    pub fn to_string(self) { return "Vek2(" + str(self.x) + ", " + str(self.y) + ")" }
+}

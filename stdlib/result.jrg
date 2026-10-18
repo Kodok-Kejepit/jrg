@@ -1,0 +1,94 @@
+// ============================================================================
+// JawaRustGo++ — stdlib/result.jrg
+package std_result
+
+// Penjaga argumen. Tanpa ini sebuah `result::map_or(r, 1, 5)` DITERIMA dan baru gagal waktu
+// hasilnya dipanggil — dengan caret di dalam berkas ini, menunjuk baris yang
+// tidak salah, di berkas yang pembacanya tidak pernah buka.
+fn _wajib_fungsi(nama, ke, v) {
+    let t = typeof(v)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str::to_string(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+    return true
+}
+
+/// Nilai dari `Ok`, atau hasil `f(error)` kalau `Err`.
+pub fn unwrap_or_else(r, f) {
+    _wajib_fungsi("result::unwrap_or_else", 2, f)
+    match r {
+        Ok(v)  => v,
+        Err(e) => f(e),
+    }
+}
+
+/// Ganti `Err` dengan Result lain hasil `f(error)`. `Ok` dibiarkan.
+pub fn or_else(r, f) {
+    _wajib_fungsi("result::or_else", 2, f)
+    match r {
+        Ok(v)  => Ok(v),
+        Err(e) => f(e),
+    }
+}
+
+/// `f(nilai)` kalau `Ok`, `bawaan` kalau `Err` — tanpa membungkus lagi.
+pub fn map_or(r, bawaan, f) {
+    _wajib_fungsi("result::map_or", 3, f)
+    match r {
+        Ok(v)  => f(v),
+        Err(_) => bawaan,
+    }
+}
+
+/// Satu dari dua fungsi, tergantung isinya. Selalu menghasilkan nilai biasa.
+pub fn fold(r, saat_ok, saat_err) {
+    _wajib_fungsi("result::fold", 2, saat_ok)
+    _wajib_fungsi("result::fold", 3, saat_err)
+    match r {
+        Ok(v)  => saat_ok(v),
+        Err(e) => saat_err(e),
+    }
+}
+
+/// Apakah `Ok` dan isinya sama dengan `nilai`?
+pub fn contains(r, nilai) {
+    match r {
+        Ok(v)  => v == nilai,
+        Err(_) => false,
+    }
+}
+
+/// `Result` di dalam `Result` jadi satu lapis.
+pub fn flatten(r) {
+    match r {
+        Ok(dalam) => dalam,
+        Err(e)    => Err(e),
+    }
+}
+
+/// Kumpulkan array Result jadi satu Result berisi array.
+pub fn all(daftar) {
+    // `arr::push` TIDAK mengubah array di tempat — array di JRG memakai value
+    // semantics, jadi ia mengembalikan array BARU.
+    var keluar = []
+    for i in daftar {
+        match daftar[i] {
+            Ok(v)  => { keluar = arr::push(keluar, v) },
+            Err(e) => return Err(e),
+        }
+    }
+    return Ok(keluar)
+}
+
+/// Pisahkan array Result jadi tuple `(semua_nilai_ok, semua_error)`.
+pub fn partition(daftar) {
+    var oks = []
+    var errs = []
+    for i in daftar {
+        match daftar[i] {
+            Ok(v)  => { oks = arr::push(oks, v) },
+            Err(e) => { errs = arr::push(errs, e) },
+        }
+    }
+    return (oks, errs)
+}

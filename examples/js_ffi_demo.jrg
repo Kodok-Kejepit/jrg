@@ -1,0 +1,64 @@
+package main
+
+// ============================================================================
+// js_ffi_demo.jrg — memanggil JavaScript (Node.js) dari JRG.
+
+pub fn main() {
+    wok("=== js::eval — nilai sebuah ekspresi ===")
+    wok("1+1        :", js::eval("1 + 1"))
+    wok("string     :", js::eval("'ha' + 'lo'"))
+    wok("array      :", js::eval("[1,2,3].map(x => x * 2)"))
+    wok("objek      :", js::eval("({nama: 'jrg', versi: 3})"))
+    // Tak-hingga TIDAK jadi `nil`: runner-nya memancarkan token yang sama
+    // dengan sisi Python, bukan lewat `JSON.stringify` yang mengubahnya
+    // jadi `null`.
+    wok("1/0        :", js::eval("1/0"))
+    wok("BigInt     :", js::eval("10n ** 30n"))
+
+    wok("")
+    wok("=== Promise di-await otomatis ===")
+    // Inilah yang membuat separuh ekosistem Node bisa dipakai apa adanya.
+    wok("promise    :", js::eval("Promise.resolve(42)"))
+    wok("async fn   :", js::eval("(async () => { return 6 * 7 })()"))
+
+    wok("")
+    wok("=== js::exec — lingkupnya bertahan antar panggilan ===")
+    js::exec("globalThis.hitung = (n) => n * n")
+    wok("hitung(9)  :", js::eval("hitung(9)"))
+
+    wok("")
+    wok("=== js::import + js::call ===")
+    js::import("path")
+    wok("path.join  :", js::call("path", "join", "a", "b", "c"))
+    js::import("os")
+    wok("os.platform:", js::call("os", "platform"))
+
+    wok("")
+    wok("=== handle: nilai yang tinggal di sisi JS ===")
+    // `Buffer` tidak punya padanan di JRG, jadi ia datang sebagai handle
+    // alih-alih menyeberang sebagai sesuatu yang bukan dirinya.
+    match js::eval("Buffer.from('halo dunia')") {
+        Ok(buf) => {
+            wok("typeof     :", typeof(buf))
+            wok("len        :", js::len(buf))
+            wok("toString   :", buf.toString())
+            wok("slice+hex  :", buf.toString("hex"))
+        }
+        Err(e) => wok("gagal:", e)
+    }
+
+    wok("")
+    wok("=== fungsi JRG diserahkan ke JavaScript ===")
+    // Fungsi JRG dipanggil SINKRON di sisi JS, jadi hasilnya bisa langsung
+    // dipakai — termasuk sebagai pembanding `sort`.
+    js::exec("globalThis.pakai = (f) => f(3) + f(4)")
+    match js::eval("({ pakai })") {
+        Ok(o) => wok("pakai(x*10):", js::method(o, "pakai", |x| x * 10))
+        Err(e) => wok("gagal:", e)
+    }
+    wok("sort(b-a)  :", js::method(js::ref("[3, 1, 2]").unwrap(), "sort", |a, b| b - a))
+
+    wok("")
+    wok("=== janji handle dilepas otomatis, dan itu bisa DILIHAT ===")
+    wok("handle hidup sekarang:", js::refs())
+}

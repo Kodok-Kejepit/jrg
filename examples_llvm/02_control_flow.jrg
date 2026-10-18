@@ -1,0 +1,59 @@
+package main
+
+fn fib(n: int) -> int {
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn factorial(n: int) -> int {
+    var acc: int = 1
+    var i: int = 2
+    while i <= n {
+        acc = acc * i
+        i = i + 1
+    }
+    return acc
+}
+
+fn sum_range(n: int) -> int {
+    var total: int = 0
+    for i in 0..n {
+        total += i
+    }
+    return total
+}
+
+pub fn main() {
+    wok("fib(10) =", fib(10))
+    wok("factorial(10) =", factorial(10))
+    wok("sum_range(100) =", sum_range(100))
+
+    var x: int = 5
+    if x > 10 {
+        wok("besar")
+    } else if x > 3 {
+        wok("sedang")
+    } else {
+        wok("kecil")
+    }
+
+    var count: int = 0
+    loop {
+        count += 1
+        if count >= 3 {
+            break
+        }
+    }
+    wok("count akhir =", count)
+
+    var k: int = 0
+    for i in 0..10 {
+        if i % 2 == 0 {
+            continue
+        }
+        k += i
+    }
+    wok("jumlah ganjil 0..10 =", k)
+}

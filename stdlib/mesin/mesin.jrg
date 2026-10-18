@@ -1,0 +1,247 @@
+package std_mesin
+
+// Inti mesin game: `perbarui(keadaan, masukan, dt)` menjawab keadaan BARU,
+// `gambar(c, keadaan)` menggambar. Langkah waktunya TETAP, jadi hasilnya sama di
+// mesin cepat dan lambat, dan di interpreter dan VM.
+import "std/mesin/masukan"
+import "std/mesin/warna"
+
+/// Tombol yang diawasi kalau game tidak menyebut sendiri.
+pub const TOMBOL_BAWAAN = ["Left", "Right", "Up", "Down", "Space", "Enter", "Escape",
+                           "W", "A", "S", "D", "P"]
+
+pub struct Game<K> {
+    pub judul: string, pub lebar: int, pub tinggi: int,
+    pub keadaan: K, pub perbarui: fn(K, masukan::Masukan, float) -> K, pub gambar: fn(Canvas, K) -> unit,
+    pub dt: float = 0.016666666666666666,
+    pub latar: warna::Warna = warna::HITAM,
+    pub tombol: []string = TOMBOL_BAWAAN,
+    pub masukan: masukan::Masukan,
+    pub langkah_ke: int = 0,
+    pub selesai: Option<fn(K) -> bool> = Option::None,
+    pub rekam: bool = false,
+    pub rekaman: array = [],
+    pub bunyi: Option<fn(K, K) -> array> = Option::None,
+    pub tombol_layar: []masukan::TombolLayar = [],
+}
+
+fn _fungsi(nama, ke, f) {
+    let t = typeof(f)
+    if t != "function" && t != "closure" && t != "native_fn" {
+        panik(nama + ": argumen ke-" + str(ke) + " harus fungsi, dapat `" + t + "`")
+    }
+}
+
+fn _ukuran(nama, ke, n) {
+    if typeof(n) != "int" || n <= 0 {
+        panik(nama + ": argumen ke-" + str(ke) + " harus bilangan bulat positif, dapat " + str(n))
+    }
+}
+
+/// Game baru. `perbarui(keadaan, masukan, dt)` menjawab keadaan baru;
+/// `gambar(c, keadaan)` menggambar ke kanvas `c`.
+pub fn baru<K>(judul: string, lebar: int, tinggi: int, keadaan_awal: K,
+               perbarui: fn(K, masukan::Masukan, float) -> K, gambar: fn(Canvas, K) -> unit) -> Game<K> {
+    if typeof(judul) != "string" { panik("mesin::baru: argumen ke-1 harus teks, dapat `" + typeof(judul) + "`") }
+    _ukuran("mesin::baru", 2, lebar)
+    _ukuran("mesin::baru", 3, tinggi)
+    _fungsi("mesin::baru", 5, perbarui)
+    _fungsi("mesin::baru", 6, gambar)
+    return Game { judul: judul, lebar: lebar, tinggi: tinggi, keadaan: keadaan_awal,
+                  perbarui: perbarui, gambar: gambar, masukan: masukan::kosong() }
+}
+
+impl<K> Game<K> {
+    /// Game yang sama dengan warna latar lain.
+    pub fn dengan_latar(self, w: warna::Warna) -> Game<K> {
+        var g = self
+        g.latar = w
+        return g
+    }
+    /// Game yang sama dengan langkah waktu tetap `dt` detik (bawaan 1/60).
+    pub fn dengan_dt(self, dt) -> Game<K> {
+        if (typeof(dt) != "int" && typeof(dt) != "float") || dt <= 0 {
+            panik("mesin::dengan_dt: `dt` harus angka positif, dapat " + str(dt))
+        }
+        var g = self
+        g.dt = dt as float
+        return g
+    }
+    /// Game yang sama yang mengawasi tombol-tombol ini (nama seperti `canvas::key_held`).
+    pub fn dengan_tombol(self, daftar: []string) -> Game<K> {
+        for _, t in daftar { let _ = canvas::nama_tombol(t) }
+        var g = self
+        g.tombol = daftar
+        return g
+    }
+
+    /// Game yang sama dengan tombol di LAYAR, di pita di bawah area game: jari di atasnya dihitung
+    /// tombol itu ditahan, jadi `perbarui` tidak perlu tahu ia di HP. Tampil di mana pun ditulis
+    /// (lihat `canvas::layar_sentuh`).
+    pub fn dengan_tombol_layar(self, daftar: []string) -> Game<K> {
+        var g = self
+        g.tombol_layar = masukan::susun_tombol_layar(daftar, self.lebar, self.tinggi)
+        return g
+    }
+
+    /// Game yang sama yang BERHENTI begitu `f(keadaan)` menjawab `true` —
+    /// `jalankan` lalu menutup jendelanya, `simulasi` berhenti memajukan langkah.
+    pub fn dengan_selesai(self, f: fn(K) -> bool) -> Game<K> {
+        _fungsi("mesin::dengan_selesai", 1, f)
+        var g = self
+        g.selesai = Option::Some(f)
+        return g
+    }
+    /// Game yang sama yang berbunyi: `f(lama, baru)` menjawab daftar bunyi `suara::` untuk satu
+    /// langkah. Cuma `jalankan` yang memutarnya, jadi `perbarui` tetap murni dan `simulasi`
+    /// maupun `putar` ulang tetap sunyi.
+    pub fn dengan_bunyi(self, f: fn(K, K) -> array) -> Game<K> {
+        _fungsi("mesin::dengan_bunyi", 1, f)
+        var g = self
+        g.bunyi = Option::Some(f)
+        return g
+    }
+    /// Bunyi yang `dengan_bunyi` minta untuk langkah dari keadaan `lama` ke keadaan sekarang.
+    pub fn bunyi_dari(self, lama: K) -> array {
+        match self.bunyi {
+            Option::None => { return [] }
+            Option::Some(f) => {
+                let d = f(lama, self.keadaan)
+                if typeof(d) != "array" {
+                    panik("mesin: fungsi `dengan_bunyi` harus menjawab array bunyi, dapat `" + typeof(d) + "`")
+                }
+                return d
+            }
+        }
+    }
+    /// Benar kalau fungsi `dengan_selesai` menjawab `true` untuk keadaannya sekarang.
+    pub fn sudah_selesai(self) -> bool {
+        match self.selesai {
+            Option::None => { return false }
+            Option::Some(f) => {
+                let b = f(self.keadaan)
+                if typeof(b) != "bool" {
+                    panik("mesin: fungsi `dengan_selesai` harus menjawab bool, dapat `" + typeof(b) + "`")
+                }
+                return b
+            }
+        }
+    }
+
+    /// Game yang sama yang MEREKAM masukan tiap langkahnya ke `game.rekaman`, sebagai
+    /// `[masukan, berapa_langkah]` — masukan yang sama berturut-turut cuma satu entri.
+    pub fn dengan_rekam(self) -> Game<K> {
+        var g = self
+        g.rekam = true
+        return g
+    }
+
+    /// Maju SATU langkah dengan masukan `m`.
+    pub fn langkah(self, m: masukan::Masukan) -> Game<K> {
+        let f = self.perbarui
+        var g = self
+        if self.rekam {
+            let n = len(self.rekaman)
+            var sama = false
+            if n > 0 {
+                let akhir = self.rekaman[n - 1]
+                if akhir[0] == m {
+                    g.rekaman[n - 1] = [m, akhir[1] + 1]
+                    sama = true
+                }
+            }
+            if !sama { g.rekaman = self.rekaman + [[m, 1]] }
+        }
+        g.keadaan = f(self.keadaan, m, self.dt)
+        g.masukan = m
+        g.langkah_ke = self.langkah_ke + 1
+        return g
+    }
+
+    /// Gambar keadaannya sekarang ke kanvas `c` (latar dulu). Kalau `c` punya pita tombol layar
+    /// di bawah area game, game dipotong ke areanya dan tombolnya digambar di pita itu.
+    pub fn gambar_ke(self, c: Canvas) {
+        canvas::clear(c, self.latar)
+        let f = self.gambar
+        let pita = masukan::tinggi_pita(self.tombol_layar, self.tinggi)
+        if pita > 0 && canvas::height(c) >= self.tinggi + pita {
+            canvas::clip(c, 0, 0, self.lebar, self.tinggi)
+            f(c, self.keadaan)
+            canvas::clip_reset(c)
+            canvas::fill_rect(c, 0, self.tinggi, self.lebar, pita, 0x000000)
+            masukan::gambar_tombol_layar(c, self.tombol_layar, self.masukan)
+        } else {
+            f(c, self.keadaan)
+        }
+    }
+
+    /// Jalankan tanpa jendela: satu langkah per elemen `rekaman`, tiap elemen
+    /// daftar tombol yang DITAHAN di langkah itu. Pintu untuk tes dan replay.
+    pub fn simulasi(self, rekaman) -> Game<K> {
+        if typeof(rekaman) != "array" {
+            panik("mesin::simulasi: rekaman harus array (satu daftar tombol per langkah), dapat `" + typeof(rekaman) + "`")
+        }
+        var g = self
+        for _, ditahan in rekaman {
+            if g.sudah_selesai() { return g }
+            g = g.langkah(masukan::buatan(g.masukan, ditahan))
+        }
+        return g
+    }
+
+    /// Putar ulang `rekaman` dari `game.rekaman` lain: masukannya PERSIS sama,
+    /// tetikus ikut, jadi game yang sama sampai di keadaan yang sama.
+    pub fn putar(self, rekaman) -> Game<K> {
+        if typeof(rekaman) != "array" {
+            panik("mesin::putar: rekaman harus array dari `game.rekaman`, dapat `" + typeof(rekaman) + "`")
+        }
+        var g = self
+        for i, e in rekaman {
+            if typeof(e) != "array" || len(e) != 2 || typeof(e[0]) != "struct:Masukan" || typeof(e[1]) != "int" || e[1] <= 0 {
+                panik("mesin::putar: entri ke-" + str(i) + " bukan `[masukan, berapa_langkah]` dari `game.rekaman`")
+            }
+            for _ in range(0, e[1]) {
+                if g.sudah_selesai() { return g }
+                g = g.langkah(e[0])
+            }
+        }
+        return g
+    }
+
+    /// Buka jendela dan jalankan sampai jendelanya ditutup (atau `dengan_selesai`
+    /// menjawab `true`); menjawab game terakhir.
+    /// Langkah waktunya tetap: waktu nyata dikumpulkan lalu dibayar per `dt`.
+    pub fn jalankan(self) -> Game<K> {
+        if !canvas::punya_jendela() {
+            panik("mesin::jalankan: tanpa jendela — tidak ada layar (DISPLAY/WAYLAND_DISPLAY kosong) " +
+                  "atau biner dibangun tanpa fitur `canvas`; pakai `game.simulasi(rekaman)` " +
+                  "untuk menjalankannya tanpa layar")
+        }
+        // Tombol layar duduk di pita di BAWAH area game, jadi tidak menutupi apa pun.
+        let pita = masukan::tinggi_pita(self.tombol_layar, self.tinggi)
+        let c = Canvas::new(self.lebar, self.tinggi + pita, self.judul, "tab")
+        let berbunyi = match self.bunyi { Option::None => false, _ => suara::tersedia() }
+        var g = self
+        var sisa = 0.0
+        g.gambar_ke(c)
+        while canvas::update(c) {
+            sisa = sisa + math::min(canvas::delta_time(c), 0.25)
+            let m = masukan::baca_dengan_layar(c, g.masukan, g.tombol, g.tombol_layar)
+            var pertama = true
+            while sisa >= g.dt {
+                let lama = g.keadaan
+                g = g.langkah(pertama $ m : masukan::buatan(m, dict::keys(m.ditahan)))
+                if berbunyi { for _, b in g.bunyi_dari(lama) { let _ = suara::putar(b) } }
+                pertama = false
+                sisa = sisa - g.dt
+                if g.sudah_selesai() {
+                    g.gambar_ke(c)
+                    canvas::close(c)
+                    return g
+                }
+            }
+            g.gambar_ke(c)
+        }
+        return g
+    }
+}

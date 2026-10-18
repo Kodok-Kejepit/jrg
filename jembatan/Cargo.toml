@@ -1,0 +1,21 @@
+# jembatan/Cargo.toml — builtin milik `jrgc` (dok::, crypto::, re::, …) untuk biner `--emit-llvm`.
+# Pustaka DINAMIS, bukan statis: biner LLVM sudah memuat runtime Rust `no_std`-nya sendiri,
+# dan dua pustaka statis Rust dalam satu biner saling menimpa simbol alokator dan panik.
+[package]
+name = "jrg_jembatan"
+version     = "0.2.0"
+edition = "2021"
+publish = false
+
+[lib]
+name = "jrgjembatan"
+crate-type = ["cdylib"]
+path = "src/lib.rs"
+
+[dependencies]
+jrgc = { path = ".." }
+
+[profile.release]
+opt-level     = 2
+lto           = "thin"
+codegen-units = 16

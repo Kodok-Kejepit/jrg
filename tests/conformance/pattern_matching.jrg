@@ -1,0 +1,225 @@
+package main
+
+// Konformansi: pattern matching.
+
+enum Bentuk {
+    Lingkaran(f64),
+    Persegi(f64, f64),
+    Kosong,
+}
+
+enum Warna { Merah, Hijau, Biru }
+
+fn luas(b: Bentuk) -> f64 {
+    match b {
+        Bentuk::Lingkaran(r) => 3.14 * r * r,
+        Bentuk::Persegi(p, l) => p * l,
+        Bentuk::Kosong => 0.0,
+    }
+}
+
+fn nama_warna(w: Warna) -> str {
+    match w {
+        Warna::Merah => "merah",
+        Warna::Hijau => "hijau",
+        Warna::Biru  => "biru",
+    }
+}
+
+fn kelompok(n: int) -> str {
+    match n {
+        0 => "nol",
+        1 | 2 | 3 => "kecil",
+        4..=10 => "sedang",
+        _ => "besar",
+    }
+}
+
+// `if` di dalam arm match — dulu diam-diam menghasilkan 0
+fn campur(w: Warna, x: int) -> int {
+    match w {
+        Warna::Merah => { if x > 5 { 100 } else { 200 } }
+        Warna::Hijau => 7,
+        Warna::Biru  => 8,
+    }
+}
+
+// guard dievaluasi SETELAH binding pattern terpasang
+fn cek(o: Option<int>) -> str {
+    match o {
+        Some(n) if n > 5 => "besar",
+        Some(n) => "kecil",
+        None => "kosong",
+    }
+}
+
+fn lebih_awal(w: Warna) -> int {
+    match w {
+        Warna::Merah => { return 1 }
+        _ => 2,
+    }
+}
+
+fn bagi(a: int, b: int) -> Result<int, str> {
+    if b == 0 { return Err("pembagi nol") }
+    return Ok(a / b)
+}
+
+pub fn main() {
+    // ── varian enum dengan payload ──────────────────────────────────────
+    assert_eq(luas(Bentuk::Persegi(3.0, 4.0)), 12.0)
+    assert_eq(luas(Bentuk::Kosong), 0.0)
+
+    // ── varian unit ─────────────────────────────────────────────────────
+    assert_eq(nama_warna(Warna::Merah), "merah")
+    assert_eq(nama_warna(Warna::Biru), "biru")
+
+    // ── literal, or-pattern, range, wildcard ────────────────────────────
+    assert_eq(kelompok(0), "nol")
+    assert_eq(kelompok(2), "kecil")
+    assert_eq(kelompok(7), "sedang")
+    assert_eq(kelompok(99), "besar")
+
+    // batas range inklusif
+    assert_eq(kelompok(4), "sedang")
+    assert_eq(kelompok(10), "sedang")
+    assert_eq(kelompok(11), "besar")
+
+    // ── match sebagai ekspresi yang di-assign ───────────────────────────
+    let v = match 2 {
+        1 => "satu",
+        2 => "dua",
+        _ => "lain",
+    }
+    assert_eq(v, "dua")
+
+    // ── match bersarang ─────────────────────────────────────────────────
+    let n = match 1 {
+        1 => match 2 { 2 => 55, _ => 0 },
+        _ => 0,
+    }
+    assert_eq(n, 55)
+
+    // ── if di dalam arm match (dulu diam-diam jadi 0) ───────────────────
+    assert_eq(campur(Warna::Merah, 10), 100)
+    assert_eq(campur(Warna::Merah, 1), 200)
+    assert_eq(campur(Warna::Hijau, 0), 7)
+
+    // ── match di dalam if ───────────────────────────────────────────────
+    let z = if true { match 1 { 1 => 111, _ => 0 } } else { 5 }
+    assert_eq(z, 111)
+
+    // ── guard: dievaluasi SETELAH binding pattern terpasang ─────────────
+    assert_eq(cek(Some(9)), "besar")
+    assert_eq(cek(Some(1)), "kecil")
+    assert_eq(cek(None), "kosong")
+
+    // ── arm yang keluar lewat return ────────────────────────────────────
+    assert_eq(lebih_awal(Warna::Merah), 1)
+    assert_eq(lebih_awal(Warna::Biru), 2)
+
+    // ── Option/Result ───────────────────────────────────────────────────
+    let ada: Option<int> = Some(5)
+    assert_eq(ada.unwrap(), 5)
+    assert_eq(ada.is_some(), true)
+
+    let tidak: Option<int> = None
+    assert_eq(tidak.is_none(), true)
+    assert_eq(tidak.unwrap_or(-1), -1)
+
+    assert_eq(bagi(10, 2).unwrap(), 5)
+    assert_eq(bagi(10, 0).is_err(), true)
+
+    match bagi(9, 3) {
+        Ok(hasil) => assert_eq(hasil, 3),
+        Err(e) => assert(false, "harusnya Ok"),
+    }
+
+    // ── arm tanpa kurung kurawal boleh `return`/`break`/`continue` ───────
+    assert_eq(pilih_return(1), 10)
+    assert_eq(pilih_return(2), 20)
+    assert_eq(pilih_return(99), -1)
+
+    var terkumpul_break = []
+    for i in 0..5 {
+        match i {
+            3 => break,
+            _ => { terkumpul_break = terkumpul_break + [i] },
+        }
+    }
+    assert_eq(terkumpul_break, [0, 1, 2])
+
+    var terkumpul_continue = []
+    for i in 0..5 {
+        match i % 2 {
+            0 => continue,
+            _ => { terkumpul_continue = terkumpul_continue + [i] },
+        }
+    }
+    assert_eq(terkumpul_continue, [1, 3])
+
+    // `return` tanpa nilai di posisi arm — dipastikan cuma lewat, tidak sampai
+    // baris setelahnya (kalau parsing salah lahap koma, bisa saja `return` di …
+    assert_eq(unit_return_lalu_lanjut(true), "berhenti duluan")
+    assert_eq(unit_return_lalu_lanjut(false), "sampai akhir")
+
+    // ── pola array ──────────────────────────────────────────────────────
+    assert_eq(klasifikasi([]), "kosong")
+    assert_eq(klasifikasi([7]), "satu")
+    assert_eq(klasifikasi([1, 2]), "dua")
+    assert_eq(klasifikasi([1, 2, 3, 4]), "banyak")
+
+    // panjang harus PERSIS kalau tidak ada `...`
+    assert_eq(match [1, 2] { [a, b, c] => "tiga", _ => "bukan tiga" }, "bukan tiga")
+    assert_eq(match [1, 2, 3] { [a, b, c] => "tiga", _ => "bukan tiga" }, "tiga")
+
+    // `...` mengikat sisanya jadi array baru
+    assert_eq(match [1, 2, 3, 4] { [k, ...sisa] => sisa, _ => [] }, [2, 3, 4])
+    // sisa boleh kosong
+    assert_eq(match [9] { [k, ...sisa] => sisa, _ => [-1] }, [])
+    // `...` tanpa nama: sisanya dibuang
+    assert_eq(match [1, 2, 3] { [k, ...] => k, _ => -1 }, 1)
+    // `...` di tengah: bagian depan dan belakang sama-sama diikat
+    assert_eq(match [1, 2, 3, 4, 5] { [a, ..., z] => a * 100 + z, _ => -1 }, 105)
+
+    // pola bersarang
+    assert_eq(match [[1, 2], [3, 4]] { [[a, b], [c, d]] => a + b + c + d, _ => -1 }, 10)
+
+    // pola array boleh memuat literal dan wildcard
+    assert_eq(match [1, 99, 3] { [1, _, 3] => "cocok", _ => "tidak" }, "cocok")
+    assert_eq(match [2, 99, 3] { [1, _, 3] => "cocok", _ => "tidak" }, "tidak")
+
+    // destructure lewat `let`
+    let [p, q, r] = [10, 20, 30]
+    assert_eq(p + q + r, 60)
+    let [kepala, ...ekor] = [1, 2, 3, 4]
+    assert_eq(kepala, 1)
+    assert_eq(ekor, [2, 3, 4])
+
+    wok("pattern_matching OK")
+}
+
+fn klasifikasi(a) -> string {
+    return match a {
+        []                => "kosong",
+        [x]               => "satu",
+        [x, y]            => "dua",
+        [kepala, ...ekor] => "banyak",
+    }
+}
+
+fn pilih_return(n: int) -> int {
+    match n {
+        1 => return 10,
+        2 => return 20,
+        _ => return -1,
+    }
+}
+
+fn unit_return_lalu_lanjut(berhenti: bool) -> string {
+    match berhenti {
+        true  => return "berhenti duluan",
+        false => {}
+    }
+    return "sampai akhir"
+}

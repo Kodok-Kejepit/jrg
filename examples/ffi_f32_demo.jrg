@@ -1,0 +1,43 @@
+// JawaRustGo++ — Demo: f32 di extern "C"
+package main
+
+import "std/fmt"
+
+extern "C" "libm.so.6" {
+    fn sqrtf(x: f32) -> f32
+    fn powf(base: f32, exp: f32) -> f32
+    fn fabsf(x: f32) -> f32
+    // Pembanding presisi f64 biasa, buat dibandingin langsung
+    fn sqrt(x: f64) -> f64
+}
+
+pub fn main() {
+    wok("=== f32 (float) vs f64 (double) — presisi beneran beda ===")
+
+    match sqrtf(2.0) {
+        Ok(v)  => wok("sqrtf(2.0)  [f32] =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    match sqrt(2.0) {
+        Ok(v)  => wok("sqrt(2.0)   [f64] =", v),
+        Err(e) => wok("gagal:", e),
+    }
+    wok("(beda di ~7 digit desimal terakhir — itu memang batas presisi f32)")
+
+    wok("")
+    wok("=== f32 dengan 2 parameter (powf) ===")
+    match powf(2.0, 10.0) {
+        Ok(v)  => wok("powf(2.0, 10.0) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("=== f32 dicampur sama tipe lain (fabsf, 1 parameter) ===")
+    match fabsf(-3.5) {
+        Ok(v)  => wok("fabsf(-3.5) =", v),
+        Err(e) => wok("gagal:", e),
+    }
+
+    wok("")
+    wok("Selesai — f32 dan f64 sekarang dua shape terpisah di FFI, bukan f32 yang diam-diam di-upgrade jadi f64.")
+}

@@ -1,0 +1,20 @@
+package main
+
+pub fn main() {
+    let a: chan int = make_chan(int, 2)
+    let b: chan int = make_chan(int, 2)
+    a <- 111
+    b <- 222
+
+    var got1: int = 0
+    var got2: int = 0
+    select {
+        case v := <-a: { got1 = v }
+        case v := <-b: { got1 = v }
+    }
+    select {
+        case v := <-a: { got2 = v }
+        case v := <-b: { got2 = v }
+    }
+    wok("got1 + got2 =", got1 + got2)
+}

@@ -1,0 +1,830 @@
+package sunting_penyangga
+
+// Isi satu berkas yang sedang disunting, sebagai NILAI: tiap operasi menjawab penyangga
+// baru. Riwayat urung menyimpan array barisnya apa adanya — di bawah copy-on-write itu
+// O(1) sampai ada yang menulis.
+import "sunting/aksara"
+
+pub struct Penyangga {
+    pub baris: []string,
+    pub br: int = 0,
+    pub kol: int = 0,
+    pub kol_ingin: int = 0,
+    pub bertanda: bool = false,
+    pub tanda_br: int = 0,
+    pub tanda_kol: int = 0,
+    pub urung: array = [],
+    pub ulang: array = [],
+    pub kelompok: string = "",
+    pub kotor: bool = false,
+    pub ubah_dari: int = 0,
+    pub nama: string = "",
+    pub crlf: bool = false,
+    pub hanya_baca: bool = false,
+    pub atas: int = 0,
+    pub kiri: int = 0,
+    pub bersorot: bool = true,
+    pub awal_sorot: array = [],
+    pub sah_sorot: int = 0,
+}
+
+const MAKS_URUNG = 400
+// Nilai `ubah_dari` saat tidak ada baris yang berubah sejak gambar terakhir.
+pub const TAK_BERUBAH = 1000000000
+const PEMBUKA = "([{"
+const PENUTUP = ")]}"
+const KUTIP = "\"'`"
+
+/// Penyangga baru berisi `baris`; berkas kosong tetap punya satu baris kosong. Sorotan
+/// sintaks JRG cuma untuk berkas `.jrg` dan berkas yang belum bernama.
+pub fn baru(nama, baris) {
+    var isi = baris
+    if len(isi) == 0 { isi = [""] }
+    return Penyangga { baris: isi, nama: nama, bersorot: nama == "" || str::ends_with(nama, ".jrg") }
+}
+
+pub fn jumlah(p) { return len(p.baris) }
+
+fn kiri_dari(s, n) { return str::slice(s, 0, math::min(math::max(n, 0), str::len(s))) }
+fn kanan_dari(s, n) { return str::slice(s, math::min(math::max(n, 0), str::len(s))) }
+
+/// Karakter ke-`i` baris `s` sebagai teks, atau "" di luar baris.
+fn kar(s, i) {
+    if i < 0 || i >= str::len(s) { return "" }
+    return str::slice(s, i, i + 1)
+}
+
+/// Kursor dan gulungan dipaksa ke dalam isi — satu pintu, dipanggil sesudah tiap gerak.
+pub fn rapikan(p) {
+    var x = p
+    let n = len(x.baris)
+    if x.br >= n { x.br = n - 1 }
+    if x.br < 0 { x.br = 0 }
+    let pj = str::len(x.baris[x.br])
+    if x.kol > pj { x.kol = pj }
+    if x.kol < 0 { x.kol = 0 }
+    if x.tanda_br >= n { x.tanda_br = n - 1 }
+    if x.tanda_br < 0 { x.tanda_br = 0 }
+    let pt = str::len(x.baris[x.tanda_br])
+    if x.tanda_kol > pt { x.tanda_kol = pt }
+    return x
+}
+
+// ── Seleksi ─────────────────────────────────────────────────────────────
+
+/// Seleksi terurut `[br1, kol1, br2, kol2]`; `None` kalau tidak ada atau kosong.
+pub fn seleksi(p) {
+    if !p.bertanda { return Option::None }
+    if p.tanda_br == p.br && p.tanda_kol == p.kol { return Option::None }
+    if p.tanda_br < p.br || (p.tanda_br == p.br && p.tanda_kol < p.kol) {
+        return Option::Some([p.tanda_br, p.tanda_kol, p.br, p.kol])
+    }
+    return Option::Some([p.br, p.kol, p.tanda_br, p.tanda_kol])
+}
+
+pub fn ada_seleksi(p) {
+    match seleksi(p) {
+        Option::Some(_) => { return true }
+        Option::None => { return false }
+    }
+}
+
+/// Teks di dalam rentang `[br1, kol1, br2, kol2]`, baris dipisah `\n`.
+pub fn teks_rentang(p, r) {
+    if r[0] == r[2] { return str::slice(p.baris[r[0]], r[1], r[3]) }
+    var bagian = [kanan_dari(p.baris[r[0]], r[1])]
+    var i = r[0] + 1
+    while i < r[2] {
+        bagian = bagian + [p.baris[i]]
+        i = i + 1
+    }
+    bagian = bagian + [kiri_dari(p.baris[r[2]], r[3])]
+    return arr::join(bagian, "\n")
+}
+
+pub fn teks_seleksi(p) {
+    match seleksi(p) {
+        Option::Some(r) => { return teks_rentang(p, r) }
+        Option::None => { return "" }
+    }
+}
+
+pub fn lepas_tanda(p) {
+    var x = p
+    x.bertanda = false
+    return x
+}
+
+/// Mulai seleksi di kursor kalau belum ada; dipakai gerak ber-Shift.
+fn pasang_tanda(p) {
+    if p.bertanda { return p }
+    var x = p
+    x.bertanda = true
+    x.tanda_br = p.br
+    x.tanda_kol = p.kol
+    return x
+}
+
+pub fn pilih_semua(p) {
+    var x = p
+    x.bertanda = true
+    x.tanda_br = 0
+    x.tanda_kol = 0
+    x.br = len(p.baris) - 1
+    x.kol = str::len(p.baris[x.br])
+    x.kelompok = ""
+    return x
+}
+
+/// Pilih kata di bawah kursor; tanpa kata di sana penyangganya tidak berubah.
+pub fn pilih_kata(p) {
+    let k = str::chars(p.baris[p.br])
+    let n = len(k)
+    var a = p.kol
+    var b = p.kol
+    while a > 0 && aksara::kata(k[a - 1]) { a = a - 1 }
+    while b < n && aksara::kata(k[b]) { b = b + 1 }
+    if a == b { return p }
+    var x = p
+    x.bertanda = true
+    x.tanda_br = p.br
+    x.tanda_kol = a
+    x.kol = b
+    x.kelompok = ""
+    return x
+}
+
+// ── Riwayat ─────────────────────────────────────────────────────────────
+
+/// Simpan keadaan sebelum sebuah perubahan. Perubahan berturut-turut berjenis sama
+/// (`ketik`, `hapus`) jadi SATU langkah urung; jenis "" selalu membuka langkah baru.
+fn catat(p, jenis) {
+    var x = p
+    if jenis != "" && jenis == p.kelompok { return x }
+    x.urung = x.urung + [[p.baris, p.br, p.kol]]
+    if len(x.urung) > MAKS_URUNG { x.urung = x.urung[1:] }
+    x.ulang = []
+    x.kelompok = jenis
+    return x
+}
+
+fn tandai_ubah(p, dari) {
+    var x = p
+    x.kotor = true
+    if dari < x.ubah_dari { x.ubah_dari = dari }
+    return x
+}
+
+/// Putuskan pengelompokan urung: gerak kursor di antara dua ketikan memisahkan langkahnya.
+pub fn putus(p) {
+    if p.kelompok == "" { return p }
+    var x = p
+    x.kelompok = ""
+    return x
+}
+
+pub fn bisa_urung(p) { return len(p.urung) > 0 }
+pub fn bisa_ulang(p) { return len(p.ulang) > 0 }
+
+pub fn urungkan(p) {
+    if len(p.urung) == 0 { return p }
+    var x = p
+    let s = p.urung[len(p.urung) - 1]
+    x.urung = p.urung[:len(p.urung) - 1]
+    x.ulang = p.ulang + [[p.baris, p.br, p.kol]]
+    x.baris = s[0]
+    x.br = s[1]
+    x.kol = s[2]
+    x.bertanda = false
+    x.kelompok = ""
+    x.kotor = true
+    x.ubah_dari = 0
+    return rapikan(x)
+}
+
+pub fn ulangi(p) {
+    if len(p.ulang) == 0 { return p }
+    var x = p
+    let s = p.ulang[len(p.ulang) - 1]
+    x.ulang = p.ulang[:len(p.ulang) - 1]
+    x.urung = p.urung + [[p.baris, p.br, p.kol]]
+    x.baris = s[0]
+    x.br = s[1]
+    x.kol = s[2]
+    x.bertanda = false
+    x.kelompok = ""
+    x.kotor = true
+    x.ubah_dari = 0
+    return rapikan(x)
+}
+
+// ── Perubahan dasar (tanpa mencatat riwayat) ────────────────────────────
+
+/// Buang rentang `[br1, kol1, br2, kol2]`; kursor mendarat di awalnya.
+fn buang_rentang(p, r) {
+    var x = p
+    let gabung = kiri_dari(p.baris[r[0]], r[1]) + kanan_dari(p.baris[r[2]], r[3])
+    if r[0] == r[2] {
+        var b = x.baris
+        b[r[0]] = gabung
+        x.baris = b
+    } else {
+        x.baris = p.baris[:r[0]] + [gabung] + p.baris[r[2] + 1:]
+    }
+    x.br = r[0]
+    x.kol = r[1]
+    x.bertanda = false
+    return tandai_ubah(x, r[0])
+}
+
+/// Sisipkan `teks` (boleh berisi `\n`) di kursor; kursor mendarat sesudahnya.
+fn sisip_mentah(p, teks) {
+    if teks == "" { return p }
+    var x = p
+    let ini = p.baris[p.br]
+    let kiri = kiri_dari(ini, p.kol)
+    let kanan = kanan_dari(ini, p.kol)
+    let potong = str::split(teks, "\n")
+    if len(potong) <= 1 {
+        var b = x.baris
+        b[p.br] = kiri + teks + kanan
+        x.baris = b
+        x.kol = p.kol + str::len(teks)
+        return tandai_ubah(x, p.br)
+    }
+    let n = len(potong)
+    var tengah = [kiri + potong[0]]
+    var i = 1
+    while i < n - 1 {
+        tengah = tengah + [potong[i]]
+        i = i + 1
+    }
+    tengah = tengah + [potong[n - 1] + kanan]
+    x.baris = p.baris[:p.br] + tengah + p.baris[p.br + 1:]
+    x.br = p.br + n - 1
+    x.kol = str::len(potong[n - 1])
+    return tandai_ubah(x, p.br)
+}
+
+fn buang_seleksi(p) {
+    match seleksi(p) {
+        Option::Some(r) => { return buang_rentang(p, r) }
+        Option::None => { return lepas_tanda(p) }
+    }
+}
+
+fn ingat_kolom(p) {
+    var x = p
+    x.kol_ingin = aksara::ke_tampil(x.baris[x.br], x.kol)
+    return x
+}
+
+// ── Menyunting ──────────────────────────────────────────────────────────
+
+/// Sisipkan teks apa adanya (tempel): seleksi tergantikan, tanpa indentasi otomatis.
+pub fn sisip(p, teks) {
+    if teks == "" { return p }
+    var x = catat(p, "")
+    x = buang_seleksi(x)
+    x = sisip_mentah(x, teks)
+    x.kelompok = ""
+    return ingat_kolom(x)
+}
+
+fn pasangan(c) {
+    if c == "(" { return ")" }
+    if c == "[" { return "]" }
+    if c == "{" { return "}" }
+    return ""
+}
+
+/// Kanan kursor kosong, spasi, atau penutup — tempat pasangan otomatis tidak mengganggu.
+fn kanan_lapang(s, kol) {
+    let k = kar(s, kol)
+    return k == "" || k == " " || k == "\t" || k == "," || k == ";" || str::contains(PENUTUP, k)
+}
+
+/// Satu karakter yang DIKETIK: kurung dan kutip menutup sendiri, penutup yang sudah ada
+/// dilewati, `}` di baris kosong mundur satu tingkat, dan seleksi dibungkus pembukanya.
+pub fn ketik(p, c) {
+    let ada = ada_seleksi(p)
+    let tutup = pasangan(c)
+    if ada && (tutup != "" || str::contains(KUTIP, c)) {
+        let r = seleksi(p).unwrap()
+        let isi = teks_rentang(p, r)
+        let akhir = tutup != "" $ tutup : c
+        var x = catat(p, "")
+        x = buang_rentang(x, r)
+        x = sisip_mentah(x, c + isi + akhir)
+        x.kelompok = ""
+        return ingat_kolom(x)
+    }
+    let jenis = (c == " " || ada) $ "" : "ketik"
+    var x = catat(p, jenis)
+    x = buang_seleksi(x)
+    let ini = x.baris[x.br]
+    let kanan = kar(ini, x.kol)
+    // Penutup yang sudah ada di kanan cuma dilewati.
+    if kanan == c && (str::contains(PENUTUP, c) || str::contains(KUTIP, c)) {
+        x.kol = x.kol + 1
+        return ingat_kolom(x)
+    }
+    if c == "}" && str::trim(kiri_dari(ini, x.kol)) == "" && x.kol > 0 {
+        let buang = math::min(aksara::TAB, x.kol)
+        var b = x.baris
+        b[x.br] = str::slice(ini, buang)
+        x.baris = b
+        x.kol = x.kol - buang
+        x = tandai_ubah(x, x.br)
+    }
+    if tutup != "" && kanan_lapang(x.baris[x.br], x.kol) {
+        x = sisip_mentah(x, c + tutup)
+        x.kol = x.kol - 1
+        return ingat_kolom(x)
+    }
+    if str::contains(KUTIP, c) && kanan_lapang(x.baris[x.br], x.kol) {
+        let kiri = kar(x.baris[x.br], x.kol - 1)
+        let menempel = kiri != "" && (aksara::kata(str::char_at(kiri, 0)) || kiri == c)
+        if !menempel {
+            x = sisip_mentah(x, c + c)
+            x.kol = x.kol - 1
+            return ingat_kolom(x)
+        }
+    }
+    x = sisip_mentah(x, c)
+    return ingat_kolom(x)
+}
+
+/// Baris baru dengan indentasi baris sebelumnya; sesudah `{` bertambah satu tingkat, dan
+/// di antara `{` dan `}` penutupnya turun ke barisnya sendiri.
+pub fn enter(p) {
+    var x = catat(p, "")
+    x = buang_seleksi(x)
+    let ini = x.baris[x.br]
+    let kiri = kiri_dari(ini, x.kol)
+    let kanan = kanan_dari(ini, x.kol)
+    let n = math::min(aksara::indentasi(ini), x.kol)
+    let dasar = kiri_dari(ini, n)
+    let buka = str::ends_with(str::trim_end(kiri), "{")
+    var indent = dasar
+    if buka { indent = dasar + str::repeat(" ", aksara::TAB) }
+    if buka && str::starts_with(str::trim(kanan), "}") {
+        x.baris = x.baris[:x.br] + [kiri, indent, dasar + str::trim_start(kanan)] + x.baris[x.br + 1:]
+    } else {
+        x.baris = x.baris[:x.br] + [kiri, indent + kanan] + x.baris[x.br + 1:]
+    }
+    x = tandai_ubah(x, x.br)
+    x.br = x.br + 1
+    x.kol = str::len(indent)
+    x.kelompok = ""
+    return ingat_kolom(x)
+}
+
+/// Backspace: seleksi dihapus; di dalam indentasi mundur satu TINGKAT; di antara pasangan
+/// kosong `()` keduanya ikut; di kolom nol menyambung ke baris di atasnya.
+pub fn hapus_kiri(p) {
+    if ada_seleksi(p) {
+        var s = catat(p, "")
+        s = buang_seleksi(s)
+        s.kelompok = ""
+        return ingat_kolom(s)
+    }
+    if p.kol == 0 && p.br == 0 { return lepas_tanda(p) }
+    var x = catat(p, "hapus")
+    x.bertanda = false
+    let ini = x.baris[x.br]
+    if x.kol == 0 {
+        let atas = x.baris[x.br - 1]
+        x.baris = x.baris[:x.br - 1] + [atas + ini] + x.baris[x.br + 1:]
+        x.br = x.br - 1
+        x.kol = str::len(atas)
+        x.kelompok = ""
+        return ingat_kolom(tandai_ubah(x, x.br))
+    }
+    var buang = 1
+    let kiri = kiri_dari(ini, x.kol)
+    if str::trim(kiri) == "" && !str::contains(kiri, "\t") {
+        buang = x.kol % aksara::TAB
+        if buang == 0 { buang = aksara::TAB }
+    }
+    var sampai = x.kol
+    let a = kar(ini, x.kol - 1)
+    let b = kar(ini, x.kol)
+    if buang == 1 && b != "" && (pasangan(a) == b || (a == b && str::contains(KUTIP, a))) {
+        sampai = x.kol + 1
+    }
+    var br = x.baris
+    br[x.br] = kiri_dari(ini, x.kol - buang) + kanan_dari(ini, sampai)
+    x.baris = br
+    x.kol = x.kol - buang
+    return ingat_kolom(tandai_ubah(x, x.br))
+}
+
+/// Delete: seleksi dihapus; di ujung baris menyambung baris berikutnya.
+pub fn hapus_kanan(p) {
+    if ada_seleksi(p) {
+        var s = catat(p, "")
+        s = buang_seleksi(s)
+        s.kelompok = ""
+        return ingat_kolom(s)
+    }
+    let ini = p.baris[p.br]
+    if p.kol >= str::len(ini) {
+        if p.br + 1 >= len(p.baris) { return lepas_tanda(p) }
+        var y = catat(p, "")
+        y.baris = p.baris[:p.br] + [ini + p.baris[p.br + 1]] + p.baris[p.br + 2:]
+        y.bertanda = false
+        y.kelompok = ""
+        return tandai_ubah(y, p.br)
+    }
+    var x = catat(p, "hapus")
+    x.bertanda = false
+    var b = x.baris
+    b[x.br] = kiri_dari(ini, x.kol) + kanan_dari(ini, x.kol + 1)
+    x.baris = b
+    return tandai_ubah(x, x.br)
+}
+
+/// Hapus dari kursor mundur sampai awal kata.
+pub fn hapus_kata_kiri(p) {
+    if ada_seleksi(p) || p.kol == 0 { return hapus_kiri(p) }
+    let k = str::chars(p.baris[p.br])
+    var i = p.kol
+    while i > 0 && !aksara::kata(k[i - 1]) { i = i - 1 }
+    while i > 0 && aksara::kata(k[i - 1]) { i = i - 1 }
+    var x = catat(p, "")
+    x = buang_rentang(x, [p.br, i, p.br, p.kol])
+    x.kelompok = ""
+    return ingat_kolom(x)
+}
+
+/// Rentang BARIS yang kena operasi per-baris: baris seleksi, atau baris kursor.
+pub fn baris_kena(p) {
+    match seleksi(p) {
+        Option::Some(r) => {
+            // Seleksi yang berakhir di kolom nol tidak menyentuh baris terakhirnya.
+            if r[3] == 0 && r[2] > r[0] { return [r[0], r[2] - 1] }
+            return [r[0], r[2]]
+        }
+        Option::None => { return [p.br, p.br] }
+    }
+}
+
+pub fn hapus_baris(p) {
+    let k = baris_kena(p)
+    var x = catat(p, "")
+    if k[1] - k[0] + 1 >= len(p.baris) {
+        x.baris = [""]
+    } else {
+        x.baris = p.baris[:k[0]] + p.baris[k[1] + 1:]
+    }
+    x.br = k[0]
+    x.kol = 0
+    x.bertanda = false
+    x.kelompok = ""
+    return ingat_kolom(rapikan(tandai_ubah(x, k[0])))
+}
+
+pub fn gandakan_baris(p) {
+    let k = baris_kena(p)
+    var x = catat(p, "")
+    let salinan = p.baris[k[0]:k[1] + 1]
+    x.baris = p.baris[:k[1] + 1] + salinan + p.baris[k[1] + 1:]
+    let geser = k[1] - k[0] + 1
+    x.br = p.br + geser
+    x.tanda_br = p.tanda_br + geser
+    x.kelompok = ""
+    return tandai_ubah(x, k[0])
+}
+
+/// Pindahkan baris (atau baris-baris seleksi) satu ke atas (`arah` -1) atau ke bawah (1).
+pub fn pindah_baris(p, arah) {
+    let k = baris_kena(p)
+    if arah < 0 && k[0] == 0 { return p }
+    if arah > 0 && k[1] >= len(p.baris) - 1 { return p }
+    var x = catat(p, "pindah")
+    let blok = p.baris[k[0]:k[1] + 1]
+    if arah < 0 {
+        x.baris = p.baris[:k[0] - 1] + blok + [p.baris[k[0] - 1]] + p.baris[k[1] + 1:]
+    } else {
+        x.baris = p.baris[:k[0]] + [p.baris[k[1] + 1]] + blok + p.baris[k[1] + 2:]
+    }
+    x.br = p.br + arah
+    x.tanda_br = p.tanda_br + arah
+    return tandai_ubah(x, math::max(k[0] - 1, 0))
+}
+
+/// Tab: tanpa seleksi menyisip spasi sampai kelipatan `TAB` berikutnya; dengan seleksi
+/// menjorokkan tiap barisnya.
+pub fn tab(p) {
+    if !ada_seleksi(p) {
+        let x0 = aksara::ke_tampil(p.baris[p.br], p.kol)
+        var x = catat(p, "")
+        x = sisip_mentah(x, str::repeat(" ", aksara::TAB - (x0 % aksara::TAB)))
+        x.kelompok = ""
+        return ingat_kolom(x)
+    }
+    let k = baris_kena(p)
+    var x = catat(p, "")
+    var b = x.baris
+    let s = str::repeat(" ", aksara::TAB)
+    var i = k[0]
+    while i <= k[1] {
+        if b[i] != "" { b[i] = s + b[i] }
+        i = i + 1
+    }
+    x.baris = b
+    if p.baris[p.br] != "" && p.kol > 0 { x.kol = p.kol + aksara::TAB }
+    if p.baris[p.tanda_br] != "" && p.tanda_kol > 0 { x.tanda_kol = p.tanda_kol + aksara::TAB }
+    x.kelompok = ""
+    return tandai_ubah(x, k[0])
+}
+
+/// Shift-Tab: buang paling banyak satu tingkat indentasi dari tiap baris yang kena.
+pub fn tab_balik(p) {
+    let k = baris_kena(p)
+    var x = catat(p, "")
+    var b = x.baris
+    var berubah = false
+    var i = k[0]
+    while i <= k[1] {
+        var buang = 0
+        if str::starts_with(b[i], "\t") {
+            buang = 1
+        } else {
+            buang = math::min(aksara::indentasi(b[i]), aksara::TAB)
+        }
+        if buang > 0 {
+            b[i] = str::slice(b[i], buang)
+            berubah = true
+            if i == p.br { x.kol = math::max(p.kol - buang, 0) }
+            if i == p.tanda_br { x.tanda_kol = math::max(p.tanda_kol - buang, 0) }
+        }
+        i = i + 1
+    }
+    if !berubah { return p }
+    x.baris = b
+    x.kelompok = ""
+    return tandai_ubah(x, k[0])
+}
+
+/// Beri atau buang `// ` di tiap baris yang kena. Kalau SEMUA baris berisinya sudah
+/// berkomentar, komentarnya dibuang; kalau tidak, semuanya diberi — sejajar di indentasi
+/// terdangkal supaya blok yang dimatikan tetap rata.
+pub fn alih_komentar(p) {
+    let k = baris_kena(p)
+    var semua = true
+    var ada_isi = false
+    var dangkal = 100000
+    var i = k[0]
+    while i <= k[1] {
+        let t = str::trim_start(p.baris[i])
+        if t != "" {
+            ada_isi = true
+            if !str::starts_with(t, "//") { semua = false }
+            dangkal = math::min(dangkal, aksara::indentasi(p.baris[i]))
+        }
+        i = i + 1
+    }
+    if !ada_isi { return p }
+    var x = catat(p, "")
+    var b = x.baris
+    i = k[0]
+    while i <= k[1] {
+        let s = b[i]
+        let t = str::trim_start(s)
+        if t != "" {
+            let n = aksara::indentasi(s)
+            var geser = 0
+            if semua {
+                let buang = str::starts_with(t, "// ") $ 3 : 2
+                b[i] = kiri_dari(s, n) + str::slice(t, buang)
+                geser = 0 - buang
+            } else {
+                b[i] = kiri_dari(s, dangkal) + "// " + kanan_dari(s, dangkal)
+                geser = 3
+            }
+            if i == p.br && p.kol > n { x.kol = math::max(p.kol + geser, n) }
+            if i == p.tanda_br && p.tanda_kol > n { x.tanda_kol = math::max(p.tanda_kol + geser, n) }
+        }
+        i = i + 1
+    }
+    x.baris = b
+    x.kelompok = ""
+    return rapikan(tandai_ubah(x, k[0]))
+}
+
+// ── Gerak ───────────────────────────────────────────────────────────────
+
+fn mulai_gerak(p, pilih) {
+    var x = putus(p)
+    if pilih { return pasang_tanda(x) }
+    x.bertanda = false
+    return x
+}
+
+/// Gerak kursor. `pilih` memperpanjang seleksi (Shift); tanpa itu seleksi dilepas.
+/// `halaman` adalah tinggi area teks, dipakai `pgup`/`pgdn`.
+pub fn gerak(p, arah, pilih, halaman) {
+    // Kiri/kanan tanpa Shift atas sebuah seleksi cukup pindah ke tepinya.
+    if !pilih && (arah == "kiri" || arah == "kanan") {
+        match seleksi(p) {
+            Option::Some(r) => {
+                var s = putus(p)
+                s.bertanda = false
+                if arah == "kiri" { s.br = r[0]; s.kol = r[1] } else { s.br = r[2]; s.kol = r[3] }
+                return ingat_kolom(s)
+            }
+            Option::None => {}
+        }
+    }
+    var x = mulai_gerak(p, pilih)
+    let n = len(x.baris)
+    let pj = str::len(x.baris[x.br])
+    if arah == "kiri" {
+        if x.kol > 0 { x.kol = x.kol - 1 }
+        else if x.br > 0 { x.br = x.br - 1; x.kol = str::len(x.baris[x.br]) }
+        return ingat_kolom(x)
+    }
+    if arah == "kanan" {
+        if x.kol < pj { x.kol = x.kol + 1 }
+        else if x.br + 1 < n { x.br = x.br + 1; x.kol = 0 }
+        return ingat_kolom(x)
+    }
+    if arah == "atas" || arah == "bawah" || arah == "pgup" || arah == "pgdn" {
+        var langkah = 1
+        if arah == "pgup" || arah == "pgdn" { langkah = math::max(halaman - 1, 1) }
+        if arah == "atas" || arah == "pgup" { langkah = 0 - langkah }
+        let tujuan = math::min(math::max(x.br + langkah, 0), n - 1)
+        if tujuan == x.br {
+            // Sudah di tepi: naik dari baris pertama ke kolom nol, turun dari yang terakhir ke ujung.
+            if langkah < 0 { x.kol = 0 } else { x.kol = pj }
+            return ingat_kolom(x)
+        }
+        x.br = tujuan
+        x.kol = aksara::ke_karakter(x.baris[x.br], x.kol_ingin)
+        return x
+    }
+    if arah == "home" {
+        // Home pintar: ke awal isi dulu, lalu ke kolom nol kalau sudah di sana.
+        let awal = aksara::indentasi(x.baris[x.br])
+        if x.kol == awal { x.kol = 0 } else { x.kol = awal }
+        return ingat_kolom(x)
+    }
+    if arah == "end" { x.kol = pj; return ingat_kolom(x) }
+    if arah == "awal" { x.br = 0; x.kol = 0; return ingat_kolom(x) }
+    if arah == "akhir" { x.br = n - 1; x.kol = str::len(x.baris[x.br]); return ingat_kolom(x) }
+    if arah == "kata_kiri" {
+        if x.kol == 0 {
+            if x.br > 0 { x.br = x.br - 1; x.kol = str::len(x.baris[x.br]) }
+            return ingat_kolom(x)
+        }
+        let k = str::chars(x.baris[x.br])
+        var i = x.kol
+        while i > 0 && !aksara::kata(k[i - 1]) { i = i - 1 }
+        while i > 0 && aksara::kata(k[i - 1]) { i = i - 1 }
+        x.kol = i
+        return ingat_kolom(x)
+    }
+    if arah == "kata_kanan" {
+        if x.kol >= pj {
+            if x.br + 1 < n { x.br = x.br + 1; x.kol = 0 }
+            return ingat_kolom(x)
+        }
+        let k = str::chars(x.baris[x.br])
+        var i = x.kol
+        while i < pj && !aksara::kata(k[i]) { i = i + 1 }
+        while i < pj && aksara::kata(k[i]) { i = i + 1 }
+        x.kol = i
+        return ingat_kolom(x)
+    }
+    return x
+}
+
+/// Ganti rentang `[br1, kol1, br2, kol2]` dengan `teks` sebagai bagian langkah urung
+/// berjenis `jenis`: penggantian berturut-turut berjenis sama jadi SATU langkah urung.
+pub fn ganti_rentang(p, r, teks, jenis) {
+    var x = catat(p, jenis)
+    x = buang_rentang(x, r)
+    x = sisip_mentah(x, teks)
+    return ingat_kolom(x)
+}
+
+/// Taruh kursor tanpa memutus kelompok urung — untuk operasi berantai seperti ganti.
+pub fn taruh(p, br, kol) {
+    var x = p
+    x.br = br
+    x.kol = kol
+    x.bertanda = false
+    return ingat_kolom(rapikan(x))
+}
+
+/// Pasang tanda seleksi di kursor (mode blok); gerak sesudahnya memperpanjangnya.
+pub fn tandai(p) {
+    var x = putus(p)
+    x.bertanda = true
+    x.tanda_br = p.br
+    x.tanda_kol = p.kol
+    return x
+}
+
+/// Pilih seluruh baris `br`, termasuk akhir barisnya kalau bukan baris terakhir.
+pub fn pilih_baris(p, br) {
+    let n = len(p.baris)
+    let b = math::min(math::max(br, 0), n - 1)
+    if b + 1 < n { return pilih_rentang(p, b, 0, b + 1, 0) }
+    return pilih_rentang(p, b, 0, b, str::len(p.baris[b]))
+}
+
+/// Ganti SELURUH isi dengan `baris` sebagai satu langkah urung; kursor dijepit di tempatnya.
+pub fn ganti_isi(p, baris) {
+    var x = catat(p, "")
+    var isi = baris
+    if len(isi) == 0 { isi = [""] }
+    x.baris = isi
+    x.bertanda = false
+    x.kelompok = ""
+    return ingat_kolom(rapikan(tandai_ubah(x, 0)))
+}
+
+/// Lompat ke baris `br` kolom `kol` (keduanya dari nol), dijepit ke dalam isi.
+pub fn ke(p, br, kol) {
+    var x = putus(p)
+    x.bertanda = false
+    x.br = br
+    x.kol = kol
+    return ingat_kolom(rapikan(x))
+}
+
+/// Seleksi dari `(br1, kol1)` sampai `(br2, kol2)`, kursor di ujung kedua.
+pub fn pilih_rentang(p, br1, kol1, br2, kol2) {
+    var x = putus(p)
+    x.bertanda = true
+    x.tanda_br = br1
+    x.tanda_kol = kol1
+    x.br = br2
+    x.kol = kol2
+    return ingat_kolom(rapikan(x))
+}
+
+// ── Kurung berpasangan ──────────────────────────────────────────────────
+
+/// Posisi `[br, kol]` kurung di kursor: yang di bawahnya, atau yang tepat di kirinya.
+pub fn kurung_di_kursor(p) {
+    let ini = p.baris[p.br]
+    var kol = p.kol
+    var c = kar(ini, kol)
+    if c == "" || !(str::contains(PEMBUKA, c) || str::contains(PENUTUP, c)) {
+        kol = p.kol - 1
+        c = kar(ini, kol)
+    }
+    if c == "" || !(str::contains(PEMBUKA, c) || str::contains(PENUTUP, c)) { return Option::None }
+    return Option::Some([p.br, kol])
+}
+
+/// Posisi `[br, kol]` pasangan kurung di kursor, dicari paling jauh `batas` baris.
+/// Cuma menghitung kedalaman — kurung di dalam string ikut terhitung.
+pub fn pasangan_kurung(p, batas_baris) {
+    var kol = 0
+    match kurung_di_kursor(p) {
+        Option::Some(k) => { kol = k[1] }
+        Option::None => { return Option::None }
+    }
+    let c = kar(p.baris[p.br], kol)
+    var maju = true
+    var lawan = pasangan(c)
+    if lawan == "" {
+        if !str::contains(PENUTUP, c) { return Option::None }
+        maju = false
+        if c == ")" { lawan = "(" }
+        if c == "]" { lawan = "[" }
+        if c == "}" { lawan = "{" }
+    }
+    let cr = str::char_at(c, 0)
+    let lr = str::char_at(lawan, 0)
+    var dalam = 0
+    var br = p.br
+    var batas = math::max(batas_baris, 1)
+    while br >= 0 && br < len(p.baris) && batas > 0 {
+        let k = str::chars(p.baris[br])
+        var i = maju $ 0 : len(k) - 1
+        if br == p.br { i = kol }
+        while i >= 0 && i < len(k) {
+            if k[i] == cr { dalam = dalam + 1 }
+            if k[i] == lr {
+                dalam = dalam - 1
+                if dalam == 0 { return Option::Some([br, i]) }
+            }
+            if maju { i = i + 1 } else { i = i - 1 }
+        }
+        if maju { br = br + 1 } else { br = br - 1 }
+        batas = batas - 1
+    }
+    return Option::None
+}
+
+/// Seluruh isi sebagai satu teks, dengan akhir baris yang sama seperti saat dibuka.
+pub fn isi_teks(p) {
+    let pemisah = p.crlf $ "\r\n" : "\n"
+    return arr::join(p.baris, pemisah) + pemisah
+}

@@ -1,0 +1,93 @@
+// Tangkap Bintang — game kecil di atas `std/mesin`.
+// Dengan jendela: panah kiri/kanan (di HP: tombol layar). Tanpa jendela: diputar
+// dengan masukan rekaman, lalu bingkai terakhirnya disimpan ke PNG.
+package main
+
+import "std/mesin"
+import "std/mesin/vek"
+import "std/mesin/warna"
+import "std/mesin/fisika"
+import "std/mesin/ui"
+
+const LEBAR = 160
+const TINGGI = 120
+
+struct Main { pub pemain: fisika::Kotak, pub bintang: []vek::Vek2, pub skor: int, pub benih: int, pub waktu: float }
+
+fn acak(b) {
+    let s = (b * 48271) % 2147483647
+    return s <= 0 $ s + 2147483646 : s
+}
+
+fn perbarui(k, m, dt) {
+    var s = k
+    let arah = m.arah("Left", "Right", "Up", "Down")
+    s.pemain = k.pemain.geser(vek::baru(arah.x * 90.0 * dt, 0.0))
+    if s.pemain.x < 0.0 { s.pemain.x = 0.0 }
+    if s.pemain.x > (LEBAR as float) - s.pemain.w { s.pemain.x = (LEBAR as float) - s.pemain.w }
+    s.waktu = k.waktu + dt
+    // Satu bintang baru tiap setengah detik, di kolom acak.
+    if s.waktu >= 0.5 {
+        s.waktu = s.waktu - 0.5
+        s.benih = acak(s.benih)
+        s.bintang = s.bintang + [vek::baru((s.benih % (LEBAR - 4)) as float, 0.0)]
+    }
+    var sisa = []
+    for _, b in s.bintang {
+        let turun = b.add(vek::baru(0.0, 40.0 * dt))
+        if fisika::kotak(turun.x, turun.y, 3.0, 3.0).tabrak(s.pemain) {
+            s.skor = s.skor + 1
+        } else if turun.y < (TINGGI as float) {
+            sisa = sisa + [turun]
+        }
+    }
+    s.bintang = sisa
+    return s
+}
+
+// Bunyi diturunkan dari PERUBAHAN keadaan, jadi `perbarui` tetap murni.
+fn bunyi(lama, baru) {
+    if baru.skor > lama.skor { return [wokwok::mul(suara::selubung(suara::nada(880, 80, "kotak"), 2, 60), 0.2)] }
+    return []
+}
+
+fn gambar(c, k) {
+    for _, b in k.bintang { canvas::fill_rect(c, b.x, b.y, 3, 3, warna::KUNING) }
+    let p = k.pemain
+    canvas::fill_rect(c, p.x, p.y, p.w, p.h, warna::BIRU)
+    ui::label(c, 4, 4, "SKOR " + str(k.skor), 1, warna::PUTIH)
+}
+
+pub fn main() {
+    let awal = Main { pemain: fisika::kotak(70.0, 110.0, 20.0, 4.0), bintang: [], skor: 0,
+                      benih: 7, waktu: 0.0 }
+    var g = mesin::baru("Tangkap Bintang", LEBAR, TINGGI, awal, perbarui, gambar)
+        .dengan_latar(warna::rgb(10, 12, 30))
+        .dengan_bunyi(bunyi)
+    // Di HP tidak ada panah: tombolnya digambar di layar dan disentuh.
+    if canvas::layar_sentuh() { g = g.dengan_tombol_layar(["Left", "Right"]) }
+    if canvas::punya_jendela() {
+        let akhir = g.jalankan()
+        wok("skor akhir:", akhir.keadaan.skor)
+        return
+    }
+    // Tanpa jendela: pemain mengejar bintang terendah, 20 detik bingkai tetap.
+    var h = g
+    for _ in range(0, 1200) {
+        let k = h.keadaan
+        var tombol = []
+        if len(k.bintang) > 0 {
+            let x = k.bintang[0].x
+            let tengah = k.pemain.x + k.pemain.w / 2.0
+            if x < tengah - 2.0 { tombol = ["Left"] }
+            if x > tengah + 2.0 { tombol = ["Right"] }
+        }
+        h = h.simulasi([tombol])
+    }
+    wok("langkah:", h.langkah_ke, "skor:", h.keadaan.skor, "bintang di layar:", len(h.keadaan.bintang))
+    let c = Canvas::new(LEBAR, TINGGI)
+    h.gambar_ke(c)
+    let berkas = fs::temp_dir() + "/tangkap_bintang.png"
+    canvas::save_png(c, berkas)
+    wok("bingkai terakhir:", fs::exists(berkas))
+}

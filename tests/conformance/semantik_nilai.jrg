@@ -1,0 +1,104 @@
+package main
+
+// ============================================================================
+// Konformans: SEMANTIK NILAI
+
+struct Titik { pub x: int, pub y: int }
+
+fn ubah_array(a) {
+    a[0] = 999
+    return 0
+}
+
+fn ubah_titik(t) {
+    t.x = 999
+    return 0
+}
+
+fn bikin_array() {
+    var lokal = [1, 2, 3]
+    return lokal
+}
+
+pub fn main() {
+    // ── Penugasan menyalin ───────────────────────────────────────────────
+    var a = [1, 2, 3]
+    var b = a
+    b[0] = 99
+    assert_eq(a[0], 1, "penugasan array harus menyalin")
+    assert_eq(b[0], 99, "salinan harus bisa diubah sendiri")
+
+    // ── Argumen fungsi menyalin ──────────────────────────────────────────
+    var c = [1, 2, 3]
+    ubah_array(c)
+    assert_eq(c[0], 1, "argumen array harus disalin, bukan dibagi")
+
+    // ── Bersarang ikut disalin (salinan dalam, bukan dangkal) ────────────
+    var d = [[1], [2]]
+    var e = d
+    e[0][0] = 99
+    assert_eq(d[0][0], 1, "array bersarang harus disalin sampai dalam")
+
+    // ── Struct berlaku sama ──────────────────────────────────────────────
+    var p = Titik { x: 1, y: 2 }
+    var q = p
+    q.x = 99
+    assert_eq(p.x, 1, "penugasan struct harus menyalin")
+
+    var r = Titik { x: 1, y: 2 }
+    ubah_titik(r)
+    assert_eq(r.x, 1, "argumen struct harus disalin")
+
+    // ── Struct di dalam array ────────────────────────────────────────────
+    var s = [Titik { x: 1, y: 2 }]
+    var t = s
+    t[0].x = 99
+    assert_eq(s[0].x, 1, "struct di dalam array ikut disalin")
+
+    // ── Nilai kembalian tidak berbagi dengan lokal si callee ─────────────
+    var u = bikin_array()
+    u[0] = 999
+    assert_eq(bikin_array()[0], 1, "kembalian tidak boleh berbagi penyimpanan")
+
+    // ── Dua salinan dari sumber yang sama saling bebas ───────────────────
+    var v = [1]
+    var w = v
+    var y = v
+    w[0] = 9
+    y[0] = 8
+    assert_eq(v[0], 1, "sumber tidak berubah")
+    assert_eq(w[0], 9, "salinan pertama bebas")
+    assert_eq(y[0], 8, "salinan kedua bebas")
+
+    // ── Elemen literal array disalin saat dimasukkan ─────────────────────
+    var z = [1, 2]
+    var kembar = [z, z]
+    kembar[0][0] = 999
+    assert_eq(z[0], 1, "elemen literal disalin saat masuk")
+    assert_eq(kembar[1][0], 1, "dua elemen dari sumber sama tidak beralias")
+
+    // ── Mutasi DI TEMPAT harus tetap terlihat ────────────────────────────
+    var m = [1, 2, 3]
+    m[0] = 100
+    m[2] = 300
+    assert_eq(m[0], 100, "penugasan indeks harus terlihat")
+    assert_eq(m[1], 2,   "elemen lain tidak ikut berubah")
+    assert_eq(m[2], 300, "penugasan indeks terakhir terlihat")
+
+    var n = Titik { x: 1, y: 2 }
+    n.x = 77
+    assert_eq(n.x, 77, "penugasan field harus terlihat")
+
+    var dalam = [[1], [2]]
+    dalam[0][0] = 5
+    assert_eq(dalam[0][0], 5, "penugasan bersarang harus terlihat")
+
+    // ── Builtin array bersifat MURNI ─────────────────────────────────────
+    var asal = [1, 2]
+    var tambah = arr::push(asal, 3)
+    assert_eq(len(asal), 2,   "arr::push tidak memutasi argumennya")
+    assert_eq(len(tambah), 3, "arr::push mengembalikan array baru")
+    assert_eq(tambah[2], 3,   "elemen baru ada di akhir")
+
+    wok("semantik nilai: semua lolos")
+}
