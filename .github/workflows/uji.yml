@@ -26,5 +26,12 @@ jobs:
       - name: Suite
         run: cargo test --release -j 2 --no-fail-fast
 
+      # Uji asap memeriksa `--emit-llvm` lewat pustaka jadi, seperti di arsip rilis.
+      - name: Pustaka --emit-llvm
+        run: |
+          (cd runtime && cargo build --release)
+          (cd jembatan && cargo build --release)
+          cp runtime/target/release/libjrgrt.a jembatan/target/release/libjrgjembatan.so target/release/
+
       - name: Uji asap
         run: sh rilis/uji_asap.sh target/release "$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
