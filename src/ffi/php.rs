@@ -32,10 +32,11 @@ pub static RT: Runtime = Runtime {
     nama: "php",
     ns: "php",
     bin: "php",
-    // Galat yang lolos dari penangan (fatal saat kompilasi, galat startup) ke
-    // stderr, bukan ke stdout yang jadi kawat protokol; prepend tidak ikut.
+    // Galat yang lolos dari penangan (fatal saat kompilasi, galat startup) ke stderr, bukan ke
+    // stdout yang jadi kawat protokol; prepend tidak ikut. Xdebug dimatikan: ia mengubah bentuk
+    // `var_dump`, memotong rekursi di 256 tingkat, dan menulis tumpukan panggilan bercap waktu.
     bin_args: &["-d", "display_errors=stderr", "-d", "log_errors=0", "-d", "html_errors=0",
-                "-d", "auto_prepend_file=", "-d", "auto_append_file="],
+                "-d", "auto_prepend_file=", "-d", "auto_append_file=", "-d", "xdebug.mode=off"],
     skrip_src: include_str!("php_runner.php"),
     skrip_nama: "jrg_php_runner.php",
     bantuan_pasang: "pastikan `php` (8.0 ke atas) ada di PATH — di Debian/Ubuntu: apt install \

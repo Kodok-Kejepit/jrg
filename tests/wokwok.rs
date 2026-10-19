@@ -478,7 +478,9 @@ fn pemutar_sunyi_dan_server_yang_tidak_ada() {
         c.arg(&g).arg("--sopan").env("PULSE_SERVER", "unix:/tidak/ada");
         if vm { c.arg("--vm"); }
         let k = String::from_utf8_lossy(&c.output().expect("jalankan").stdout).to_string();
-        assert!(k.contains("Result::Err(suara::putar_tunggu: tidak bisa terhubung ke server suara"), "{}", k);
+        // Tanpa libpulse sama sekali (runner CI) sebabnya pustaka itu, dan itu pun harus disebut.
+        assert!(k.contains("Result::Err(suara::putar_tunggu: tidak bisa terhubung ke server suara")
+                || k.contains("Result::Err(suara: tidak bisa memuat libpulse-simple"), "{}", k);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }

@@ -2748,8 +2748,10 @@ fn dependensi_git_publish_add_update() {
     let _ = std::fs::remove_dir_all(&akar);
     std::fs::create_dir_all(&akar).unwrap();
     let jalan = |dir: &Path, args: &[&str]| {
+        // `publish` membuat tag beranotasi, jadi butuh identitas git; runner CI tidak punya.
         let o = Command::new(&j).args(args).current_dir(dir).env("JRGM_TEMBOLOK", akar.join("tembolok"))
-            .env("JRG_SOPAN", "1").output().unwrap();
+            .env("JRG_SOPAN", "1").env("GIT_COMMITTER_NAME", "u").env("GIT_COMMITTER_EMAIL", "u@j")
+            .env("GIT_AUTHOR_NAME", "u").env("GIT_AUTHOR_EMAIL", "u@j").output().unwrap();
         (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr))
     };
     let git = |dir: &Path, args: &[&str]| {

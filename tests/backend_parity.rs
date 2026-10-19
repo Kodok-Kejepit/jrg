@@ -8417,12 +8417,13 @@ public static class UjiJrg
 }
 "#;
 
-    const CONFIG: &str = r#"{
-  "runtimeOptions": {
-    "tfm": "net6.0",
-    "framework": { "name": "Microsoft.NETCore.App", "version": "6.0.0" }
-  }
-}"#;
+    /// Versi framework diambil dari yang terpasang: tanpa itu hostfxr menolak (0x80008096)
+    /// di mesin yang cuma punya .NET versi mayor lain.
+    fn config(versi: &str) -> String {
+        let mayor = versi.split('.').next().unwrap_or("6");
+        format!("{{\n  \"runtimeOptions\": {{\n    \"tfm\": \"net{mayor}.0\",\n    \"framework\": \
+                 {{ \"name\": \"Microsoft.NETCore.App\", \"version\": \"{versi}\" }}\n  }}\n}}\n")
+    }
 
     fn siapkan() -> Option<std::path::PathBuf> {
         let Some(akar) = akar_dotnet() else {
@@ -8447,7 +8448,8 @@ public static class UjiJrg
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("bikin dir");
         std::fs::write(dir.join("Uji.cs"), KELAS).expect("tulis cs");
-        std::fs::write(dir.join("UjiJrg.runtimeconfig.json"), CONFIG).expect("tulis config");
+        let versi = fw.file_name().map(|v| v.to_string_lossy().to_string()).unwrap_or_default();
+        std::fs::write(dir.join("UjiJrg.runtimeconfig.json"), config(&versi)).expect("tulis config");
         let out = Command::new(akar.join("dotnet"))
             .arg("exec").arg(&csc)
             .args(["-nologo", "-target:library", "-out:UjiJrg.dll"])
