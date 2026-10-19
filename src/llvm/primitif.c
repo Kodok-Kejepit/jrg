@@ -1,5 +1,12 @@
 // primitif.c — primitif memori biner `--emit-llvm` yang ditulis dalam C (lapis kedua dari
 // arsitektur tiga lapis: Rust kompiler, C primitif, pustaka standar dalam JRG).
+
+// Berkas ini selalu pertama di sumber C gabungan. SDK macOS menyembunyikan rutin ucontext milik
+// korutin.c tanpa _XOPEN_SOURCE, dan _DARWIN_C_SOURCE menjaga sisa API BSD-nya tetap terlihat.
+#ifdef __APPLE__
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE
+#endif
 #include <stdint.h>
 #include <string.h>
 
