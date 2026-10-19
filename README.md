@@ -123,4 +123,4 @@ belum seluruh bahasa. Selama `0.x`, perubahan yang memutus program lama masih mu
 
 ## Lisensi
 
-[MIT](LICENSE) © 2026 Muhamad Surya Widianto.
+[MIT](LICENSE) © 2026 Kodok-Kejepit.
