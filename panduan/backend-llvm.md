@@ -76,4 +76,4 @@ dengan pesan yang benar.
 ## Kecepatan
 
 Untuk kerja angka dan pemanggilan fungsi, hasilnya setara C. Angka lengkapnya dan cara mengukur ulang ada di halaman
-[Benchmark](https://jawarustgoplusplus.web.id/web_dokumentasi/benchmark.html) dan `benchmarks/llvm/`.
+[Benchmark](https://jrg-lang.org/web_dokumentasi/benchmark.html) dan `benchmarks/llvm/`.

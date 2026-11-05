@@ -48,4 +48,4 @@ mencetak `double` dengan format terpendek yang sama dengan Rust dan JRG.
 - Sebagian kernel memakai bilangan `u64` yang membungkus, yang ditolak interpreter dan VM. Kernel-kernel itu hanya
   berjalan lewat `--emit-llvm`.
 
-Angka terbaru ada di halaman [Benchmark](https://jawarustgoplusplus.web.id/web_dokumentasi/benchmark.html).
+Angka terbaru ada di halaman [Benchmark](https://jrg-lang.org/web_dokumentasi/benchmark.html).

@@ -30,7 +30,7 @@ Contoh:
   jrgm kunci / apk --rilis   kunci rilis sekali, lalu APK siap terbit
   jrgm apk --rilis --aab     bundel untuk Play Store
 
-Penjelasan lengkap: https://jawarustgoplusplus.web.id/web_dokumentasi/jrgm.html",
+Penjelasan lengkap: https://jrg-lang.org/web_dokumentasi/jrgm.html",
     after_long_help = "\
 Contoh:
   jrgm new proyekku          bikin proyek baru (--kind lib | web)
@@ -39,7 +39,7 @@ Contoh:
   jrgm add bantu --path ../bantu    dependensi lokal
   jrgm lint                  periksa tanpa menjalankan
 
-Penjelasan lengkap: https://jawarustgoplusplus.web.id/web_dokumentasi/jrgm.html"
+Penjelasan lengkap: https://jrg-lang.org/web_dokumentasi/jrgm.html"
 )]
 pub(crate) struct Cli {
     #[command(subcommand)]

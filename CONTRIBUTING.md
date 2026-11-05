@@ -50,7 +50,7 @@ PHP, Lua, atau JDK dilewati dengan pesan kalau perkakasnya tidak terpasang.
 
 ## Dokumentasi
 
-Situs dokumentasinya ([jawarustgoplusplus.web.id](https://jawarustgoplusplus.web.id)) dikelola terpisah dari repo ini.
+Situs dokumentasinya ([jrg-lang.org](https://jrg-lang.org)) dikelola terpisah dari repo ini.
 Kalau ada contoh yang salah atau penjelasan yang kurang, buka issue dan sebut halamannya. Contoh kode di sana
 dijalankan dengan `jrgc` sebelum terbit, jadi contoh yang keluarannya tidak cocok juga dihitung bug.
 

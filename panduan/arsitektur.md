@@ -1,7 +1,7 @@
 # Arsitektur JRG
 
 Peta kode sumber untuk yang ingin membaca atau mengubah `jrgc`. Penjelasan bahasanya sendiri ada di
-[situs dokumentasi](https://jawarustgoplusplus.web.id/web_dokumentasi/index.html).
+[situs dokumentasi](https://jrg-lang.org/web_dokumentasi/index.html).
 
 ## Jalur sebuah program
 

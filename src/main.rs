@@ -73,7 +73,7 @@ Contoh:
   jrgc --cari <kata>            cari fungsi bawaan
   jrgc --doc <nama>             cara pakai satu fungsi bawaan
 
-Penjelasan panjang tiap flag: https://jawarustgoplusplus.web.id/web_dokumentasi/jrgc.html",
+Penjelasan panjang tiap flag: https://jrg-lang.org/web_dokumentasi/jrgc.html",
     after_long_help = "\
 Contoh:
   jrgc halo.jrg                 jalankan
@@ -83,7 +83,7 @@ Contoh:
   jrgc --sunting halo.jrg       buka penyunting kode
   jrgc                          REPL
 
-Penjelasan panjang tiap flag: https://jawarustgoplusplus.web.id/web_dokumentasi/jrgc.html
+Penjelasan panjang tiap flag: https://jrg-lang.org/web_dokumentasi/jrgc.html
 Proyek banyak berkas:          jrgm --help"
 )]
 struct Cli {

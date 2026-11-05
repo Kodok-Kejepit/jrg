@@ -4,9 +4,9 @@
 
 <p align="center">
   Bahasa pemrograman dengan pesan galat berbahasa Indonesia.<br>
-  <a href="https://jawarustgoplusplus.web.id/web_dokumentasi/index.html">Dokumentasi</a> ·
-  <a href="https://jawarustgoplusplus.web.id/matematika_x_jrg/index.html">Matematika × JRG</a> ·
-  <a href="https://jawarustgoplusplus.web.id/web_dokumentasi/pasang.html">Pasang</a> ·
+  <a href="https://jrg-lang.org/web_dokumentasi/index.html">Dokumentasi</a> ·
+  <a href="https://jrg-lang.org/matematika_x_jrg/index.html">Matematika × JRG</a> ·
+  <a href="https://jrg-lang.org/web_dokumentasi/pasang.html">Pasang</a> ·
   <a href="CHANGELOG.md">Perubahan</a>
 </p>
 
@@ -91,13 +91,13 @@ jrgm apk                   # bungkus jadi aplikasi Android
   SQLite, kanvas, suara, numerik), 14 modul `std/` yang ditulis dalam JRG, dan mesin game 2D.
 - **Bahasa lain:** C, C++, Rust, Go, Python, JavaScript, PHP, Lua, Java, Kotlin, .NET, dan WebAssembly.
 - **Perkakas:** pengelola proyek dengan tes, format, lint, dan dependensi lewat git; server bahasa (LSP); pembungkus
-  APK Android; dan [JRG IDE](https://jawarustgoplusplus.web.id/web_dokumentasi/editor.html) untuk peramban dan HP.
+  APK Android; dan [JRG IDE](https://jrg-lang.org/web_dokumentasi/editor.html) untuk peramban dan HP.
 
 ## Belajar
 
-- [Tur singkat](https://jawarustgoplusplus.web.id/web_dokumentasi/tur.html): sepuluh menit pertama.
-- [Dokumentasi](https://jawarustgoplusplus.web.id/web_dokumentasi/index.html): rujukan bahasa, pustaka, dan perkakas.
-- [Matematika × JRG](https://jawarustgoplusplus.web.id/matematika_x_jrg/index.html): kelas dari nol untuk yang belum pernah memprogram, dengan
+- [Tur singkat](https://jrg-lang.org/web_dokumentasi/tur.html): sepuluh menit pertama.
+- [Dokumentasi](https://jrg-lang.org/web_dokumentasi/index.html): rujukan bahasa, pustaka, dan perkakas.
+- [Matematika × JRG](https://jrg-lang.org/matematika_x_jrg/index.html): kelas dari nol untuk yang belum pernah memprogram, dengan
   kuis dan kode yang bisa dijalankan di peramban.
 
 ## Mengembangkan JRG
@@ -119,7 +119,7 @@ nilai yang tampak masuk akal; dan program yang jalan di dua mesin harus mencetak
 
 Versi **0.2.0**. Interpreter dan VM menjalankan seluruh bahasa; backend LLVM menjalankan semua uji konformans tapi
 belum seluruh bahasa. Selama `0.x`, perubahan yang memutus program lama masih mungkin dan selalu dicatat di
-[CHANGELOG](CHANGELOG.md). Daftar yang belum jadi ada di [Yang belum jadi](https://jawarustgoplusplus.web.id/web_dokumentasi/batasan.html).
+[CHANGELOG](CHANGELOG.md). Daftar yang belum jadi ada di [Yang belum jadi](https://jrg-lang.org/web_dokumentasi/batasan.html).
 
 ## Lisensi
 
