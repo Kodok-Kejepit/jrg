@@ -31,7 +31,7 @@ impl Interpreter {
         match kind {
             FileRead => {
                 let path = path_of(&fst(args), "file::read")?;
-                Ok(match std::fs::read_to_string(&path) {
+                Ok(match crate::host::baca_teks(&path) {
                     Ok(s)  => ok_value(Value::Str(std::sync::Arc::new(s))),
                     Err(e) => err_value(format!("file::read: gagal baca `{}` — {}", path, crate::host::galat_io(&e))),
                 })
@@ -76,7 +76,7 @@ impl Interpreter {
 
             FileReadLines => {
                 let path = path_of(&fst(args), "file::read_lines")?;
-                Ok(match std::fs::read_to_string(&path) {
+                Ok(match crate::host::baca_teks(&path) {
                     Ok(s) => ok_value(Value::Array(
                         s.lines().map(|l| Value::Str(std::sync::Arc::new(l.to_string()))).collect()
                     )),

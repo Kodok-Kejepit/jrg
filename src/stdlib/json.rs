@@ -133,7 +133,7 @@ pub fn register(vm: &mut Vm) {
 
 // ─── Parser ──────────────────────────────────────────────────────────────
 
-/// Urai lewat pengurai bersama (`json_inti`), lalu jadikan nilai VM. Kunci kembar: yang terakhir.
+/// Urai lewat pengurai bersama (`json_inti`), lalu jadikan nilai VM. Kunci kembar ditolak `json_inti`.
 fn parse_json(s: &str) -> Result<VmValue, String> {
     fn ke_vm(j: crate::json_inti::Json) -> VmValue {
         use crate::json_inti::Json;

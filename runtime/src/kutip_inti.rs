@@ -12,6 +12,9 @@ pub fn kutip(t: impl AsRef<str>) -> String {
     format!("{}…{} ({} karakter)", lolos(t.chars().take(40)), lolos(t.chars().skip(n - 12)), n)
 }
 
+/// `kutip` tanpa pemotongan, untuk teks yang ditulis utuh ke satu baris (`dok::log_*`).
+pub fn lolos_utuh(t: &str) -> String { lolos(t.chars()) }
+
 fn lolos(cs: impl Iterator<Item = char>) -> String {
     let mut s = String::new();
     for c in cs {
@@ -32,5 +35,6 @@ mod tes {
         let k = kutip("é".repeat(1_000_000));
         assert!(k.chars().count() < 80 && k.ends_with("(1000000 karakter)"), "{}", k);
         assert_eq!(kutip("x".repeat(64)), "x".repeat(64));
+        assert_eq!(super::lolos_utuh(&"a\x1b".repeat(40)), "a\\u{1b}".repeat(40));
     }
 }

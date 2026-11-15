@@ -33,7 +33,15 @@ pub(crate) fn gabung(nama: &str, args: &[Value]) -> EvalResult {
         o => return runtime_err!("{}", crate::interpreter::pesan_arg_harus_array(nama, 1, &o.type_name())),
     };
     let sep = teks_peran(&args[1], nama, "pemisahnya")?;
-    Ok(Value::Str(std::sync::Arc::new(arr.iter().map(|v| format!("{}", v)).collect::<Vec<_>>().join(&sep))))
+    let bagian: Vec<String> = arr.iter().map(|v| format!("{}", v)).collect();
+    // Pemisah panjang di antara jutaan elemen kosong dulu membangun gigabita dan mematikan prosesnya.
+    let n = bagian.len() as i128;
+    let total = bagian.iter().fold(0i128, |t, b| t + b.len() as i128)
+        .saturating_add((n - 1).max(0).saturating_mul(sep.len() as i128));
+    if total > crate::interpreter::MAKS_TEKS_HASIL {
+        return runtime_err!("{}", crate::interpreter::pesan_gabung_kegedean(nama, n, sep.chars().count(), total));
+    }
+    Ok(Value::Str(std::sync::Arc::new(bagian.join(&sep))))
 }
 
 /// Argumen pertama dari daftar argumen, kosong dibaca sebagai `nil` seperti dulu.
@@ -44,7 +52,18 @@ pub(crate) mod inti {
     pub fn lower(s: &str) -> String { s.to_lowercase() }
     pub fn trim(s: &str) -> String { s.trim().to_string() }
     pub fn reverse(s: &str) -> String { s.chars().rev().collect() }
-    pub fn replace(s: &str, dari: &str, ke: &str) -> String { s.replace(dari, ke) }
+    /// Hasilnya diukur SEBELUM dibangun: pola kosong atau kecocokan banyak kali pengganti panjang dulu
+    /// membangun gigabita dari masukan sekilobita dan prosesnya mati (`memory allocation .. failed`).
+    pub fn replace(s: &str, dari: &str, ke: &str) -> Result<String, String> {
+        if ke.len() > dari.len() {
+            let n = if dari.is_empty() { s.chars().count() + 1 } else { s.matches(dari).count() } as i128;
+            let total = (s.len() as i128).saturating_add(n.saturating_mul((ke.len() - dari.len()) as i128));
+            if total > crate::interpreter::MAKS_TEKS_HASIL {
+                return Err(crate::interpreter::pesan_ganti_kegedean("str::replace", n, ke.chars().count(), total));
+            }
+        }
+        Ok(s.replace(dari, ke))
+    }
     pub fn contains(s: &str, p: &str) -> bool { s.contains(p) }
     pub fn starts_with(s: &str, p: &str) -> bool { s.starts_with(p) }
     pub fn ends_with(s: &str, p: &str) -> bool { s.ends_with(p) }
@@ -234,7 +253,10 @@ impl Interpreter {
                 let s    = teks(&args[0], "str::replace")?;
                 let from = teks_peran(&args[1], "str::replace", "yang diganti")?;
                 let to   = format!("{}", args[2]);
-                Ok(Value::Str(std::sync::Arc::new(inti::replace(&s, &from, &to))))
+                match inti::replace(&s, &from, &to) {
+                    Ok(h) => Ok(Value::Str(std::sync::Arc::new(h))),
+                    Err(e) => runtime_err!("{}", e),
+                }
             }
             // Sama persis dengan `s[awal:akhir]` — dilempar ke `eval_slice` yang sama,
             // bukan diimplementasikan ulang di sini.

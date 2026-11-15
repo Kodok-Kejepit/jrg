@@ -771,9 +771,7 @@ pub fn bangun(ir: Option<&str>, sumber: &Path, tujuan: &Path, opsi: &OpsiApk, ve
     }
     let ada_ikon = app.ikon.is_some() || app.ikon_depan.is_some();
     let alat = cari_alat()?;
-    let kerja = std::env::temp_dir().join(format!("jrgc-apk-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&kerja);
-    std::fs::create_dir_all(&kerja).map_err(|e| format!("gagal membuat {}: {}", kerja.display(), e))?;
+    let kerja = crate::host::dir_sementara("jrgc-apk").map_err(|e| format!("gagal membuat folder kerja: {}", crate::host::galat_io(&e)))?;
     let hasil = (|| {
         let ir_path = kerja.join("program.ll");
         std::fs::write(&ir_path, ir.unwrap_or("")).map_err(|e| e.to_string())?;

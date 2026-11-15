@@ -606,7 +606,7 @@ fn daftar_str(vm: &mut Vm) {
         _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrEndsWith, v)),
     });
     vm.def("str::replace", |a| match a {
-        [VmValue::Str(s), VmValue::Str(d), VmValue::Str(k)] => Ok(VmValue::str(inti::replace(s, d, k))),
+        [VmValue::Str(s), VmValue::Str(d), VmValue::Str(k)] => Ok(VmValue::str(inti::replace(s, d, k)?)),
         _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrReplace, v)),
     });
     vm.def("str::split", |a| lewat(a, |v| Interpreter::dispatch_str_inner(

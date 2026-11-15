@@ -37,8 +37,9 @@ impl Web {
             lebar, tinggi, rgba: vec![0; lebar * tinggi * 4], judul: judul.to_string(), ..Default::default()
         }));
         let b = bersama.clone();
+        let nomor = dengar.local_addr().map(|a| a.port()).unwrap_or(port);
         std::thread::Builder::new().name("jrg-kanvas-web".into())
-            .spawn(move || { for s in dengar.incoming().flatten() { let _ = layani(s, &b); } })
+            .spawn(move || { for s in dengar.incoming().flatten() { let _ = layani(s, &b, nomor); } })
             .map_err(|e| format!("mode `web`: utas pelayan tidak bisa dibuat: {}", crate::host::galat_io(&e)))?;
         Ok(Web { bersama, alamat })
     }
@@ -57,7 +58,19 @@ impl Web {
     }
 }
 
-fn layani(mut s: TcpStream, b: &Arc<Mutex<Bersama>>) -> std::io::Result<()> {
+/// Cuma halaman kanvas ini sendiri: `Host` harus `127.0.0.1`/`localhost` berport ini (DNS rebinding membaca
+/// `/bingkai`), dan `Sec-Fetch-Site` lintas situs ditolak (`<img src=../tombol?..>` dulu menyuntikkan tombol).
+fn asal_sah(kepala: &str, port: u16) -> bool {
+    let nilai = |nama: &str| kepala.lines().skip(1).find_map(|b| {
+        let (k, v) = b.split_once(':')?;
+        k.trim().eq_ignore_ascii_case(nama).then(|| v.trim().to_ascii_lowercase())
+    });
+    let host_sah = nilai("host").is_some_and(|h| h == format!("127.0.0.1:{}", port) || h == format!("localhost:{}", port));
+    let situs_sah = nilai("sec-fetch-site").is_none_or(|s| s == "same-origin" || s == "none");
+    host_sah && situs_sah
+}
+
+fn layani(mut s: TcpStream, b: &Arc<Mutex<Bersama>>, port: u16) -> std::io::Result<()> {
     // Kepala permintaan bisa datang dalam beberapa potong: dibaca sampai baris kosongnya.
     let mut buf = Vec::with_capacity(512);
     let mut potong = [0u8; 1024];
@@ -67,6 +80,10 @@ fn layani(mut s: TcpStream, b: &Arc<Mutex<Bersama>>) -> std::io::Result<()> {
         buf.extend_from_slice(&potong[..n]);
     }
     let kepala = String::from_utf8_lossy(&buf);
+    if !asal_sah(&kepala, port) {
+        write!(s, "HTTP/1.1 403 Forbidden\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")?;
+        return Ok(());
+    }
     let jalur = kepala.split_whitespace().nth(1).unwrap_or("/").to_string();
     let (jalan, kueri) = jalur.split_once('?').unwrap_or((jalur.as_str(), ""));
     let param = |k: &str| kueri.split('&').find_map(|p| p.strip_prefix(&format!("{}=", k))).unwrap_or("").to_string();
@@ -136,4 +153,18 @@ const tetikus=e=>{{const b=k.getBoundingClientRect();fetch('/tetikus?x='+((e.cli
 k.addEventListener('mousemove',tetikus);k.addEventListener('mousedown',tetikus);k.addEventListener('mouseup',tetikus);
 k.addEventListener('contextmenu',e=>e.preventDefault());k.focus();putar();
 </script></body></html>"#, aman = aman, lebar = lebar, tinggi = tinggi, w = lebar * skala, h = tinggi * skala, skala = skala)
+}
+
+#[cfg(test)]
+mod tes {
+    #[test]
+    fn cuma_halaman_sendiri() {
+        let k = |h: &str| format!("GET /tombol?k=KeyY&d=1 HTTP/1.1\r\n{}\r\n\r\n", h);
+        assert!(super::asal_sah(&k("Host: 127.0.0.1:5000"), 5000));
+        assert!(super::asal_sah(&k("host: localhost:5000\r\nSec-Fetch-Site: same-origin"), 5000));
+        assert!(!super::asal_sah(&k("Host: 127.0.0.1:5000\r\nSec-Fetch-Site: cross-site"), 5000));
+        assert!(!super::asal_sah(&k("Host: jahat.example:5000"), 5000));
+        assert!(!super::asal_sah(&k("Host: 127.0.0.1:5001"), 5000));
+        assert!(!super::asal_sah("GET / HTTP/1.1\r\n\r\n", 5000));
+    }
 }

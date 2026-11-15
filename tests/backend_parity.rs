@@ -175,6 +175,14 @@ fn konformans_semantik_nilai_jalan_di_dua_backend() {
 
 /// Program yang WAJIB ditolak oleh KEDUA backend, dengan alasan yang sama.
 const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
+    // Fase AMAN-44 (#1021): kunci JSON kembar ditolak — dulu yang terakhir menang diam-diam.
+    ("json::parse: kunci kembar", "wok(json::parse(\"{\\\"a\\\": 1, \\\"a\\\": 2}\"))\n", "json::parse: kunci `a` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama", "json::parse: kunci `a` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama"),
+    ("json::parse: kunci kembar lewat escape", "wok(json::parse(\"{\\\"admin\\\": false, \\\"adm\\\\u0069n\\\": true}\"))\n", "json::parse: kunci `admin` muncul dua kali di satu objek", "json::parse: kunci `admin` muncul dua kali di satu objek"),
+    // Fase AMAN-44: hasil teks dari masukan kecil berbatas 256 MiB seperti `str::repeat`; dulu SIGABRT di dua mesin.
+    ("str::replace: pola kosong dengan pengganti panjang", "let s = \"a\" * 1000000\n wok(len(str::replace(s, \"\", \"b\" * 300)))\n", "str::replace: hasil penggantian kegedean: 1000001 kemunculan x 300 karakter pengganti = sekitar 301000300 byte", "str::replace: hasil penggantian kegedean: 1000001 kemunculan x 300 karakter pengganti = sekitar 301000300 byte"),
+    ("str::replace: banyak kemunculan kali pengganti panjang", "let s = \"a\" * 1000000\n wok(len(s.replace(\"a\", \"b\" * 300)))\n", "str::replace: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte", "str::replace: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte"),
+    ("re::replace_all: banyak kecocokan kali pengganti panjang", "let s = \"a\" * 1000000\n wok(len(re::replace_all(\"a\", s, \"b\" * 300)))\n", "re::replace_all: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte", "re::replace_all: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte"),
+    ("str::join: pemisah panjang di antara banyak elemen", "let a = arr::fill(\"\", 1000000)\n wok(len(str::join(a, \"b\" * 300)))\n", "str::join: hasil penggabungan kegedean: 1000000 elemen dengan pemisah 300 karakter = sekitar 299999700 byte", "str::join: hasil penggabungan kegedean: 1000000 elemen dengan pemisah 300 karakter = sekitar 299999700 byte"),
     // #1011: kanal tertutup ditolak di SEMUA lengan sebelum mencoba, walau lengan lain siap (urutan acak tak berpengaruh).
     ("select: lengan kedua tertutup ditolak walau lengan pertama siap",
      "let t = make_chan(int, 1)\nt.close()\nlet d = make_chan(int, 1)\nd <- 1\nwok(\"sebelum\")\nselect {\n    case x := <-d: { wok(\"tak boleh\", x) }\n    case y := <-t: { wok(\"tak boleh juga\", y) }\n}\n",
@@ -2878,6 +2886,9 @@ pub fn main() {
                 let mut buf = Vec::new();
                 s.read_to_end(&mut buf).unwrap();
                 let awal = buf.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(0);
+                // Fase AMAN-48: tiap respons melarang peramban menebak jenis isinya.
+                assert!(String::from_utf8_lossy(&buf[..awal]).contains("X-Content-Type-Options: nosniff\r\n"),
+                        "vm={}: tanpa nosniff: {}", vm, String::from_utf8_lossy(&buf[..awal]));
                 buf[awal..].to_vec()
             };
             let (biner, teks) = (mentah("/s/b.bin"), mentah("/s/t.txt"));
@@ -3155,11 +3166,14 @@ pub fn main() {
                 && interp[7].contains("rusak=false"),
             "verifikasi sandi salah:\n{}", interp[7]);
 
+        // Cookie sesi membawa cap waktu (Fase AMAN-47), jadi dua mesin yang jalan di detik berbeda menandatangani
+        // muatan berbeda: nilainya diganti penanda, bentuk dan atribut `Set-Cookie` tetap dibandingkan utuh.
+        let rata = |r: &str| match r.find("sesi=") {
+            Some(i) => { let j = r[i..].find(';').map(|k| i + k).unwrap_or(r.len()); format!("{}sesi=<sesi>{}", &r[..i], &r[j..]) }
+            None => r.to_string(),
+        };
         for (i, (a, b)) in interp.iter().zip(vm.iter()).enumerate() {
-            // Cookie sesi memuat tanda tangan yang sama (kuncinya tetap), tapi
-            // `Set-Cookie` di respons `/pasang` identik juga — tidak ada
-            // sumber acak di dalamnya.
-            assert_eq!(a, b, "respons ke-{} berbeda antar backend", i);
+            assert_eq!(rata(a), rata(b), "respons ke-{} berbeda antar backend", i);
         }
     }
 }

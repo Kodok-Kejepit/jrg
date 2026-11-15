@@ -118,6 +118,8 @@ pub(crate) struct MonoFn {
     pub(crate) decl: FnDecl,
     /// Berapa parameter yang benar-benar DATANG sebagai parameter LLVM.
     pub(crate) arity: usize,
+    /// Instans lapis: situs panggil di kode pemakai (span, berkas) — galat saat kompilasinya menunjuk ke sana.
+    pub(crate) situs: Option<(Span, u32)>,
 }
 
 #[derive(Clone)]
@@ -191,6 +193,11 @@ pub struct Codegen {
     /// diturunkan — supaya closure di sisi kanannya tahu ia akan dipanggil
     /// dengan nama apa.
     pub nama_diikat: Option<String>,
+    /// Situs pemakai instans lapis yang sedang diturunkan (lihat `MonoFn::situs`).
+    pub(crate) situs_lapis: Option<(Span, u32)>,
+    /// Parameter closure literal yang diikat `let` (bukan `var`, yang bisa ditugasi closure lain), menurut penunjuk
+    /// alloca lokalnya — `f(...v)`/`f(a: 1)` atas lokal itu disusun saat kompilasi seperti fungsi bernama.
+    pub param_closure: HashMap<String, Vec<crate::parser::FnParam>>,
     /// Lihat `get_place`: langkah antara jalur tulis tidak boleh menumbuhkan dict.
     pub tulis_antara: bool,
     /// Rantai tipe argumen untuk closure yang dikembalikan dari badan yang
@@ -365,6 +372,8 @@ impl Codegen {
             tipe_argumen: HashMap::new(),
             paruh_result: HashMap::new(),
             nama_diikat: None,
+            situs_lapis: None,
+            param_closure: HashMap::new(),
             tulis_antara: false,
             rantai_hasil: Vec::new(),
             catatan_koersi: None,
@@ -483,6 +492,10 @@ impl Codegen {
 
     /// Galat dari badan milik modul menunjuk BERKAS modul itu, bukan berkas utama.
     pub(crate) fn di_berkas_unit(&self, e: String) -> String {
+        // Galat dari dalam instans lapis menunjuk situs panggil pemakai — `<lapis>:baris` tidak pernah ia tulis.
+        if let (true, Some((sp, b))) = (Some(self.unit_kini) == self.unit_lapis, self.situs_lapis) {
+            return super::galat::beri_berkas(super::galat::tandai(sp, super::galat::GalatLlvm::dari_pesan(&e).msg), b);
+        }
         let berkas = self.unit_berkas.get(self.unit_kini).copied().unwrap_or(0);
         super::galat::beri_berkas(e, berkas)
     }
@@ -956,8 +969,13 @@ impl Codegen {
         let u = if u > 0 { u } else { self.unit_kini };
         self.unit_simbol.entry(mangled.clone()).or_insert(u);
         self.fn_cache.insert(mangled.clone(), ());
+        // Diantre dari kode pemakai: situs panggil kini; dari lapis lain: situs pemakai yang membawanya ke sana.
+        let situs = if Some(u) != self.unit_lapis { None }
+            else if Some(self.unit_kini) != self.unit_lapis {
+                self.span_kini.map(|s| (s, self.unit_berkas.get(self.unit_kini).copied().unwrap_or(0)))
+            } else { self.situs_lapis };
         self.worklist.push_back(MonoFn {
-            base_name: base_name.to_string(), mangled, subst, self_ty, decl: decl.clone(), arity });
+            base_name: base_name.to_string(), mangled, subst, self_ty, decl: decl.clone(), arity, situs });
     }
 
     /// Catat sebuah nama sebagai sudah-diantre, supaya ia tidak dipancarkan dua
@@ -1068,10 +1086,12 @@ impl Codegen {
 
     pub(crate) fn kuras_mono(&mut self) {
         while let Some(job) = self.worklist.pop_front() {
+            let lama = std::mem::replace(&mut self.situs_lapis, job.situs);
             if let Err(e) = self.codegen_function(&job.base_name, &job.decl, &job.subst, &job.mangled, job.self_ty.clone(), job.arity) {
                 let e = self.di_berkas_unit(e);
                 self.errors.push(e);
             }
+            self.situs_lapis = lama;
             if self.errors.len() > 200 { break; } // don't runaway on a fundamentally broken program
         }
     }

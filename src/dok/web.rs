@@ -196,7 +196,10 @@ fn tambah_header(resp: Value, nama: &str, nilai: &str, fungsi: &str) -> Result<V
 // Sesi bertanda tangan
 // ─────────────────────────────────────────────────────────────────────────
 
-/// `dok::session_encode(data, rahasia)` → string `payload.tandatangan`.
+/// Umur sesi bawaan `dok::session_decode`, dua minggu seperti Django; cap waktu ikut ditandatangani.
+const UMUR_SESI: i128 = 14 * 24 * 3600;
+
+/// `dok::session_encode(data, rahasia)` → string `muatan.capwaktu.tandatangan`.
 pub fn session_encode(args: &[Value]) -> Result<Value, String> {
     let data = args.get(0).ok_or("dok::session_encode(data, rahasia)")?;
     let rahasia = teks_arg(args.get(1), "dok::session_encode", "rahasianya")?;
@@ -206,22 +209,40 @@ pub fn session_encode(args: &[Value]) -> Result<Value, String> {
                     tidak ada tanda tangan".to_string());
     }
     let json = super::json::encode(data)?;
-    let muatan = b64url(json.as_bytes());
-    let mac = hmac_sha256(rahasia.as_bytes(), muatan.as_bytes());
-    Ok(Value::teks(format!("{}.{}", muatan, b64url(&mac))))
+    let bertanggal = format!("{}.{}", b64url(json.as_bytes()), detik_kini("dok::session_encode")?);
+    let mac = hmac_sha256(rahasia.as_bytes(), bertanggal.as_bytes());
+    Ok(Value::teks(format!("{}.{}", bertanggal, b64url(&mac))))
 }
 
-/// `dok::session_decode(teks, rahasia)` → `Result<data, string>`.
+/// `dok::session_decode(teks, rahasia, umur_detik?)` → `Result<data, string>`. Tanda tangan dulu, lalu umurnya:
+/// tanpa cap waktu sesi curian berlaku selamanya (CWE-613), jadi yang lebih tua dari `umur_detik` (bawaan dua
+/// minggu) atau dari masa depan ditolak, dan format lama tanpa cap waktu juga.
 pub fn session_decode(args: &[Value]) -> Result<Value, String> {
     let teks = teks_arg(args.get(0), "dok::session_decode", "teks sesinya")?;
     let rahasia = teks_arg(args.get(1), "dok::session_decode", "rahasianya")?;
-    let Some((muatan, tanda)) = teks.rsplit_once('.') else {
-        return Ok(err_value("sesi tidak berbentuk `muatan.tandatangan`"));
+    let umur = match args.get(2) {
+        None => UMUR_SESI,
+        Some(Value::Int(n)) if (1..=10 * 365 * 24 * 3600).contains(n) => *n,
+        Some(lain) => return Err(format!("dok::session_decode: umur_detik harus bilangan bulat 1 sampai 315360000 \
+                                          (sepuluh tahun), dapat {}", crate::kutip_inti::kutip(lain.to_string()))),
     };
-    let harusnya = b64url(&hmac_sha256(rahasia.as_bytes(), muatan.as_bytes()));
+    let Some((bertanggal, tanda)) = teks.rsplit_once('.') else {
+        return Ok(err_value("sesi tidak berbentuk `muatan.capwaktu.tandatangan`"));
+    };
+    let harusnya = b64url(&hmac_sha256(rahasia.as_bytes(), bertanggal.as_bytes()));
     if !sama_waktu_tetap(harusnya.as_bytes(), tanda.as_bytes()) {
-        return Ok(err_value("tanda tangan sesi tidak cocok — isinya diubah, atau \
-                             rahasianya bukan yang dipakai waktu menandatangani"));
+        return Ok(err_value("tanda tangan sesi tidak cocok — isinya diubah, sesinya dari format lama tanpa cap \
+                             waktu, atau rahasianya bukan yang dipakai waktu menandatangani"));
+    }
+    let Some((muatan, cap)) = bertanggal.rsplit_once('.') else {
+        return Ok(err_value("sesi tanpa cap waktu (format lama) — minta pemakainya masuk lagi"));
+    };
+    let Ok(dibuat) = cap.parse::<i128>() else { return Ok(err_value("cap waktu sesi rusak")) };
+    let kini = detik_kini("dok::session_decode")?;
+    if dibuat > kini + 60 { return Ok(err_value("cap waktu sesi di masa depan — jam pembuatnya salah, atau sesinya palsu")); }
+    if kini - dibuat > umur {
+        return Ok(err_value(format!("sesi kedaluwarsa: dibuat {} detik lalu, batasnya {} detik — minta pemakainya \
+                                     masuk lagi", kini - dibuat, umur)));
     }
     let byte = match b64url_balik(muatan) { Ok(b) => b, Err(e) => return Ok(err_value(e)) };
     let json = match String::from_utf8(byte) {
@@ -239,7 +260,7 @@ pub fn session_decode(args: &[Value]) -> Result<Value, String> {
 // ─────────────────────────────────────────────────────────────────────────
 
 /// Jumlah putaran PBKDF2 bawaan.
-const PUTARAN_BAWAAN: u32 = 210_000;
+const PUTARAN_BAWAAN: u32 = 600_000;
 
 /// PBKDF2-HMAC-SHA256, ditulis di sini karena satu-satunya bahan yang
 /// dibutuhkannya — HMAC-SHA256 — sudah ada.
@@ -248,15 +269,16 @@ fn pbkdf2(kata: &[u8], garam: &[u8], putaran: u32, panjang: usize) -> Vec<u8> {
     // dulu sandi 100 KB berharga 210 ribu kali hash 100 KB (kelas CVE-2013-1443 Django).
     let ringkas;
     let kata = if kata.len() > 64 { ringkas = super::crypto::sha256(kata); &ringkas[..] } else { kata };
+    let mac = super::crypto::HmacSha256::baru(kata);
     let mut keluar = Vec::with_capacity(panjang);
     let mut blok: u32 = 1;
     while keluar.len() < panjang {
         let mut pesan = garam.to_vec();
         pesan.extend_from_slice(&blok.to_be_bytes());
-        let mut u = hmac_sha256(kata, &pesan);
+        let mut u = mac.tanda(&pesan);
         let mut t = u;
         for _ in 1..putaran {
-            u = hmac_sha256(kata, &u);
+            u = mac.tanda32(&u);
             for i in 0..32 { t[i] ^= u[i]; }
         }
         keluar.extend_from_slice(&t);
@@ -457,7 +479,7 @@ pub fn render(args: &[Value]) -> Result<Value, String> {
 pub fn render_file(args: &[Value]) -> Result<Value, String> {
     let path = teks_arg(args.get(0), "dok::render_file", "path-nya")?;
     let data = data_template(args.get(1), "dok::render_file")?;
-    let tpl = match std::fs::read_to_string(&path) {
+    let tpl = match crate::host::baca_teks(&path) {
         Ok(s) => s,
         Err(e) => return Ok(err_value(format!("dok::render_file `{}`: {}", path, crate::host::galat_io(&e)))),
     };
@@ -768,13 +790,28 @@ mod tes {
         // Yang utuh terbaca kembali.
         let ok = session_decode(&[Value::Str(t.clone()), rahasia.clone()]).unwrap();
         assert!(matches!(&ok, Value::Enum { variant, .. } if variant == "Ok"), "{:?}", ok);
-        // Muatan yang diubah ditolak, walau bentuknya masih sah.
-        let (muatan, tanda) = t.rsplit_once('.').unwrap();
-        let palsu = format!("{}.{}", b64url(br#"{"user":"admin"}"#), tanda);
-        let hasil = session_decode(&[Value::Str(std::sync::Arc::new(palsu)), rahasia.clone()]).unwrap();
-        assert!(matches!(&hasil, Value::Enum { variant, .. } if variant == "Err"),
-                "muatan yang diubah diterima: {:?}", hasil);
-        let _ = muatan;
+        // Muatan yang diubah ditolak, walau bentuknya masih sah — juga cap waktunya.
+        let bagian: Vec<&str> = t.split('.').collect();
+        assert_eq!(bagian.len(), 3, "{}", t);
+        let galat = |s: String, umur: Option<i128>| {
+            let mut a = vec![Value::teks(s), rahasia.clone()];
+            if let Some(u) = umur { a.push(Value::Int(u)); }
+            match session_decode(&a).unwrap() { Value::Enum { variant, payload, .. } if variant == "Err" => format!("{:?}", payload), v => panic!("diterima: {:?}", v) }
+        };
+        galat(format!("{}.{}.{}", b64url(br#"{"user":"admin"}"#), bagian[1], bagian[2]), None);
+        galat(format!("{}.{}.{}", bagian[0], "4000000000", bagian[2]), None);
+        galat(format!("{}.{}", bagian[0], bagian[2]), None);
+        // Sesi yang sah tapi lebih tua dari umurnya, atau bercap masa depan, ditolak menyebut sebabnya.
+        let tua = |geser: i128| {
+            let cap = super::detik_kini("uji").unwrap() + geser;
+            let isi = format!("{}.{}", bagian[0], cap);
+            format!("{}.{}", isi, b64url(&hmac_sha256(b"rahasia-yang-cukup-panjang", isi.as_bytes())))
+        };
+        assert!(galat(tua(-100), Some(50)).contains("kedaluwarsa"));
+        assert!(galat(tua(-(super::UMUR_SESI + 10)), None).contains("kedaluwarsa"));
+        assert!(galat(tua(3600), None).contains("masa depan"));
+        let ok = session_decode(&[Value::teks(tua(-100)), rahasia.clone(), Value::Int(200)]).unwrap();
+        assert!(matches!(&ok, Value::Enum { variant, .. } if variant == "Ok"), "{:?}", ok);
         // Rahasia yang salah juga ditolak.
         let salah = session_decode(&[
             Value::Str(t), Value::teks("rahasia-lain-yang-panjang")]).unwrap();

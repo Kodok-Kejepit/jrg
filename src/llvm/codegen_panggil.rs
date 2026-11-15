@@ -367,16 +367,24 @@ impl Codegen {
                     -> Option<Result<Val, String>> {
         if !matches!(name, "terap" | "terap_bernama") { return None; }
         let Some(Expr::Ident(fnama, fspan)) = args.first() else { return None };
-        if self.lookup_local(fnama).is_some() { return None; }
+        // Lokal: cuma closure literal yang diikat `let` (daftar parameternya pasti); kalimat galatnya `<closure>`.
+        let lokal = match self.lookup_local(fnama) {
+            Some((ptr, _)) => Some(self.param_closure.get(&ptr).cloned()?),
+            None => None,
+        };
         // Builtin dengan daftar argumen literal (`terap(abs, [-5])`): panggilan langsung, seperti acuan.
         if name == "terap" && !self.tables.functions.contains_key(&self.k(fnama)) && crate::vm::ada_builtin(fnama) {
             if let Some(Expr::Array { elems, .. }) = args.get(1) {
                 return Some(self.codegen_call(&Expr::Ident(fnama.clone(), *fspan), elems, expected, span));
             }
         }
-        let decl = self.tables.functions.get(&self.k(fnama)).cloned()?;
-        if decl.params.iter().any(|p| p.is_variadic) { return None; }
-        let param: Vec<String> = decl.params.iter().map(|p| match &p.pattern {
+        let params = match lokal {
+            Some(p) => p,
+            None => self.tables.functions.get(&self.k(fnama))?.params.clone(),
+        };
+        let disebut = if self.lookup_local(fnama).is_some() { "<closure>".to_string() } else { fnama.clone() };
+        if params.iter().any(|p| p.is_variadic) { return None; }
+        let param: Vec<String> = params.iter().map(|p| match &p.pattern {
             Pattern::Ident { name, .. } => name.clone(),
             _ => String::new(),
         }).collect();
@@ -391,14 +399,16 @@ impl Codegen {
             let nama = nama?;
             let (posisi, panjang) = match crate::interpreter::susun_argumen_bernama(&param, pos.len(), &nama) {
                 Ok(x) => x,
-                Err(e) => return Some(Err(super::galat::tandai(span, crate::interpreter::pesan_terap_bernama(&e)))),
+                // Ditolak saat kompilasi (programnya pasti gagal) dengan kalimat acuan — dulu berawalan nama turunan
+                // `terap_bernama` yang tidak pernah ditulis pemakai.
+                Err(e) => return Some(Err(super::galat::tandai(span, e))),
             };
             // Urutan evaluasinya urutan TULIS: yang bisa berefek dihitung dulu ke lokal sementara.
             let mut akhir: Vec<Option<Expr>> = vec![None; panjang];
             let urut = pos.iter().enumerate().chain(nilai.iter().enumerate().map(|(k, e)| (posisi[k], e)));
             for (slot, e) in urut {
                 let e = if matches!(e, Expr::Literal(..) | Expr::Ident(..)) { e.clone() } else {
-                    let want = decl.params.get(slot).and_then(|p| self.resolve_type_pub(&p.ty).ok());
+                    let want = params.get(slot).and_then(|p| self.resolve_type_pub(&p.ty).ok());
                     let v = match self.codegen_expr(e, want.as_ref()) { Ok(v) => v, Err(g) => return Some(Err(g)) };
                     let ptr = self.spill_to_place(&v);
                     self.lokal_sementara(ptr, v.ty, span)
@@ -419,12 +429,14 @@ impl Codegen {
         let tetap = if let JrgType::Array(_, n) = v.ty { Some(n as usize) } else { None };
         let isi = self.lokal_sementara(ptr, v.ty, span);
         let lit = |n: usize| Expr::Literal(LitKind::Int(n as u128), span);
-        if let Some(n) = tetap {
+        let maks = param.len();
+        let wajib = params.iter().take_while(|p| p.default.is_none()).count();
+        // Panjang tetap yang muat dipanggil langsung; yang tidak muat lewat `match` di bawah, jadi gagalnya SAAT
+        // JALAN dengan kalimat acuan (dulu ditolak saat kompilasi: "butuh 2 argumen, diberi 1").
+        if let Some(n) = tetap.filter(|n| (wajib..=maks).contains(n)) {
             let a: Vec<Expr> = (0..n).map(|i| Expr::Index { obj: Box::new(isi.clone()), idx: Box::new(lit(i)), span }).collect();
             return Some(self.codegen_call(&fungsi, &a, expected, span));
         }
-        let maks = param.len();
-        let wajib = decl.params.iter().take_while(|p| p.default.is_none()).count();
         let teks = |t: String| Expr::Literal(LitKind::Str(t), span);
         let bawaan = |n: &str, a: Vec<Expr>| Expr::Call {
             func: Box::new(Expr::PathExpr { segments: vec![String::new(), n.to_string()], span }), args: a, span };
@@ -433,7 +445,7 @@ impl Codegen {
         let mut arms = Vec::new();
         for n in 0..=maks {
             let isi_lengan = if n < wajib {
-                bawaan("panik", vec![teks(crate::interpreter::pesan_parameter_wajib(fnama, &param[n], n + 1))])
+                bawaan("panik", vec![teks(crate::interpreter::pesan_parameter_wajib(&disebut, &param[n], n + 1))])
             } else {
                 let a = (0..n).map(|i| Expr::Index { obj: Box::new(isi.clone()), idx: Box::new(lit(i)), span }).collect();
                 Expr::Call { func: Box::new(fungsi.clone()), args: a, span }
@@ -442,7 +454,7 @@ impl Codegen {
         }
         // Kalimat "kebanyakan" milik acuan, dengan jumlahnya disisipkan saat jalan.
         const PENANDA: usize = 3_987_654_321;
-        let kalimat = crate::interpreter::pesan_fungsi_kebanyakan(fnama, maks, PENANDA, &param);
+        let kalimat = crate::interpreter::pesan_fungsi_kebanyakan(&disebut, maks, PENANDA, &param);
         let (awal, akhir) = kalimat.split_once(&PENANDA.to_string()).unwrap_or((&kalimat, ""));
         let n_nama = format!("$sebar{}", self.penerima_lapis);
         let n_expr = Expr::Ident(n_nama.clone(), span);

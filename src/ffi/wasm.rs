@@ -1119,7 +1119,7 @@ fn bilangan(v: &Value, nama: &str, ke: usize) -> Result<i64, String> {
 pub fn b_muat(a: &[Value]) -> Result<Value, String> {
     if a.len() != 1 { return Err("wasm::muat(path)".to_string()); }
     let path = teks(a.first().ok_or("wasm::muat(path)")?, "wasm::muat", 0)?;
-    let isi = match std::fs::read(&path) {
+    let isi = match crate::host::baca_berkas(&path) {
         Ok(b) => b,
         Err(e) => return Ok(err_value(format!("tidak bisa baca `{}`: {}", path, crate::host::galat_io(&e)))),
     };

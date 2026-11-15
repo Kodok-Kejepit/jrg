@@ -515,6 +515,21 @@ pub fn ulang_string(s: &str, n: i128) -> Result<String, String> {
     Ok(s.repeat(n as usize))
 }
 
+/// Batas hasil teks yang dibangun dari masukan kecil (pengulangan, penggantian, penggabungan): 256 MiB.
+pub const MAKS_TEKS_HASIL: i128 = 256 * 1024 * 1024;
+
+/// Kalimat penggantian yang hasilnya melewati batas — salinan persisnya di runtime LLVM.
+pub fn pesan_ganti_kegedean(nama: &str, n: i128, pengganti: usize, total: i128) -> String {
+    format!("{}: hasil penggantian kegedean: {} kemunculan x {} karakter pengganti = sekitar {} byte \
+             (batasnya 256 MiB). Cek lagi pengganti atau polanya", nama, n, pengganti, total)
+}
+
+/// Kalimat penggabungan yang hasilnya melewati batas — salinan persisnya di runtime LLVM.
+pub fn pesan_gabung_kegedean(nama: &str, n: i128, pemisah: usize, total: i128) -> String {
+    format!("{}: hasil penggabungan kegedean: {} elemen dengan pemisah {} karakter = sekitar {} byte \
+             (batasnya 256 MiB). Cek lagi pemisah atau jumlah elemennya", nama, n, pemisah, total)
+}
+
 /// Apakah sebuah float dianggap benar dalam konteks kondisi?
 #[inline]
 /// Pesan kegagalan `assert`.

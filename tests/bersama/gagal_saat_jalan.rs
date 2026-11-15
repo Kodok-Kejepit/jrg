@@ -67,6 +67,32 @@ const GAGAL_SAAT_JALAN: &[(&str, &str, &str, &str)] = &[
     ("env::set nama ber-`=`", "package main\npub fn main() { wok(\"a\")\n env::set(\"A=B\", \"1\") }", "a", "env::set: nama variabel \"A=B\" tidak sah — tidak boleh kosong, dan tidak boleh berisi `=` atau karakter NUL"),
     ("env::set nama ber-NUL", "package main\npub fn main() { wok(\"a\")\n env::set(\"A\" + str(rune(0)) + \"B\", \"1\") }", "a", "env::set: nama variabel \"A\\0B\" tidak sah"),
     ("env::set nilai ber-NUL", "package main\npub fn main() { wok(\"a\")\n env::set(\"JRG_UJI_NUL\", \"x\" + str(rune(0))) }", "a", "env::set: nilai untuk `JRG_UJI_NUL` berisi karakter NUL"),
+    // Fase LAPIS-SITUS: dua fungsi dibandingkan gagal SAAT JALAN, nama tiap sisi dari nilainya (`closure`/`function`).
+    ("unique atas dua closure", "package main\npub fn main() { wok(\"a\")\n let f = |x| x\n let g = |x| x + 1\n wok(arr::unique([f, g])) }", "a",
+     "tidak bisa membandingkan `closure` dengan `closure` — sebuah fungsi tidak punya isi untuk dibanding"),
+    ("== atas dua fungsi bernama", "package main\nfn f(x: int) -> int { return x }\npub fn main() { wok(\"a\")\n let a: fn(int) -> int = f\n let b: fn(int) -> int = f\n wok(a == b) }", "a",
+     "tidak bisa membandingkan `function` dengan `function` — sebuah fungsi tidak punya isi untuk dibanding"),
+    // Fase SEBAR-CLOSURE: spread berpanjang tetap yang jumlahnya salah gagal SAAT JALAN dengan kalimat acuan, ke closure
+    // ber-`let` maupun fungsi bernama — dulu LLVM menolaknya saat kompilasi ("butuh 2 argumen, diberi 1").
+    ("spread kurang ke closure", "package main\npub fn main() { let f = |a, b| a + b\n wok(\"a\")\n let v = [1]\n wok(f(...v)) }", "a",
+     "fungsi `<closure>`: parameter `b` (posisi 2) wajib diisi — tidak dapat argumen dan tidak punya nilai default"),
+    ("spread kelebihan ke closure", "package main\npub fn main() { let f = |a, b| a + b\n wok(\"a\")\n var v = []\n for i in 0..3 { v = arr::push(v, i) }\n wok(f(...v)) }", "a",
+     "fungsi `<closure>` kebanyakan argumen — dia cuma menerima 2, tapi dikasih 3."),
+    ("spread berpanjang tetap kurang ke fungsi bernama", "package main\nfn f(a, b) { return a + b }\npub fn main() { wok(\"a\")\n let v = [1]\n wok(f(...v)) }", "a",
+     "fungsi `f`: parameter `b` (posisi 2) wajib diisi — tidak dapat argumen dan tidak punya nilai default"),
+    ("spread berpanjang tetap kelebihan ke fungsi bernama", "package main\nfn f(a, b) { return a + b }\npub fn main() { wok(\"a\")\n wok(f(...[1, 2, 3])) }", "a",
+     "fungsi `f` kebanyakan argumen — dia cuma menerima 2, tapi dikasih 3."),
+    // Fase AMAN-44 (#1021): kunci JSON kembar ditolak di tiga mesin, satu pengurai (`json_inti`).
+    ("json::parse: kunci kembar", "package main\npub fn main() { wok(\"a\")\n wok(json::parse(\"{\\\"a\\\": 1, \\\"a\\\": 2}\")) }", "a", "json::parse: kunci `a` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama"),
+    ("json::parse: kunci kembar lewat escape", "package main\npub fn main() { wok(\"a\")\n wok(json::parse(\"{\\\"admin\\\": false, \\\"adm\\\\u0069n\\\": true}\")) }", "a", "json::parse: kunci `admin` muncul dua kali di satu objek"),
+    // Fase AMAN-44: hasil teks dari masukan kecil berbatas 256 MiB seperti `str::repeat` — dulu proses mati
+    // (`memory allocation .. failed`, SIGABRT) di interpreter dan `--vm`.
+    ("str::replace: pola kosong dengan pengganti panjang", "package main\npub fn main() { wok(\"a\")\n let s = \"a\" * 1000000\n wok(len(str::replace(s, \"\", \"b\" * 300))) }", "a", "str::replace: hasil penggantian kegedean: 1000001 kemunculan x 300 karakter pengganti = sekitar 301000300 byte"),
+    ("str::replace: banyak kemunculan kali pengganti panjang", "package main\npub fn main() { wok(\"a\")\n let s = \"a\" * 1000000\n wok(len(s.replace(\"a\", \"b\" * 300))) }", "a", "str::replace: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte"),
+    ("re::replace_all: banyak kecocokan kali pengganti panjang", "package main\npub fn main() { wok(\"a\")\n let s = \"a\" * 1000000\n wok(len(re::replace_all(\"a\", s, \"b\" * 300))) }", "a", "re::replace_all: hasil penggantian kegedean: 1000000 kemunculan x 300 karakter pengganti = sekitar 300000000 byte"),
+    ("str::join: pemisah panjang di antara banyak elemen", "package main\npub fn main() { wok(\"a\")\n let a = arr::fill(\"\", 1000000)\n wok(len(str::join(a, \"b\" * 300))) }", "a", "str::join: hasil penggabungan kegedean: 1000000 elemen dengan pemisah 300 karakter = sekitar 299999700 byte"),
+    // Fase AMAN-44: bacaan utuh berbatas 256 MiB — `/dev/zero` dulu menghabiskan RAM mesin di tiga mesin.
+    ("fs::read perangkat tanpa ujung", "package main\npub fn main() { wok(\"a\")\n wok(fs::read(\"/dev/zero\")) }", "a", "fs::read '/dev/zero': isinya lebih dari 256 MiB, batas satu bacaan utuh"),
     ("fs::read jalur ber-NUL", "package main\npub fn main() { wok(\"a\")\n wok(fs::read(\"Cargo.toml\" + str(rune(0)) + \"x\")) }", "a", "teksnya memuat karakter NUL, yang tidak bisa diserahkan ke sistem operasi"),
     // Fase BAGI-LLVM: jumlah elemen `range` dulu dihitung di 64 bit tanpa batas — `akhir - awal`
     // meluap dan `sdiv` atas MIN dan -1 menjawab panjang karangan; sekarang batas acuan.

@@ -1148,13 +1148,17 @@ mod mode_kanvas {
     use super::*;
     use std::io::{Read, Write};
 
-    fn http(port: u16, jalur: &str) -> Vec<u8> {
+    fn http(port: u16, jalur: &str) -> Vec<u8> { http_mentah(port, jalur, &format!("Host: 127.0.0.1:{}", port)).1 }
+
+    /// Baris status dan badan; `kepala` ditulis apa adanya (Host, Sec-Fetch-Site).
+    fn http_mentah(port: u16, jalur: &str, kepala: &str) -> (String, Vec<u8>) {
         let mut s = std::net::TcpStream::connect(("127.0.0.1", port)).expect("sambung ke kanvas web");
-        write!(s, "GET {} HTTP/1.1\r\nHost: x\r\n\r\n", jalur).unwrap();
+        write!(s, "GET {} HTTP/1.1\r\n{}\r\n\r\n", jalur, kepala).unwrap();
         let mut isi = Vec::new();
         s.read_to_end(&mut isi).unwrap();
+        let status = String::from_utf8_lossy(isi.split(|b| *b == b'\r').next().unwrap_or(b"")).to_string();
         let awal = isi.windows(4).position(|w| w == b"\r\n\r\n").map(|i| i + 4).unwrap_or(0);
-        isi[awal..].to_vec()
+        (status, isi[awal..].to_vec())
     }
 
     #[test]
@@ -1202,12 +1206,16 @@ mod mode_kanvas {
             }
         }
         let halaman = String::from_utf8_lossy(&http(port, "/")).to_string();
+        // Situs lain (`<img src=..>`) dan nama hasil DNS rebinding ditolak sebelum menyentuh tombol atau bingkai.
+        let lintas = http_mentah(port, "/tombol?k=Escape&d=1", &format!("Host: 127.0.0.1:{}\r\nSec-Fetch-Site: cross-site", port)).0;
+        let rebind = http_mentah(port, "/bingkai", &format!("Host: jahat.example:{}", port)).0;
         http(port, "/tombol?k=KeyA&d=1");
         std::thread::sleep(std::time::Duration::from_millis(200));
         http(port, "/tombol?k=Escape&d=1");
         let out = anak.wait_with_output().expect("tunggu");
         let k = String::from_utf8_lossy(&out.stdout).to_string();
         let _ = std::fs::remove_dir_all(&d);
+        assert!(lintas.contains("403") && rebind.contains("403"), "{} / {}", lintas, rebind);
         assert_eq!(bingkai.len(), 3 * 2 * 4, "ukuran bingkai RGBA");
         assert_eq!(&bingkai[0..4], &[0x20, 0x40, 0xFF, 0xFF], "piksel (0,0) biru");
         assert_eq!(&bingkai[16..20], &[0xFF, 0x00, 0x00, 0xFF], "piksel (1,1) merah");

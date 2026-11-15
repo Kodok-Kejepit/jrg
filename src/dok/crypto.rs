@@ -2,7 +2,6 @@
 // Base64/Hex, random aman (OS RNG), dan AES-256-CBC. Semuanya ditulis
 
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::OnceLock;
 
 use crate::interpreter::{err_value, ok_value, Value};
 
@@ -112,38 +111,140 @@ const SHA256_K: [u32; 64] = [
     0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
 ];
 
-pub fn sha256(input: &[u8]) -> [u8; 32] {
-    let mut h: [u32; 8] = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
-    let mut msg = input.to_vec();
-    let ml = (input.len() as u64) * 8;
+const SHA256_IV: [u32; 8] = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+
+/// Satu blok kompresi SHA-256 — SATU definisi untuk `sha256` dan HMAC yang disiapkan (`HmacSha256`). Instruksi
+/// SHA-NI kalau prosesornya punya (±3,5x), selain itu putaran skalar yang dibuka; hasil keduanya dites sama.
+fn sha256_kompres(h: &mut [u32; 8], chunk: &[u8]) {
+    #[cfg(target_arch = "x86_64")]
+    if shani::ada() { return shani::kompres(h, chunk); }
+    sha256_kompres_lunak(h, chunk)
+}
+
+fn sha256_kompres_lunak(h: &mut [u32; 8], chunk: &[u8]) {
+    let mut w = [0u32; 16];
+    for i in 0..16 { w[i] = u32::from_be_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]); }
+    let mut s = *h;
+    // Satu putaran; peran a..h bergeser lewat indeks, bukan lewat delapan salinan. Jadwal pesan 16 kata berputar.
+    macro_rules! r {
+        ($i:expr, $a:expr, $b:expr, $c:expr, $d:expr, $e:expr, $f:expr, $g:expr, $hh:expr) => {{
+            if $i >= 16 {
+                let (w15, w2) = (w[($i + 1) & 15], w[($i + 14) & 15]);
+                let s0 = w15.rotate_right(7) ^ w15.rotate_right(18) ^ (w15 >> 3);
+                let s1 = w2.rotate_right(17) ^ w2.rotate_right(19) ^ (w2 >> 10);
+                w[$i & 15] = w[$i & 15].wrapping_add(s0).wrapping_add(w[($i + 9) & 15]).wrapping_add(s1);
+            }
+            let e = s[$e];
+            let t1 = s[$hh].wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add((e & s[$f]) ^ (!e & s[$g])).wrapping_add(SHA256_K[$i]).wrapping_add(w[$i & 15]);
+            let a = s[$a];
+            let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+                .wrapping_add((a & s[$b]) ^ (a & s[$c]) ^ (s[$b] & s[$c]));
+            s[$d] = s[$d].wrapping_add(t1);
+            s[$hh] = t1.wrapping_add(t2);
+        }};
+    }
+    macro_rules! delapan { ($i:expr) => {
+        r!($i, 0,1,2,3,4,5,6,7); r!($i+1, 7,0,1,2,3,4,5,6); r!($i+2, 6,7,0,1,2,3,4,5); r!($i+3, 5,6,7,0,1,2,3,4);
+        r!($i+4, 4,5,6,7,0,1,2,3); r!($i+5, 3,4,5,6,7,0,1,2); r!($i+6, 2,3,4,5,6,7,0,1); r!($i+7, 1,2,3,4,5,6,7,0);
+    } }
+    delapan!(0); delapan!(8); delapan!(16); delapan!(24); delapan!(32); delapan!(40); delapan!(48); delapan!(56);
+    for i in 0..8 { h[i] = h[i].wrapping_add(s[i]); }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod shani {
+    use std::arch::x86_64::*;
+    pub fn ada() -> bool {
+        std::arch::is_x86_feature_detected!("sha") && std::arch::is_x86_feature_detected!("sse4.1")
+            && std::arch::is_x86_feature_detected!("ssse3")
+    }
+    pub fn kompres(h: &mut [u32; 8], blok: &[u8]) { assert!(blok.len() >= 64); unsafe { kompres_ni(h, blok) } }
+    #[target_feature(enable = "sha,sse2,ssse3,sse4.1")]
+    unsafe fn kompres_ni(h: &mut [u32; 8], blok: &[u8]) {
+        let k = &super::SHA256_K;
+        let mask = _mm_set_epi64x(0x0C0D_0E0F_0809_0A0Bu64 as i64, 0x0405_0607_0001_0203u64 as i64);
+        let p = h.as_ptr() as *const __m128i;
+        let (dcba, efgh) = unsafe { (_mm_loadu_si128(p), _mm_loadu_si128(p.add(1))) };
+        let cdab = _mm_shuffle_epi32(dcba, 0xB1);
+        let efgh = _mm_shuffle_epi32(efgh, 0x1B);
+        let mut abef = _mm_alignr_epi8(cdab, efgh, 8);
+        let mut cdgh = _mm_blend_epi16(efgh, cdab, 0xF0);
+        let (abef0, cdgh0) = (abef, cdgh);
+        let d = blok.as_ptr() as *const __m128i;
+        let mut w = [_mm_setzero_si128(); 5];
+        for (i, x) in w.iter_mut().take(4).enumerate() { *x = _mm_shuffle_epi8(unsafe { _mm_loadu_si128(d.add(i)) }, mask); }
+        for i in 0..16 {
+            if i >= 4 {
+                let j = i - 4;
+                let t1 = _mm_sha256msg1_epu32(w[j % 5], w[(j + 1) % 5]);
+                let t2 = _mm_alignr_epi8(w[(j + 3) % 5], w[(j + 2) % 5], 4);
+                w[(j + 4) % 5] = _mm_sha256msg2_epu32(_mm_add_epi32(t1, t2), w[(j + 3) % 5]);
+            }
+            let kv = _mm_set_epi32(k[4*i+3] as i32, k[4*i+2] as i32, k[4*i+1] as i32, k[4*i] as i32);
+            let t1 = _mm_add_epi32(w[i % 5], kv);
+            cdgh = _mm_sha256rnds2_epu32(cdgh, abef, t1);
+            abef = _mm_sha256rnds2_epu32(abef, cdgh, _mm_shuffle_epi32(t1, 0x0E));
+        }
+        abef = _mm_add_epi32(abef, abef0);
+        cdgh = _mm_add_epi32(cdgh, cdgh0);
+        let feba = _mm_shuffle_epi32(abef, 0x1B);
+        let dchg = _mm_shuffle_epi32(cdgh, 0xB1);
+        let q = h.as_mut_ptr() as *mut __m128i;
+        unsafe {
+            _mm_storeu_si128(q, _mm_blend_epi16(feba, dchg, 0xF0));
+            _mm_storeu_si128(q.add(1), _mm_alignr_epi8(dchg, feba, 8));
+        }
+    }
+}
+
+/// Sisa pesan sesudah `sebelum` byte yang sudah dikompres: isi, `0x80`, nol, panjang total dalam bit.
+fn sha256_tutup(mut h: [u32; 8], sisa: &[u8], sebelum: u64) -> [u8; 32] {
+    let mut msg = sisa.to_vec();
+    let ml = (sebelum + sisa.len() as u64) * 8;
     msg.push(0x80);
     while msg.len() % 64 != 56 { msg.push(0); }
     msg.extend_from_slice(&ml.to_be_bytes());
-
-    for chunk in msg.chunks(64) {
-        let mut w = [0u32; 64];
-        for i in 0..16 { w[i] = u32::from_be_bytes([chunk[i*4], chunk[i*4+1], chunk[i*4+2], chunk[i*4+3]]); }
-        for i in 16..64 {
-            let s0 = w[i-15].rotate_right(7) ^ w[i-15].rotate_right(18) ^ (w[i-15] >> 3);
-            let s1 = w[i-2].rotate_right(17) ^ w[i-2].rotate_right(19) ^ (w[i-2] >> 10);
-            w[i] = w[i-16].wrapping_add(s0).wrapping_add(w[i-7]).wrapping_add(s1);
-        }
-        let (mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut hh) = (h[0],h[1],h[2],h[3],h[4],h[5],h[6],h[7]);
-        for i in 0..64 {
-            let s1 = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
-            let ch = (e & f) ^ ((!e) & g);
-            let temp1 = hh.wrapping_add(s1).wrapping_add(ch).wrapping_add(SHA256_K[i]).wrapping_add(w[i]);
-            let s0 = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
-            let maj = (a & b) ^ (a & c) ^ (b & c);
-            let temp2 = s0.wrapping_add(maj);
-            hh = g; g = f; f = e; e = d.wrapping_add(temp1); d = c; c = b; b = a; a = temp1.wrapping_add(temp2);
-        }
-        h[0]=h[0].wrapping_add(a); h[1]=h[1].wrapping_add(b); h[2]=h[2].wrapping_add(c); h[3]=h[3].wrapping_add(d);
-        h[4]=h[4].wrapping_add(e); h[5]=h[5].wrapping_add(f); h[6]=h[6].wrapping_add(g); h[7]=h[7].wrapping_add(hh);
-    }
+    for chunk in msg.chunks(64) { sha256_kompres(&mut h, chunk); }
     let mut out = [0u8; 32];
     for i in 0..8 { out[i*4..i*4+4].copy_from_slice(&h[i].to_be_bytes()); }
     out
+}
+
+pub fn sha256(input: &[u8]) -> [u8; 32] { sha256_tutup(SHA256_IV, input, 0) }
+
+/// HMAC-SHA256 dengan kunci yang sudah disiapkan: state sesudah blok ipad/opad dihitung SEKALI, jadi tiap tanda
+/// tangan cuma mengompres pesannya — PBKDF2 dulu membayar empat kompresi dan alokasi per putaran.
+pub struct HmacSha256 { dalam: [u32; 8], luar: [u32; 8] }
+
+impl HmacSha256 {
+    pub fn baru(key: &[u8]) -> HmacSha256 {
+        let mut k = [0u8; 64];
+        if key.len() > 64 { k[..32].copy_from_slice(&sha256(key)); } else { k[..key.len()].copy_from_slice(key); }
+        let (mut dalam, mut luar) = (SHA256_IV, SHA256_IV);
+        sha256_kompres(&mut dalam, &k.map(|b| b ^ 0x36));
+        sha256_kompres(&mut luar, &k.map(|b| b ^ 0x5c));
+        HmacSha256 { dalam, luar }
+    }
+    pub fn tanda(&self, msg: &[u8]) -> [u8; 32] {
+        let dalam = sha256_tutup(self.dalam, msg, 64);
+        sha256_tutup(self.luar, &dalam, 64)
+    }
+    /// `tanda` atas tepat 32 byte (putaran PBKDF2) dengan dua blok tetap, tanpa alokasi.
+    pub fn tanda32(&self, m: &[u8; 32]) -> [u8; 32] {
+        let mut blok = [0u8; 64];
+        blok[32] = 0x80;
+        blok[62] = 0x03; // panjang total 64 + 32 byte = 768 bit
+        let jadi = |mut h: [u32; 8], isi: &[u8], blok: &mut [u8; 64]| {
+            blok[..32].copy_from_slice(isi);
+            sha256_kompres(&mut h, blok);
+            let mut o = [0u8; 32];
+            for i in 0..8 { o[i*4..i*4+4].copy_from_slice(&h[i].to_be_bytes()); }
+            o
+        };
+        let dalam = jadi(self.dalam, m, &mut blok);
+        jadi(self.luar, &dalam, &mut blok)
+    }
 }
 
 const SHA512_K: [u64; 80] = [
@@ -208,18 +309,7 @@ pub fn sha512(input: &[u8]) -> [u8; 64] {
     out
 }
 
-pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    const BLOCK: usize = 64;
-    let mut key_block = if key.len() > BLOCK { sha256(key).to_vec() } else { key.to_vec() };
-    key_block.resize(BLOCK, 0);
-    let mut ipad = vec![0x36u8; BLOCK];
-    let mut opad = vec![0x5cu8; BLOCK];
-    for i in 0..BLOCK { ipad[i] ^= key_block[i]; opad[i] ^= key_block[i]; }
-    let mut inner = ipad; inner.extend_from_slice(msg);
-    let inner_hash = sha256(&inner);
-    let mut outer = opad; outer.extend_from_slice(&inner_hash);
-    sha256(&outer)
-}
+pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] { HmacSha256::baru(key).tanda(msg) }
 
 pub use crate::kompres::crc32;
 
@@ -509,18 +599,26 @@ pub fn f_random_int(args: &[Value]) -> Result<Value, String> {
     let lo = match args.get(0) { Some(Value::Int(n)) => *n, _ => return Err("crypto::random_int(min, max)".to_string()) };
     let hi = match args.get(1) { Some(Value::Int(n)) => *n, _ => return Err("crypto::random_int(min, max)".to_string()) };
     if hi < lo { return Err("crypto::random_int: max harus >= min".to_string()); }
-    let bytes = acak_aman(16, "crypto::random_int")?;
-    let mut n: u128 = 0;
-    for b in bytes { n = (n << 8) | b as u128; }
-    Ok(Value::Int(crate::interpreter::acak_dalam_rentang(lo, hi, n)))
+    // Tanpa bias modulo: `n % m` cuma seragam kalau `n` di bawah kelipatan `m` terbesar, sisanya ditarik ulang
+    // (dulu rentang selebar mendekati 2^127 memberi separuh nilainya peluang dua kali lipat).
+    let m = (hi.wrapping_sub(lo) as u128).wrapping_add(1);
+    let ambang = if m == 0 { 0 } else { m.wrapping_neg() % m };
+    loop {
+        let mut n: u128 = 0;
+        for b in acak_aman(16, "crypto::random_int")? { n = (n << 8) | b as u128; }
+        if n >= ambang { return Ok(Value::Int(crate::interpreter::acak_dalam_rentang(lo, hi, n))); }
+    }
 }
 
 // ============================================================================
 //  AES-256 (FIPS-197) — block cipher murni dari nol, mode CBC + padding PKCS7
 // ============================================================================
 
+// Tabel S-box cuma untuk tes (`sbox_hitung_sama_dengan_tabel`): AES di bawah tidak membaca tabel berindeks
+// rahasia — cache-nya membocorkan kunci lewat waktu (Bernstein 2005). Perangkat keras dulu, sisanya hitungan.
+#[cfg(test)]
 fn sbox() -> &'static [u8; 256] {
-    static SBOX: OnceLock<[u8; 256]> = OnceLock::new();
+    static SBOX: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
     SBOX.get_or_init(|| [
         0x63,0x7c,0x77,0x7b,0xf2,0x6b,0x6f,0xc5,0x30,0x01,0x67,0x2b,0xfe,0xd7,0xab,0x76,
         0xca,0x82,0xc9,0x7d,0xfa,0x59,0x47,0xf0,0xad,0xd4,0xa2,0xaf,0x9c,0xa4,0x72,0xc0,
@@ -541,8 +639,9 @@ fn sbox() -> &'static [u8; 256] {
     ])
 }
 
+#[cfg(test)]
 fn inv_sbox() -> &'static [u8; 256] {
-    static INV: OnceLock<[u8; 256]> = OnceLock::new();
+    static INV: std::sync::OnceLock<[u8; 256]> = std::sync::OnceLock::new();
     INV.get_or_init(|| {
         let s = sbox();
         let mut inv = [0u8; 256];
@@ -553,18 +652,92 @@ fn inv_sbox() -> &'static [u8; 256] {
 
 fn xtime(a: u8) -> u8 { if a & 0x80 != 0 { (a << 1) ^ 0x1B } else { a << 1 } }
 
+/// Perkalian GF(2^8) tanpa cabang atas datanya: tiap langkah memakai topeng, bukan `if`.
 fn gmul(a: u8, b: u8) -> u8 {
     let (mut a, mut b) = (a, b);
     let mut p = 0u8;
     for _ in 0..8 {
-        if b & 1 != 0 { p ^= a; }
-        let hi = a & 0x80;
-        a <<= 1;
-        if hi != 0 { a ^= 0x1B; }
+        p ^= a & 0u8.wrapping_sub(b & 1);
+        let hi = 0u8.wrapping_sub(a >> 7);
+        a = (a << 1) ^ (0x1B & hi);
         b >>= 1;
     }
     p
 }
+
+/// Invers GF(2^8) sebagai x^254 (0 tetap 0) — rantai tetap, jadi waktunya tidak bergantung pada `x`.
+fn balik_gf(x: u8) -> u8 {
+    let x2 = gmul(x, x);
+    let x3 = gmul(x2, x);
+    let x6 = gmul(x3, x3);
+    let x12 = gmul(x6, x6);
+    let x15 = gmul(x12, x3);
+    let x30 = gmul(x15, x15);
+    let x60 = gmul(x30, x30);
+    let x120 = gmul(x60, x60);
+    let x240 = gmul(x120, x120);
+    gmul(gmul(x240, x12), x2)
+}
+
+/// S-box AES dihitung: invers lalu transformasi afin (FIPS-197 §5.1.1).
+fn sb(x: u8) -> u8 {
+    let b = balik_gf(x);
+    b ^ b.rotate_left(1) ^ b.rotate_left(2) ^ b.rotate_left(3) ^ b.rotate_left(4) ^ 0x63
+}
+
+/// Kebalikan `sb`: afin terbalik lalu invers.
+#[cfg(test)]
+fn sb_balik(x: u8) -> u8 { balik_gf(x.rotate_left(1) ^ x.rotate_left(3) ^ x.rotate_left(6) ^ 0x05) }
+
+// Rumus yang sama atas delapan byte sekaligus di satu `u64` (SWAR): SubBytes delapan kali lebih murah, tetap
+// tanpa cabang dan tanpa tabel. `L` = bit terendah tiap byte.
+const L: u64 = 0x0101_0101_0101_0101;
+fn xt64(a: u64) -> u64 { ((a & 0x7f7f_7f7f_7f7f_7f7f) << 1) ^ (((a >> 7) & L) * 0x1b) }
+fn gmul64(a: u64, b: u64) -> u64 {
+    let (mut a, mut p) = (a, 0u64);
+    for i in 0..8 { p ^= a & (((b >> i) & L) * 0xff); a = xt64(a); }
+    p
+}
+fn rotl64(b: u64, k: u32) -> u64 {
+    ((b << k) & (((0xffu64 << k) & 0xff) * L)) | ((b >> (8 - k)) & ((0xffu64 >> (8 - k)) * L))
+}
+/// Kuadrat di GF(2^8) linear: XOR dari `(x^i)^2` untuk tiap bit `i` yang menyala — tiga operasi per bit.
+fn kuadrat64(x: u64) -> u64 {
+    const K: [u64; 8] = [0x01, 0x04, 0x10, 0x40, 0x1b, 0x6c, 0xab, 0x9a];
+    let mut p = 0u64;
+    for (i, k) in K.iter().enumerate() { p ^= ((x >> i) & L) * k; }
+    p
+}
+fn balik64(x: u64) -> u64 {
+    let x2 = kuadrat64(x);
+    let x3 = gmul64(x2, x);
+    let x6 = kuadrat64(x3);
+    let x12 = kuadrat64(x6);
+    let x15 = gmul64(x12, x3);
+    let x30 = kuadrat64(x15);
+    let x60 = kuadrat64(x30);
+    let x120 = kuadrat64(x60);
+    let x240 = kuadrat64(x120);
+    gmul64(gmul64(x240, x12), x2)
+}
+fn sb64(x: u64) -> u64 {
+    let b = balik64(x);
+    b ^ rotl64(b, 1) ^ rotl64(b, 2) ^ rotl64(b, 3) ^ rotl64(b, 4) ^ (0x63 * L)
+}
+fn sb_balik64(x: u64) -> u64 { balik64(rotl64(x, 1) ^ rotl64(x, 3) ^ rotl64(x, 6) ^ (0x05 * L)) }
+
+/// Seluruh state (16 byte) lewat `f` per delapan byte.
+fn per_state(state: &mut [[u8; 4]; 4], f: fn(u64) -> u64) {
+    for separuh in 0..2 {
+        let mut b = [0u8; 8];
+        for i in 0..8 { b[i] = state[separuh * 2 + i / 4][i % 4]; }
+        let h = f(u64::from_le_bytes(b)).to_le_bytes();
+        for i in 0..8 { state[separuh * 2 + i / 4][i % 4] = h[i]; }
+    }
+}
+
+/// Kali 2 di GF(2^8) bertopeng — MixColumns lewat kelipatan ini, bukan `gmul` delapan putaran.
+fn xt(a: u8) -> u8 { (a << 1) ^ (0x1B & 0u8.wrapping_sub(a >> 7)) }
 
 fn rcon(i: usize) -> u8 {
     let mut c = 1u8;
@@ -574,17 +747,16 @@ fn rcon(i: usize) -> u8 {
 
 /// AES-256: kunci 8 word (32 byte) → 60 word key schedule (Nr=14, 15 round key @ 4 word).
 fn key_expansion_256(key: &[u8; 32]) -> [[u8; 4]; 60] {
-    let sbox = sbox();
     let mut w: [[u8; 4]; 60] = [[0; 4]; 60];
     for i in 0..8 { w[i] = [key[4*i], key[4*i+1], key[4*i+2], key[4*i+3]]; }
     for i in 8..60 {
         let mut temp = w[i-1];
         if i % 8 == 0 {
             temp = [temp[1], temp[2], temp[3], temp[0]];
-            temp = [sbox[temp[0] as usize], sbox[temp[1] as usize], sbox[temp[2] as usize], sbox[temp[3] as usize]];
+            temp = [sb(temp[0]), sb(temp[1]), sb(temp[2]), sb(temp[3])];
             temp[0] ^= rcon(i / 8);
         } else if i % 8 == 4 {
-            temp = [sbox[temp[0] as usize], sbox[temp[1] as usize], sbox[temp[2] as usize], sbox[temp[3] as usize]];
+            temp = [sb(temp[0]), sb(temp[1]), sb(temp[2]), sb(temp[3])];
         }
         for j in 0..4 { w[i][j] = w[i-8][j] ^ temp[j]; }
     }
@@ -595,33 +767,30 @@ fn add_round_key(state: &mut [[u8; 4]; 4], w: &[[u8; 4]; 60], round: usize) {
     for c in 0..4 { for r in 0..4 { state[r][c] ^= w[round*4 + c][r]; } }
 }
 
-fn sub_bytes(state: &mut [[u8; 4]; 4]) {
-    let s = sbox();
-    for row in state.iter_mut() { for v in row.iter_mut() { *v = s[*v as usize]; } }
-}
-fn inv_sub_bytes(state: &mut [[u8; 4]; 4]) {
-    let s = inv_sbox();
-    for row in state.iter_mut() { for v in row.iter_mut() { *v = s[*v as usize]; } }
-}
+fn sub_bytes(state: &mut [[u8; 4]; 4]) { per_state(state, sb64) }
+fn inv_sub_bytes(state: &mut [[u8; 4]; 4]) { per_state(state, sb_balik64) }
 fn shift_rows(state: &mut [[u8; 4]; 4]) { for r in 1..4 { state[r].rotate_left(r); } }
 fn inv_shift_rows(state: &mut [[u8; 4]; 4]) { for r in 1..4 { state[r].rotate_right(r); } }
 
 fn mix_columns(state: &mut [[u8; 4]; 4]) {
     for c in 0..4 {
         let (a0, a1, a2, a3) = (state[0][c], state[1][c], state[2][c], state[3][c]);
-        state[0][c] = gmul(a0,2) ^ gmul(a1,3) ^ a2 ^ a3;
-        state[1][c] = a0 ^ gmul(a1,2) ^ gmul(a2,3) ^ a3;
-        state[2][c] = a0 ^ a1 ^ gmul(a2,2) ^ gmul(a3,3);
-        state[3][c] = gmul(a0,3) ^ a1 ^ a2 ^ gmul(a3,2);
+        let (b0, b1, b2, b3) = (xt(a0), xt(a1), xt(a2), xt(a3));
+        state[0][c] = b0 ^ b1 ^ a1 ^ a2 ^ a3;
+        state[1][c] = a0 ^ b1 ^ b2 ^ a2 ^ a3;
+        state[2][c] = a0 ^ a1 ^ b2 ^ b3 ^ a3;
+        state[3][c] = b0 ^ a0 ^ a1 ^ a2 ^ b3;
     }
 }
 fn inv_mix_columns(state: &mut [[u8; 4]; 4]) {
     for c in 0..4 {
-        let (a0, a1, a2, a3) = (state[0][c], state[1][c], state[2][c], state[3][c]);
-        state[0][c] = gmul(a0,14) ^ gmul(a1,11) ^ gmul(a2,13) ^ gmul(a3,9);
-        state[1][c] = gmul(a0,9)  ^ gmul(a1,14) ^ gmul(a2,11) ^ gmul(a3,13);
-        state[2][c] = gmul(a0,13) ^ gmul(a1,9)  ^ gmul(a2,14) ^ gmul(a3,11);
-        state[3][c] = gmul(a0,11) ^ gmul(a1,13) ^ gmul(a2,9)  ^ gmul(a3,14);
+        // 9 = 8+1, 11 = 8+2+1, 13 = 8+4+1, 14 = 8+4+2, dari kelipatan 2/4/8 bertopeng.
+        let k = |a: u8| { let (d, e) = (xt(a), xt(xt(a))); let l = xt(e); (l ^ a, l ^ d ^ a, l ^ e ^ a, l ^ e ^ d) };
+        let (a0, a1, a2, a3) = (k(state[0][c]), k(state[1][c]), k(state[2][c]), k(state[3][c]));
+        state[0][c] = a0.3 ^ a1.1 ^ a2.2 ^ a3.0;
+        state[1][c] = a0.0 ^ a1.3 ^ a2.1 ^ a3.2;
+        state[2][c] = a0.2 ^ a1.0 ^ a2.3 ^ a3.1;
+        state[3][c] = a0.1 ^ a1.2 ^ a2.0 ^ a3.3;
     }
 }
 
@@ -663,8 +832,58 @@ fn decrypt_block(block: &[u8; 16], w: &[[u8; 4]; 60]) -> [u8; 16] {
     state_to_bytes(&state)
 }
 
+/// Jadwal kunci dan jalurnya: AES-NI kalau prosesornya punya (waktu tetap, cepat), selain itu hitungan di atas.
+struct KunciAes { w: [[u8; 4]; 60], rk: [[u8; 16]; 15], ni: bool }
+
+impl KunciAes {
+    fn baru(key: &[u8; 32]) -> KunciAes { KunciAes::dengan(key, ni::ada()) }
+    fn dengan(key: &[u8; 32], ni: bool) -> KunciAes {
+        let w = key_expansion_256(key);
+        let mut rk = [[0u8; 16]; 15];
+        for (r, k) in rk.iter_mut().enumerate() { for i in 0..16 { k[i] = w[r * 4 + i / 4][i % 4]; } }
+        KunciAes { w, rk, ni }
+    }
+    fn sandi(&self, b: &[u8; 16]) -> [u8; 16] { if self.ni { ni::sandi(b, &self.rk) } else { encrypt_block(b, &self.w) } }
+    fn buka(&self, b: &[u8; 16]) -> [u8; 16] { if self.ni { ni::buka(b, &self.rk) } else { decrypt_block(b, &self.w) } }
+}
+
+#[cfg(target_arch = "x86_64")]
+mod ni {
+    use std::arch::x86_64::*;
+    pub fn ada() -> bool { std::arch::is_x86_feature_detected!("aes") && std::arch::is_x86_feature_detected!("sse2") }
+    pub fn sandi(b: &[u8; 16], rk: &[[u8; 16]; 15]) -> [u8; 16] { unsafe { sandi_ni(b, rk) } }
+    pub fn buka(b: &[u8; 16], rk: &[[u8; 16]; 15]) -> [u8; 16] { unsafe { buka_ni(b, rk) } }
+    #[target_feature(enable = "aes,sse2")]
+    unsafe fn sandi_ni(b: &[u8; 16], rk: &[[u8; 16]; 15]) -> [u8; 16] {
+        let k = |i: usize| unsafe { _mm_loadu_si128(rk[i].as_ptr() as *const __m128i) };
+        let mut s = unsafe { _mm_xor_si128(_mm_loadu_si128(b.as_ptr() as *const __m128i), k(0)) };
+        for i in 1..14 { s = _mm_aesenc_si128(s, k(i)); }
+        s = _mm_aesenclast_si128(s, k(14));
+        let mut o = [0u8; 16];
+        unsafe { _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, s) };
+        o
+    }
+    #[target_feature(enable = "aes,sse2")]
+    unsafe fn buka_ni(b: &[u8; 16], rk: &[[u8; 16]; 15]) -> [u8; 16] {
+        let k = |i: usize| unsafe { _mm_loadu_si128(rk[i].as_ptr() as *const __m128i) };
+        let mut s = unsafe { _mm_xor_si128(_mm_loadu_si128(b.as_ptr() as *const __m128i), k(14)) };
+        for i in (1..14).rev() { s = _mm_aesdec_si128(s, _mm_aesimc_si128(k(i))); }
+        s = _mm_aesdeclast_si128(s, k(0));
+        let mut o = [0u8; 16];
+        unsafe { _mm_storeu_si128(o.as_mut_ptr() as *mut __m128i, s) };
+        o
+    }
+}
+
+#[cfg(not(target_arch = "x86_64"))]
+mod ni {
+    pub fn ada() -> bool { false }
+    pub fn sandi(_: &[u8; 16], _: &[[u8; 16]; 15]) -> [u8; 16] { unreachable!("tanpa AES-NI") }
+    pub fn buka(_: &[u8; 16], _: &[[u8; 16]; 15]) -> [u8; 16] { unreachable!("tanpa AES-NI") }
+}
+
 pub fn aes256_cbc_encrypt(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Vec<u8> {
-    let w = key_expansion_256(key);
+    let k = KunciAes::baru(key);
     let mut padded = plaintext.to_vec();
     let pad_len = 16 - (padded.len() % 16);
     padded.extend(std::iter::repeat(pad_len as u8).take(pad_len));
@@ -674,7 +893,7 @@ pub fn aes256_cbc_encrypt(plaintext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> Ve
         let mut block = [0u8; 16];
         block.copy_from_slice(chunk);
         for i in 0..16 { block[i] ^= prev[i]; }
-        let enc = encrypt_block(&block, &w);
+        let enc = k.sandi(&block);
         out.extend_from_slice(&enc);
         prev = enc;
     }
@@ -685,13 +904,13 @@ pub fn aes256_cbc_decrypt(ciphertext: &[u8], key: &[u8; 32], iv: &[u8; 16]) -> R
     if ciphertext.is_empty() || ciphertext.len() % 16 != 0 {
         return Err("aes_decrypt: ciphertext harus kelipatan 16 byte dan tidak kosong".to_string());
     }
-    let w = key_expansion_256(key);
+    let k = KunciAes::baru(key);
     let mut out = Vec::with_capacity(ciphertext.len());
     let mut prev = *iv;
     for chunk in ciphertext.chunks(16) {
         let mut block = [0u8; 16];
         block.copy_from_slice(chunk);
-        let dec = decrypt_block(&block, &w);
+        let dec = k.buka(&block);
         let mut plain = [0u8; 16];
         for i in 0..16 { plain[i] = dec[i] ^ prev[i]; }
         out.extend_from_slice(&plain);
@@ -847,5 +1066,101 @@ mod uji_base64 {
             assert_eq!(b64(&super::base64_encode_bytes(&isi)).unwrap(), isi);
             assert_eq!(url(&url_enc(&isi)).unwrap(), isi);
         }
+    }
+}
+
+#[cfg(test)]
+mod uji_acak {
+    /// Rentang 3·2^126: dengan bias modulo sepertiga pertama keluar separuh waktu, tanpa bias sepertiga.
+    #[test]
+    fn random_int_tanpa_bias_modulo() {
+        use crate::interpreter::Value;
+        // `i128::MIN ..= 2^126 - 1` lebarnya 3·2^126; sepertiga pertamanya di bawah `-2^126`.
+        let (lo, hi, batas) = (i128::MIN, (1i128 << 126) - 1, -(1i128 << 126));
+        let (mut bawah, n) = (0, 3000);
+        for _ in 0..n {
+            match super::f_random_int(&[Value::Int(lo), Value::Int(hi)]).unwrap() {
+                Value::Int(x) => { assert!(lo <= x && x <= hi); if x < batas { bawah += 1 } }
+                lain => panic!("{:?}", lain),
+            }
+        }
+        let f = bawah as f64 / n as f64;
+        assert!((0.28..0.39).contains(&f), "pecahan sepertiga pertama {} (bias modulo memberi 0,5)", f);
+        for (lo, hi) in [(5, 5), (i128::MIN, i128::MAX), (-3, 3)] {
+            let Value::Int(x) = super::f_random_int(&[Value::Int(lo), Value::Int(hi)]).unwrap() else { panic!() };
+            assert!(lo <= x && x <= hi);
+        }
+    }
+}
+
+#[cfg(test)]
+mod uji_aes {
+    use super::*;
+    /// S-box hitungan sama persis dengan tabel FIPS-197, dua arah.
+    #[test]
+    fn sbox_hitung_sama_dengan_tabel() {
+        for x in 0..=255u8 {
+            assert_eq!(sb(x), sbox()[x as usize], "sbox {:#x}", x);
+            assert_eq!(sb_balik(x), inv_sbox()[x as usize], "inv_sbox {:#x}", x);
+            // Jalur SWAR: tiap lajur `u64` sama dengan rumus satu byte, di posisi mana pun.
+            let lajur = u64::from_le_bytes(core::array::from_fn(|i| x.wrapping_add(37u8.wrapping_mul(i as u8))));
+            let (h, hb) = (sb64(lajur).to_le_bytes(), sb_balik64(lajur).to_le_bytes());
+            for i in 0..8 {
+                let y = x.wrapping_add(37u8.wrapping_mul(i as u8));
+                assert_eq!((h[i], hb[i]), (sbox()[y as usize], inv_sbox()[y as usize]), "lajur {} {:#x}", i, y);
+            }
+        }
+    }
+    /// FIPS-197 C.3 (AES-256), lewat dua jalur, plus blok acak: AES-NI dan hitungan wajib sama.
+    #[test]
+    fn aes256_fips197_dan_dua_jalur_sama() {
+        let key: [u8; 32] = core::array::from_fn(|i| i as u8);
+        let pt: [u8; 16] = core::array::from_fn(|i| (i as u8) * 0x11);
+        let harap = [0x8e, 0xa2, 0xb7, 0xca, 0x51, 0x67, 0x45, 0xbf, 0xea, 0xfc, 0x49, 0x90, 0x4b, 0x49, 0x60, 0x89];
+        let lunak = KunciAes::dengan(&key, false);
+        assert_eq!(lunak.sandi(&pt), harap);
+        assert_eq!(lunak.buka(&harap), pt);
+        if ni::ada() {
+            let keras = KunciAes::dengan(&key, true);
+            assert_eq!(keras.sandi(&pt), harap);
+            assert_eq!(keras.buka(&harap), pt);
+            let mut x = 0x9e3779b97f4a7c15u64;
+            for _ in 0..200 {
+                let mut acak = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x as u8 };
+                let k: [u8; 32] = core::array::from_fn(|_| acak());
+                let b: [u8; 16] = core::array::from_fn(|_| acak());
+                let (l, h) = (KunciAes::dengan(&k, false), KunciAes::dengan(&k, true));
+                assert_eq!(l.sandi(&b), h.sandi(&b));
+                assert_eq!(l.buka(&b), h.buka(&b));
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod uji_hmac {
+    use super::*;
+    /// RFC 4231 kasus 1 dan 6 (kunci lebih panjang dari blok), dan `tanda32` sama dengan `tanda` umum.
+    #[test]
+    fn hmac_rfc4231_dan_jalur_pbkdf2_sama() {
+        assert_eq!(hex_encode(&hmac_sha256(&[0x0b; 20], b"Hi There")),
+                   "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
+        assert_eq!(hex_encode(&hmac_sha256(&[0xaa; 131], b"Test Using Larger Than Block-Size Key - Hash Key First")),
+                   "60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54");
+        assert_eq!(hex_encode(&sha256(b"abc")), "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad");
+        // SHA-NI (kalau ada) sama dengan jalur skalar atas blok dan state acak.
+        let mut x = 88172645463325252u64;
+        for _ in 0..500 {
+            let mut acak = || { x ^= x << 13; x ^= x >> 7; x ^= x << 17; x };
+            let h0: [u32; 8] = core::array::from_fn(|_| acak() as u32);
+            let b: [u8; 64] = core::array::from_fn(|_| acak() as u8);
+            let (mut p, mut q) = (h0, h0);
+            sha256_kompres(&mut p, &b);
+            sha256_kompres_lunak(&mut q, &b);
+            assert_eq!(p, q);
+        }
+        let mac = HmacSha256::baru(b"kunci");
+        let mut u = [7u8; 32];
+        for _ in 0..50 { assert_eq!(mac.tanda32(&u), mac.tanda(&u)); u = mac.tanda(&u); }
     }
 }

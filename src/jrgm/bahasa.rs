@@ -581,8 +581,7 @@ pub(crate) fn resep_berkas(f: &Path) -> Option<&'static Resep> {
 pub(crate) fn exec(f: &Path, r: &Resep, args: &[String]) -> Result<i32, String> {
     let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !f.is_file() { return Err(format!("jrgm: berkas `{}` tidak ada", f.display())); }
-    let tmp = std::env::temp_dir().join(format!("jrgm-exec-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
+    let tmp = crate::host::dir_sementara("jrgm-exec").map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     let stem = f.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "program".into());
     let isi = Isian { akar, nama: stem.clone(), entri: f.to_string_lossy().to_string(),
         keluaran: tmp.join(&stem).to_string_lossy().to_string(), sumber: vec![f.to_string_lossy().to_string()], uji: None };

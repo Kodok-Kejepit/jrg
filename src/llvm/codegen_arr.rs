@@ -209,8 +209,9 @@ impl Codegen {
     fn arr_contains(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         let (koleksi, elem) = self.arg_koleksi(&args[0], "contains", span)?;
         let x = self.codegen_expr(&args[1], Some(&elem))?;
-        // Bulat lawan pecahan dibandingkan sebagai pecahan, per elemen — dulu jarumnya
-        // dikoersi ke tipe elemen, jadi `arr::contains([1, 2], 1.5)` menjawab `true`.
+        // Jarum dari golongan lain (`arr::contains(["a"], 1)`) `false` seperti acuan, dulu ditolak saat kompilasi;
+        // bulat lawan pecahan dibandingkan sebagai pecahan (dulu `arr::contains([1, 2], 1.5)` menjawab `true`).
+        if let Some(v) = Self::banding_beda_golongan(&BinaryOp::Eq, &elem, &x.ty) { return Ok(v); }
         let campur = x.ty.is_numeric() && elem.is_numeric() && x.ty.is_float() != elem.is_float();
         let x = if campur { x } else { self.coerce(&x, &elem) };
         let (ptr, len) = self.bagian_koleksi_pub(&koleksi, &elem);

@@ -151,7 +151,14 @@ fn regex_find_all(pattern: &str, s: &str) -> Result<Vec<(usize, usize)>, String>
 
 /// Teks di antara kecocokan disalin utuh — dulu kecocokan kosong menelan karakter sesudahnya.
 fn regex_replace(pattern: &str, s: &str, repl: &str, all: bool) -> Result<String, String> {
-    let cocok = if all { regex_find_all(pattern, s)? } else { regex_find(pattern, s)?.into_iter().collect() };
+    let cocok: Vec<(usize, usize)> = if all { regex_find_all(pattern, s)? } else { regex_find(pattern, s)?.into_iter().collect() };
+    let n = cocok.len() as i128;
+    let total = (s.len() as i128) - cocok.iter().map(|(a, b)| (b - a) as i128).sum::<i128>()
+        + n.saturating_mul(repl.len() as i128);
+    if total > crate::interpreter::MAKS_TEKS_HASIL {
+        let nama = if all { "re::replace_all" } else { "re::replace" };
+        return Err(crate::interpreter::pesan_ganti_kegedean(nama, n, repl.chars().count(), total));
+    }
     let mut out = String::with_capacity(s.len());
     let mut akhir = 0;
     for (a, b) in cocok {

@@ -1,34 +1,38 @@
-JRG 0.3.0 membawa mesin eksekusi keempat, `--jit`, dua puluh tiga modul `std/` baru, dan pengetatan di pustaka web,
-arsip, dan pengurai. Ada beberapa perubahan yang bisa membuat program lama berperilaku lain; daftarnya di bawah.
+JRG 0.4.0 memperketat pustaka berkas, web, dan kripto, dan membuat `--jit` lebih cepat di kode yang memegang enum,
+struct, dan larik. Beberapa perubahan bisa membuat program lama berperilaku lain; daftarnya di bawah.
 
-## Yang baru
+## Lebih aman
 
-- **`jrgc program.jrg --jit`**: bagian program yang sering jalan dikompilasi jadi kode mesin saat program berjalan,
-  sisanya tetap di VM. Hasilnya sama persis dengan `--vm`, termasuk galat dan lokasinya. Bilangan bulat, struct,
-  enum, larik dan teks semuanya ikut. Contoh: kernel teks `string_ops` turun dari 9,3 detik di `--vm` ke 0,7 detik.
-- **Dua puluh tiga modul `std/` baru**, ditulis dalam JRG: `cli`, `tanggal`, `glob`, `diff`, `shlex`, `uuid`, `ini`,
-  `dotenv`, `log`, `graf`, `base32`, `ip`, `mirip`, `lru`, `os`, `templat`, `bungkus`, `cron`, `sandi`, `markdown`,
-  `batas`, `hitung`, `izin`.
-- **Pustaka baru**: `zip::`, `tar::`, `gzip::`, `xml::`, `toml::`, `url::`, `semver::`, `jwt::`, token CSRF
-  (`dok::csrf_token`), `dok::form`/`dok::multipart`, `fs::safe_join`, `crypto::compare_digest`, `env::os`/`env::arch`.
-- **`http::hanya_publik(true)`** menolak alamat internal (loopback, jaringan privat, metadata awan) di klien HTTP,
-  diperiksa dari alamat yang benar-benar disambungi.
-- `main -> int` jadi kode keluar program di semua mesin, dan rekursi tidak lagi dibatasi 10 000 tingkat.
+- Bacaan berkas utuh (`fs::read`, `file::read`, `zip::`/`tar::` dari jalur, berkas statis `dok::serve`) dibatasi
+  256 MiB, jadi perangkat tanpa ujung seperti `/dev/zero` jadi galat alih-alih menghabiskan memori.
+- AES (`crypto::seal`, `crypto::aes_*`) tidak lagi membocorkan kunci lewat waktu: AES-NI di x86_64, hitungan
+  waktu-tetap di platform lain. `crypto::random_int` tanpa bias modulo.
+- `dok::password_hash` bawaannya 600 000 putaran; hash lama tetap bisa diperiksa.
+- Sesi `dok::session_*` punya masa berlaku (bawaan 14 hari).
+- `dok::router_static` tidak menyajikan berkas bertitik (`.env`, `.git/`); respons `dok::serve` membawa
+  `X-Content-Type-Options: nosniff`; `dok::log_*` selalu satu baris per panggilan.
+- Kanvas mode `web` menolak halaman dari situs lain.
+- Berkas kerja `--emit-llvm`, `jrgm exec`, dan runner `py::`/`js::`/`php::` tidak lagi bernama tebakan di `/tmp`.
+
+## Lebih cepat
+
+`--jit`, jam penuh lawan 0.3.0: `match_dispatch` 9,9 → 7,0 detik, `call_recursion` 1,01 → 0,87,
+`array_sort` 2,5 → 2,2, `struct_particles` 13,6 → 13,1.
 
 ## Bisa memutus program lama
 
-- `dok::serve` tanpa alamat sekarang mendengar di `127.0.0.1` (dulu `0.0.0.0`).
-- WebSocket dari halaman situs lain (`Origin` beda host) dijawab 403.
-- `select` dengan beberapa lengan yang siap memilih acak di semua mesin.
-- Base64 cuma menerima satu ejaan untuk satu isi; `=` di tengah dan bit sisa bukan nol jadi `Err`.
-- `dok::serve` lebih ketat membaca permintaan: jalur ganda ejaan, baris dan kepala cacat dijawab 400.
-- `dok::db_exec`/`dok::db_query` menjalankan tepat satu pernyataan, dan jumlah parameter harus sama dengan `?`.
-- `dok::render` menolak nilai di tempat yang tidak bisa diloloskan (di dalam `<script>`, atribut `on*`, dan lain-lain).
-- `jrgm.toml`/`jrgm.lock` dibaca sebagai TOML 1.0 ketat, dan versi dependensi harus SemVer persis.
-- `http::unduh` tidak lagi mengikuti pengalihan dari `https://` ke `http://`.
+- `json::parse` dan `dok::json_decode` menolak kunci kembar di satu objek.
+- Bacaan berkas di atas 256 MiB, dan hasil `str::replace`/`re::replace`/`join` di atas 256 MiB, jadi galat.
+- `dok::session_decode` menolak sesi yang lebih tua dari 14 hari (atau dari argumen ketiganya, dalam detik).
+- `jrgm build` tidak memasang paket Python lagi, cuma melaporkan yang belum ada; `jrgm run` tetap memasangnya.
+- `dok::router_static` menjawab berkas bertitik seperti tidak ada.
 
-Rincian tiap perubahan, termasuk empat puluh perbaikan, ada di
-[CHANGELOG.md](https://github.com/Kodok-Kejepit/jrg/blob/main/CHANGELOG.md).
+## Diperbaiki di `--emit-llvm`
+
+- `f(...v)` dan `f(a: 1)` ke closure yang diikat `let` jalan seperti di interpreter.
+- `==` atas dua fungsi gagal saat jalan seperti interpreter, dan galat dari pustaka bawaan menunjuk baris program.
+
+Rincian lengkapnya di [CHANGELOG.md](https://github.com/Kodok-Kejepit/jrg/blob/main/CHANGELOG.md).
 
 ## Pasang
 

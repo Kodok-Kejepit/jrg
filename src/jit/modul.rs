@@ -111,6 +111,9 @@ fn modul() -> &'static Mutex<Option<ModulJit>> {
             jb.symbol("jrg_jit_jenis_sama", lambat::jenis_sama as *const u8);
             jb.symbol("jrg_jit_panjang", lambat::panjang as *const u8);
             jb.symbol("jrg_jit_panjang_lokal", lambat::panjang_lokal as *const u8);
+            jb.symbol("jrg_jit_payload_jenis_sama", lambat::payload_jenis_sama as *const u8);
+            jb.symbol("jrg_jit_payload_panjang", lambat::payload_panjang as *const u8);
+            jb.symbol("jrg_jit_keluar_ringan_angka", lambat::keluar_ringan_angka as *const u8);
             jb.symbol("jrg_jit_buka_lokal", lambat::buka_lokal as *const u8);
             jb.symbol("jrg_jit_iter_ada", lambat::iter_ada as *const u8);
             jb.symbol("jrg_jit_maju", lambat::maju as *const u8);
@@ -172,6 +175,9 @@ fn modul() -> &'static Mutex<Option<ModulJit>> {
                 jenis_sama: impor("jrg_jit_jenis_sama", &[I64, I64], Some(I32))?,
                 panjang: impor("jrg_jit_panjang", &[I64, p], Some(I32))?,
                 panjang_lokal: impor("jrg_jit_panjang_lokal", &[I64, p], Some(I32))?,
+                payload_jenis_sama: impor("jrg_jit_payload_jenis_sama", &[I64, I64], Some(I32))?,
+                payload_panjang: impor("jrg_jit_payload_panjang", &[I64, p], Some(I32))?,
+                keluar_ringan_angka: impor("jrg_jit_keluar_ringan_angka", &[I64, I64, p, I64], Some(I32))?,
                 buka_lokal: impor("jrg_jit_buka_lokal", &[I64, I32, p], Some(I32))?,
                 iter_ada: impor("jrg_jit_iter_ada", &[I64], Some(I32))?,
                 maju: impor("jrg_jit_maju", &[I64], Some(I32))?,
@@ -225,6 +231,9 @@ fn kunci(f: &Arc<VmFunction>, masuk: usize, kembali: u8, jenis: &[Jenis]) -> Kun
     let versi = f.chunk.kode_jit.versi.load(std::sync::atomic::Ordering::Relaxed);
     (Arc::as_ptr(f) as usize, masuk, kembali, jenis.to_vec(), versi)
 }
+
+/// Unit ke-`i` callee bulat (berkonvensi `turun::tanda_tangan_bulat`).
+fn k_bulat(baru: &[(Kunci, Arc<VmFunction>, Arc<layak::Rencana>)], i: usize) -> bool { baru[i].0 .2 == layak::KEMBALI_BULAT }
 
 /// Titik masuk callee yang dipanggil kode native: awal fungsi, semua argumen bulat.
 fn kunci_callee(f: &Arc<VmFunction>) -> Kunci {
@@ -295,7 +304,8 @@ pub fn kompilasi(
     for (_, h, _) in &baru {
         mj.urut += 1;
         let nama = format!("jrg{}_{}", mj.urut, h.name.chars().filter(|c| c.is_ascii_alphanumeric()).collect::<String>());
-        let id = mj.m.declare_function(&nama, Linkage::Local, &sig).ok()?;
+        let tt = if k_bulat(&baru, id_baru.len()) { turun::tanda_tangan_bulat(cc, h.arity as usize) } else { sig.clone() };
+        let id = mj.m.declare_function(&nama, Linkage::Local, &tt).ok()?;
         id_baru.push(id);
     }
     let id_kunci = |k: &Kunci, mj: &ModulJit| -> FuncId {
@@ -318,7 +328,7 @@ pub fn kompilasi(
             .map(|(i, jenis)| mj.ringan.get(&kunci(&r.callee[*i], 0, layak::KEMBALI_SKALAR, jenis)).copied().unwrap_or(false))
             .collect();
         mj.ringan.insert(k.clone(), layak::ringan(h, r));
-        ctx.func.signature = sig.clone();
+        ctx.func.signature = if k.2 == layak::KEMBALI_BULAT { turun::tanda_tangan_bulat(cc, h.arity as usize) } else { sig.clone() };
         let impor = turun::Impor {
             catat: mj.catat, undi: mj.undi, baca: mj.baca, tulis: mj.tulis, fid: fid0 + i as u32, lambat: &mj.lambat, ringan: &ringan,
         };
@@ -328,7 +338,11 @@ pub fn kompilasi(
         if k.2 == layak::KEMBALI_BULAT && ctx.func.dfg.num_insts() <= SISIP_MAKS {
             mj.badan.insert(diri, ctx.func.clone());
         }
+        // `JRG_JIT_LOG=clif`: IR tiap fungsi sesudah disisipi, lalu kode mesinnya.
+        let clif = std::env::var("JRG_JIT_LOG").is_ok_and(|v| v == "clif");
+        if clif { eprintln!("[jit] clif {}:\n{}", h.name, ctx.func.display()); ctx.set_disasm(true); }
         utuh = mj.m.define_function(id_baru[i], &mut ctx).is_ok();
+        if clif { if let Some(v) = ctx.compiled_code().and_then(|c| c.vcode.as_ref()) { eprintln!("[jit] mesin {}:\n{}", h.name, v); } }
         mj.m.clear_context(&mut ctx);
         if !utuh { break; }
     }

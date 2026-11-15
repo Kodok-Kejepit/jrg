@@ -95,9 +95,10 @@ impl Runtime {
 // Skrip runner
 // ---------------------------------------------------------------------------
 
-/// Tulis runner yang ditanam ke temp dir dan kembalikan path-nya, **atomik**.
+/// Tulis runner yang ditanam ke folder pribadi pemakai dan kembalikan path-nya, **atomik**. Dulu di `/tmp` dengan
+/// nama tebakan: pemakai lain bisa menyiapkan berkas `.tmp`-nya (tulis-semua) lalu mengganti isinya sebelum dijalankan.
 fn path_skrip(rt: &Runtime) -> std::io::Result<std::path::PathBuf> {
-    let dir = std::env::temp_dir();
+    let dir = crate::host::dir_pribadi("runner")?;
     let path = dir.join(rt.skrip_nama);
 
     static URUT: AtomicU64 = AtomicU64::new(0);
@@ -108,8 +109,7 @@ fn path_skrip(rt: &Runtime) -> std::io::Result<std::path::PathBuf> {
     std::fs::write(&tmp, rt.skrip_src)?;
     match std::fs::rename(&tmp, &path) {
         Ok(()) => Ok(path),
-        // `rename` gagal (mis. temp dir lintas filesystem). Berkas sementaranya
-        // lengkap dan bernama unik, jadi memakainya apa adanya tetap benar.
+        // `rename` gagal di folder milik sendiri: berkas sementaranya lengkap dan bernama unik.
         Err(_) => Ok(tmp),
     }
 }

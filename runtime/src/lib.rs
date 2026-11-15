@@ -1066,6 +1066,15 @@ pub extern "C" fn jrg_str_repeat(ptr: *const u8, len: i64, n: i64, out_ptr: *mut
     unsafe { emit_bytes(s.repeat(n as usize), out_ptr, out_len) };
 }
 
+/// `jrg_str_join` (C) yang hasilnya melewati 256 MiB — salinan `interpreter::value::pesan_gabung_kegedean`.
+#[no_mangle]
+pub extern "C" fn jrg_gabung_kegedean(n: i64, sp: *const u8, sl: i64, total: i64) -> ! {
+    let k = unsafe { borrow_bytes(sp, sl) }.iter().filter(|b| *b & 0xC0 != 0x80).count();
+    let pesan = format!("str::join: hasil penggabungan kegedean: {} elemen dengan pemisah {} karakter = sekitar {} byte \
+        (batasnya 256 MiB). Cek lagi pemisah atau jumlah elemennya", n, k, total);
+    jrg_panic(pesan.as_ptr(), pesan.len() as i64)
+}
+
 #[no_mangle]
 pub extern "C" fn jrg_str_replace(
     sptr: *const u8, slen: i64, fptr: *const u8, flen: i64, tptr: *const u8, tlen: i64,
@@ -1075,6 +1084,21 @@ pub extern "C" fn jrg_str_replace(
     let s = unsafe { borrow_bytes(sptr, slen) };
     let from = unsafe { borrow_bytes(fptr, flen) };
     let to = unsafe { borrow_bytes(tptr, tlen) };
+    // Hasil diukur sebelum dibangun, kalimatnya salinan `interpreter::value::pesan_ganti_kegedean`.
+    if to.len() > from.len() {
+        let n = if from.is_empty() { s.iter().filter(|b| *b & 0xC0 != 0x80).count() + 1 } else {
+            let (mut n, mut i) = (0usize, 0usize);
+            while let Some(k) = cari_byte(&s[i..], from) { n += 1; i += k + from.len(); }
+            n
+        } as i128;
+        let total = (s.len() as i128).saturating_add(n.saturating_mul((to.len() - from.len()) as i128));
+        if total > 256 * 1024 * 1024 {
+            let k = to.iter().filter(|b| *b & 0xC0 != 0x80).count();
+            let pesan = format!("str::replace: hasil penggantian kegedean: {} kemunculan x {} karakter pengganti = \
+                sekitar {} byte (batasnya 256 MiB). Cek lagi pengganti atau polanya", n, k, total);
+            jrg_panic(pesan.as_ptr(), pesan.len() as i64);
+        }
+    }
     if from.is_empty() {
         // Pola kosong menyisipkan penggantinya di setiap BATAS KARAKTER, termasuk di
         // awal dan di akhir — `replace("aé漢", "", "-")` menghasilkan `-a-é-漢-`.

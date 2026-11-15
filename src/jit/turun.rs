@@ -40,6 +40,20 @@ pub fn tanda_tangan(m: &impl Module, cc: CallConv) -> Signature {
     sig
 }
 
+/// Callee bulat (`KEMBALI_BULAT`, cuma dipanggil kode native): `fn(a0..an: i64, kedalaman: i32) -> (i32, i64)` —
+/// argumen dan hasil di register, statusnya sama dengan `tanda_tangan`.
+pub fn tanda_tangan_bulat(cc: CallConv, n: usize) -> Signature {
+    let mut sig = Signature::new(cc);
+    for _ in 0..n { sig.params.push(AbiParam::new(types::I64)); }
+    sig.params.push(AbiParam::new(types::I32));
+    sig.returns.push(AbiParam::new(types::I32));
+    sig.returns.push(AbiParam::new(types::I64));
+    sig
+}
+
+/// Fungsi yang sedang diturunkan berkonvensi `tanda_tangan_bulat`.
+fn register(b: &FunctionBuilder) -> bool { b.func.signature.returns.len() == 2 }
+
 /// `deopt::catat(fid, ip, nilai, n)`.
 pub fn tanda_tangan_catat(m: &impl Module, cc: CallConv) -> Signature {
     let ptr = m.target_config().pointer_type();
@@ -84,6 +98,7 @@ pub struct ImporLambat {
     pub langkah: FuncId, pub muat: FuncId, pub buang: FuncId, pub benar: FuncId, pub buka: FuncId,
     pub taruh: FuncId, pub ambil: FuncId, pub simpan: FuncId, pub pola: FuncId, pub payload: FuncId,
     pub pola_lokal: FuncId, pub payload_lokal: FuncId, pub payload_angka: FuncId, pub pola_pilih: FuncId, pub buka_lokal: FuncId, pub field_lokal: FuncId, pub field_banyak: FuncId, pub metode_tukar: FuncId, pub metode_lokal: FuncId, pub karakter_lokal: FuncId, pub konteks_mentah: FuncId, pub masuk_ringan: FuncId, pub keluar_ringan: FuncId, pub karakter: FuncId, pub bangun: FuncId, pub baca_pecahan: FuncId, pub jenis_sama: FuncId, pub panjang: FuncId, pub panjang_lokal: FuncId,
+    pub payload_jenis_sama: FuncId, pub payload_panjang: FuncId, pub keluar_ringan_angka: FuncId,
     pub iter_ada: FuncId, pub maju: FuncId, pub langkah_cabang: FuncId, pub sebar: FuncId,
     pub pindah: FuncId, pub muat_global: FuncId, pub simpan_global: FuncId, pub indeks: FuncId, pub field: FuncId,
     pub masuk: FuncId, pub keluar: FuncId, pub salin: FuncId, pub tukar: FuncId, pub cek_metode: FuncId,
@@ -102,7 +117,12 @@ pub struct Impor<'a> {
 /// Kembali dengan status `st` tanpa mencatat apa pun.
 fn kembali_status(b: &mut FunctionBuilder, st: i64) {
     let v = b.ins().iconst(types::I32, st);
-    b.ins().return_(&[v]);
+    pulang(b, v);
+}
+
+/// `return` dengan status `st` saja; konvensi register membawa hasil nol.
+fn pulang(b: &mut FunctionBuilder, st: Value) {
+    if register(b) { let nol = b.ins().iconst(types::I64, 0); b.ins().return_(&[st, nol]); } else { b.ins().return_(&[st]); }
 }
 
 /// `bendera`: `BUKA_SUDAH` selama sisa instruksi `Cara::Buka` sesudah bukaannya berhasil.
@@ -314,7 +334,7 @@ fn rantai_pola(f: &VmFunction, r: &Rencana) -> (std::collections::HashMap<usize,
             datang[(kode[ip].arg as usize).min(n)] += 1;
         }
         if let Cara::Cabang { tujuan, .. } = &r.cara[ip] { for &t in tujuan.iter() { datang[t.min(n)] += 1; } }
-        if matches!(r.cara[ip], Cara::TipeLipat(_) | Cara::TipeSama(_)) { datang[(ip + 3).min(n)] += 1; }
+        if r.cara[ip].lebar() > 1 { datang[(ip + r.cara[ip].lebar()).min(n)] += 1; }
         if !matches!(op, Jump | Return | ReturnNil) { datang[ip + 1] += 1; }
     }
     let kepala = |h: usize| -> Option<usize> {
@@ -531,7 +551,7 @@ fn keluar_deopt(b: &mut FunctionBuilder, k: &Keluar, var: &[Variable], ip: usize
     let n = b.ins().iconst(types::I32, jenis.len() as i64);
     b.ins().call(k.catat, &[fid, ipv, pn, n]);
     let st = b.ins().iconst(types::I32, DEOPT);
-    b.ins().return_(&[st]);
+    pulang(b, st);
 }
 
 /// `cond` benar = deopt di `ip` dengan stack `jenis`; sesudahnya builder ada di blok lanjutan.
@@ -641,7 +661,7 @@ fn isi_tepi(
                     let kv = b.ins().iconst(types::I64, &r.callee_nilai[*c] as *const _ as i64);
                     b.ins().call(taruh, &[p, kv]);
                 }
-                Jenis::Bawaan(_) | Jenis::Bungkus(..) => {
+                Jenis::Bawaan(_) | Jenis::Bungkus(..) | Jenis::Konst(_) => {
                     let kv = b.ins().iconst(types::I64, k.alamat_konstanta(*a).expect("maya"));
                     b.ins().call(taruh, &[p, kv]);
                 }
@@ -853,9 +873,13 @@ pub fn turunkan(
     let masuk = b.create_block();
     b.append_block_params_for_function_params(masuk);
     b.switch_to_block(masuk);
-    let (args, kedalaman, keluar) = {
-        let p = b.block_params(masuk);
-        (p[0], p[1], p[2])
+    // Konvensi register: argumen = parameter, tanpa penyangga dan tanpa `keluar` (tidak dipakai di sana).
+    let parameter = b.block_params(masuk).to_vec();
+    let (args, kedalaman, keluar) = if register(&b) {
+        let nol = b.ins().iconst(ptr, 0);
+        (nol, parameter[parameter.len() - 1], nol)
+    } else {
+        (parameter[0], parameter[1], parameter[2])
     };
     // Satu slot rekaman untuk semua titik deopt fungsi ini (cuma satu yang pernah dipakai per panggilan).
     let slot = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (r.maks.max(1) * 8) as u32, 3));
@@ -888,7 +912,8 @@ pub fn turunkan(
     let [f_muat_upval, f_simpan_upval, f_tulis_vm, f_field_lokal, f_karakter, f_bangun, f_baca_pecahan, f_jenis_sama, f_panjang, f_field_banyak, f_metode_tukar, f_metode_lokal, f_karakter_lokal, f_masuk_ringan, f_keluar_ringan] =
         [il.muat_upval, il.simpan_upval, il.tulis_vm, il.field_lokal, il.karakter, il.bangun, il.baca_pecahan, il.jenis_sama, il.panjang, il.field_banyak, il.metode_tukar, il.metode_lokal, il.karakter_lokal, il.masuk_ringan, il.keluar_ringan]
         .map(|id| m.declare_func_in_func(id, b.func));
-    let f_panjang_lokal = m.declare_func_in_func(il.panjang_lokal, b.func);
+    let [f_panjang_lokal, f_payload_jenis_sama, f_payload_panjang, f_keluar_ringan_angka] =
+        [il.panjang_lokal, il.payload_jenis_sama, il.payload_panjang, il.keluar_ringan_angka].map(|id| m.declare_func_in_func(id, b.func));
     let dalam = b.create_block();
     b.set_cold_block(dalam);
     // Kedalaman native dijaga di pintu masuk; parameter dimuat dari penyangga argumen.
@@ -937,7 +962,7 @@ pub fn turunkan(
             continue;
         }
         if !j.skalar() { continue; }
-        let v = b.ins().load(types::I64, fl, args, (i * 8) as i32);
+        let v = if register(&b) { parameter[i] } else { b.ins().load(types::I64, fl, args, (i * 8) as i32) };
         b.def_var(var[i], v);
     }
     let kedalaman1 = b.ins().iadd_imm_s(kedalaman, 1);
@@ -993,9 +1018,12 @@ pub fn turunkan(
         }
         k.bendera.set(0);
         // Salinan maya yang tidak boleh melewati instruksi ini ditulis dulu ke stack VM (`layak::boleh_lewat_salinan`).
-        for &(p, l) in &r.wujud[ip] {
-            let (d, ke) = (b.ins().iconst(types::I64, l as i64), b.ins().iconst(types::I64, p as i64));
-            b.ins().call(f_muat, &[d, ke]);
+        for &(p, j) in &r.wujud[ip] {
+            let ke = b.ins().iconst(types::I64, p as i64);
+            match j {
+                Jenis::Salinan(l) => { let d = b.ins().iconst(types::I64, l as i64); b.ins().call(f_muat, &[d, ke]); }
+                _ => { let kv = b.ins().iconst(types::I64, k.alamat_konstanta(j).expect("maya")); b.ins().call(f_taruh, &[ke, kv]); }
+            }
         }
         // Sesudah bukaan gabungan, posisinya belum ada di stack VM: deopt acak cuma di instruksi pertamanya.
         if let (Some(u), false) = (undi, dibuka) {
@@ -1388,6 +1416,33 @@ pub fn turunkan(
                 }
                 continue;
             }
+            Cara::PayloadSama(l, ci) => {
+                let (lv, kv) = (i64c(&mut b, *l as i64), i64c(&mut b, &f.chunk.constants[*ci] as *const _ as i64));
+                let c = b.ins().call(f_payload_jenis_sama, &[lv, kv]);
+                let c = b.inst_results(c)[0];
+                let galat = b.ins().icmp_imm_s(IntCC::Equal, c, 2);
+                jaga(&mut b, &k, &var, galat, ip, s);
+                let v = b.ins().uextend(types::I64, c);
+                b.def_var(var[t - 1], v);
+                let ke = tepi(&mut b, r, &blok, ip, ip + 4, &mut tunda);
+                b.ins().jump(ke, &[]);
+                isi_tepi(&mut b, &k, r, &blok, &var, &mut tunda, f_tulis_vm, f_taruh);
+                terbuka = false;
+                continue;
+            }
+            Cara::PayloadPanjang(l) => {
+                let (lv, pk) = (i64c(&mut b, *l as i64), b.ins().stack_addr(ptr, wadah, 0));
+                let c = b.ins().call(f_payload_panjang, &[lv, pk]);
+                let st = b.inst_results(c)[0];
+                jaga(&mut b, &k, &var, st, ip, s);
+                let v = b.ins().stack_load(ptr, types::I64, wadah, 0);
+                b.def_var(var[t - 1], v);
+                let ke = tepi(&mut b, r, &blok, ip, ip + 2, &mut tunda);
+                b.ins().jump(ke, &[]);
+                isi_tepi(&mut b, &k, r, &blok, &var, &mut tunda, f_tulis_vm, f_taruh);
+                terbuka = false;
+                continue;
+            }
             Cara::TipeSama(ci) => {
                 let (p, kv) = (i64c(&mut b, t as i64 - 1), i64c(&mut b, &f.chunk.constants[*ci] as *const _ as i64));
                 let c = b.ins().call(f_jenis_sama, &[p, kv]);
@@ -1521,12 +1576,18 @@ pub fn turunkan(
                     _ => (t - a - 1, 0),
                 };
                 tumpahkan(&mut b, &k, &var, s, dari..t, slot, ptr, f_taruh, &r.callee_nilai);
+                let ringan = fungsi != 0 && impor.ringan.get(*n).copied().unwrap_or(false);
+                // Hasil angka sejenis spekulasi dipakai dari register: `keluar_ringan_angka` tidak menaruhnya.
+                let angka = match (ringan, r.spek[ip]) {
+                    (true, Some(Jenis::Bulat)) => Some(BERHASIL),
+                    (true, Some(Jenis::Pecahan)) => Some(BERHASIL_PECAHAN),
+                    _ => None,
+                };
                 let args = [
                     i64c(&mut b, ip as i64), i64c(&mut b, s.as_ptr() as i64), i64c(&mut b, t as i64),
                     i64c(&mut b, a as i64), b.ins().stack_addr(ptr, slot, 0), i64c(&mut b, fungsi),
                     b.ins().stack_addr(ptr, titip, 0),
                 ];
-                let ringan = fungsi != 0 && impor.ringan.get(*n).copied().unwrap_or(false);
                 let c = b.ins().call(if ringan { f_masuk_ringan } else { f_masuk }, &args);
                 let m0 = b.inst_results(c)[0];
                 let (gagal, cek, asli, akhir) = (b.create_block(), b.create_block(), b.create_block(), b.create_block());
@@ -1556,7 +1617,10 @@ pub fn turunkan(
                 let st = b.ins().sextend(types::I64, st);
                 let h = b.ins().stack_load(ptr, types::I64, wadah, 0);
                 let tp = b.ins().stack_addr(ptr, titip, 0);
-                let c = b.ins().call(if ringan { f_keluar_ringan } else { f_keluar }, &[st, h, tp]);
+                let c = match angka {
+                    Some(kode) => { let kv = i64c(&mut b, kode); b.ins().call(f_keluar_ringan_angka, &[st, h, tp, kv]) }
+                    None => b.ins().call(if ringan { f_keluar_ringan } else { f_keluar }, &[st, h, tp]),
+                };
                 let r0 = b.inst_results(c)[0];
                 let (gagal2, terus) = (b.create_block(), b.create_block());
                 b.set_cold_block(gagal2);
@@ -2018,10 +2082,9 @@ pub fn turunkan(
             }
             OpCode::Return => {
                 let v = atas(&mut b, 1);
-                b.ins().store(fl, v, keluar, 0);
                 let st = match s[t - 1] { Jenis::Bool => BERHASIL_BOOL, Jenis::Pecahan => BERHASIL_PECAHAN, _ => BERHASIL };
                 let st = b.ins().iconst(types::I32, st);
-                b.ins().return_(&[st]);
+                if register(&b) { b.ins().return_(&[st, v]); } else { b.ins().store(fl, v, keluar, 0); b.ins().return_(&[st]); }
                 terbuka = false;
             }
             // `str::char_at` atas teks lokal: `karakter_lokal` menjawab semua yang sah, −1 = galat, deopt (VM melapor).
@@ -2080,6 +2143,24 @@ pub fn turunkan(
                 let h = b.block_params(gabung)[0];
                 b.def_var(var[t - 3], h);
             }
+            OpCode::Call if a == 1 && s[t - 2].bungkus(super::layak::BUNGKUS_KE_BULAT) && s[t - 1] == Jenis::Lebar => {
+                let x = b.use_var(k.v128[t - 1]);
+                if nama_bawaan(f, s[t - 2]) == Some("uint") {
+                    let nol = b.ins().iconst(types::I64, 0);
+                    let nol = b.ins().sextend(types::I128, nol);
+                    let neg = b.ins().icmp(IntCC::SignedLessThan, x, nol);
+                    jaga(&mut b, &k, &var, neg, ip, s);
+                }
+                if r.keadaan[ip + 1].as_ref().and_then(|j| j.get(t - 2).copied()) == Some(Jenis::Bulat) {
+                    let lo = b.ins().ireduce(types::I64, x);
+                    let balik = b.ins().sextend(types::I128, lo);
+                    let lepas = b.ins().icmp(IntCC::NotEqual, balik, x);
+                    jaga_spek(&mut b, &k, &var, lepas, ip, s);
+                    b.def_var(var[t - 2], lo);
+                } else {
+                    b.def_var(k.v128[t - 2], x);
+                }
+            }
             OpCode::Call if a == 1 && s[t - 2].bungkus(super::layak::BUNGKUS_KE_BULAT) => {
                 let v = b.use_var(var[t - 1]);
                 // `uint` atas bulat negatif: VM yang melaporkannya.
@@ -2096,17 +2177,12 @@ pub fn turunkan(
             }
             OpCode::Call => {
                 let Jenis::Fungsi(i) = s[t - a - 1] else { unreachable!("dijamin layak.rs") };
+                // Callee bulat berkonvensi register (`tanda_tangan_bulat`).
                 let fref = m.declare_func_in_func(id_callee[i].expect("callee asli dikompilasi"), b.func);
-                let slot = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, (a.max(1) * 8) as u32, 3));
-                let hasil = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, 8, 3));
-                for k in 0..a {
-                    let v = b.use_var(var[t - a + k]);
-                    b.ins().stack_store(ptr, v, slot, (k * 8) as i32);
-                }
-                let pa = b.ins().stack_addr(ptr, slot, 0);
-                let ph = b.ins().stack_addr(ptr, hasil, 0);
-                let panggil = b.ins().call(fref, &[pa, kedalaman1, ph]);
-                let st = b.inst_results(panggil)[0];
+                let mut argv: Vec<Value> = (0..a).map(|k| b.use_var(var[t - a + k])).collect();
+                argv.push(kedalaman1);
+                let panggil = b.ins().call(fref, &argv);
+                let (st, hasil) = (b.inst_results(panggil)[0], b.inst_results(panggil)[1]);
                 let terus = b.create_block();
                 let gagal = b.create_block();
                 b.set_cold_block(gagal);
@@ -2127,15 +2203,14 @@ pub fn turunkan(
                 keluar_deopt(&mut b, &k, &var, ip + 1, &s[..t - a - 1]);
                 k.bendera.set(lama);
                 b.switch_to_block(terus);
-                let v = b.ins().stack_load(ptr, types::I64, hasil, 0);
-                b.def_var(var[t - a - 1], v);
+                b.def_var(var[t - a - 1], hasil);
             }
             _ => unreachable!("dijamin layak.rs"),
         }
     }
     b.switch_to_block(dalam);
     let st = b.ins().iconst(types::I32, ULANG);
-    b.ins().return_(&[st]);
+    pulang(&mut b, st);
     b.seal_all_blocks();
     b.finalize(m.target_config());
 }

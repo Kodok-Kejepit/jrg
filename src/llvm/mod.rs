@@ -775,6 +775,7 @@ pub fn compile_ir_to_native(
     }
     let out = cmd.output().map_err(|e| format!("gagal menjalankan clang ({}): {}", clang.display(), e));
     let _ = std::fs::remove_file(&jaga);
+    if let Some(d) = jaga.parent() { let _ = std::fs::remove_dir(d); }
     let out = out?;
     if !out.status.success() {
         return Err(format!(
@@ -794,7 +795,9 @@ pub fn compile_ir_to_native(
 fn tulis_jaga_stack() -> Result<PathBuf, String> {
     static URUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = URUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let p = std::env::temp_dir().join(format!("jrgc-jaga-{}-{}.c", std::process::id(), n));
+    // Di folder sementara baru milik pemanggilan ini (0700): nama tebakan di `/tmp` bisa diganti isinya sebelum clang.
+    let d = crate::host::dir_sementara("jrgc-jaga").map_err(|e| format!("gagal membuat folder sementara: {}", crate::host::galat_io(&e)))?;
+    let p = d.join(format!("jaga-{}.c", n));
     // Primitif memori (semua sasaran) lalu penjaga stack (cuma Unix; berkasnya menjaga dirinya).
     std::fs::write(&p, concat!(include_str!("primitif.c"), "\n", include_str!("korutin.c"), "\n", include_str!("jaga_stack.c")))
         .map_err(|e| format!("gagal menulis {}: {}", p.display(), e))?;

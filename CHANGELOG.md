@@ -6,6 +6,51 @@ mungkin terjadi; semuanya dicatat di bagian **Memutus**.
 
 ## [Belum dirilis]
 
+## [0.4.0] — 2026-11-15
+
+### Memutus
+
+- **`json::parse` dan `dok::json_decode` menolak kunci kembar di satu objek** (juga yang kembar lewat escape,
+  `"adm\u0069n"` lawan `"admin"`). Dulu yang terakhir menang diam-diam, padahal pengurai lain memilih yang pertama.
+- **Bacaan berkas utuh berbatas 256 MiB** (`fs::read` dan kawan-kawannya, `file::read`, `zip::`/`tar::` dari jalur,
+  `wasm::muat`, berkas statis `dok::serve`): yang lebih besar, atau perangkat tanpa ujung seperti `/dev/zero`, jadi
+  galat berkalimat alih-alih menghabiskan memori mesin.
+- **`jrgm build` tidak memasang paket Python lagi** — cuma melaporkan modul yang belum ada; `jrgm run` tetap
+  memasangnya. Memeriksa modul tidak lagi menjalankan `__init__.py` milik proyek.
+- **Sesi `dok::session_*` punya masa berlaku**: cap waktunya ikut ditandatangani, dan `dok::session_decode` menolak
+  sesi yang lebih tua dari 14 hari (atau dari argumen ketiga, dalam detik). Cookie sesi lama perlu masuk ulang sekali.
+- **Kanvas mode `web` cuma melayani halamannya sendiri**: `Host` lain (DNS rebinding) dan permintaan dari situs lain
+  ditolak 403, jadi halaman web lain tidak bisa membaca layar program atau mengirim tombol ke sana.
+- **`dok::router_static` tidak menyajikan berkas atau folder bertitik** (`.env`, `.git/`, `.htpasswd`) — dijawab
+  seperti tidak ada; `.well-known/` tetap disajikan.
+- **`dok::log_*` menulis satu baris per panggilan**: baris baru, ESC dan pengubah arah di pesan dan field ditulis
+  sebagai `\u{..}`, dan `"` di nilai field teks di-escape — teks dari luar tidak bisa lagi memalsukan baris log.
+- **`str::replace`, `re::replace`/`re::replace_all` dan `str::join`/`arr::join` menolak hasil di atas 256 MiB**,
+  seperti `str::repeat`: dulu teks 1 MB dengan pengganti 10 KB mematikan prosesnya.
+
+### Kinerja
+
+- **`--jit` lebih cepat di kode yang memegang enum, struct, larik, dan panggilan fungsi kecil** (jam penuh lawan
+  0.3.0): `match_dispatch` 9,9 → 7,0 s, `call_recursion` 1,01 → 0,87 s, `array_sort` 2,5 → 2,2 s,
+  `struct_particles` 13,6 → 13,1 s. Lengan `match` atas varian berfield banyak, konstanta varian tanpa payload,
+  konversi `int`/`uint` atas bilangan di atas 64 bit, dan fungsi bulat kecil yang dipanggil kode mesin tidak lagi
+  lewat jalur umum.
+
+### Diperbaiki
+
+- **Respons `dok::serve` membawa `X-Content-Type-Options: nosniff`** (kecuali aplikasi memasangnya sendiri).
+- **Runner `py::`/`js::`/`php::` pindah ke `~/.cache/jrgc/runner`**, dan berkas kerja `--emit-llvm`, `jrgm exec`
+  dan `--apk` di folder sementara baru bermode 0700 — dulu nama tebakan di `/tmp` bisa disiapkan pemakai lain.
+- **`dok::password_hash` bawaannya 600 000 putaran** (dulu 210 000, angka OWASP untuk SHA-512, bukan SHA-256), dan
+  HMAC-SHA256 jauh lebih cepat (SHA-NI bila ada). Hash lama tetap bisa diperiksa.
+- **AES (`crypto::seal`, `crypto::aes_*`) tidak lagi membocorkan kunci lewat waktu**: AES-NI di x86_64, dan hitungan
+  waktu-tetap tanpa tabel di platform lain. `crypto::random_int` tanpa bias modulo.
+- **`--emit-llvm`: `==` atas dua fungsi gagal saat jalan seperti interpreter** (`arr::unique([f])` menjawab
+  `[<closure>]`), `f == 1`, `arr::index_of(["a"], 1)` dan `arr::contains(["a"], 1)` menjawab `false`/`None`, dan galat
+  saat kompilasi dari dalam pustaka bawaan menunjuk baris program, bukan `<lapis>:baris`.
+- **`--emit-llvm`: `f(...v)` dan `f(a: 1)` ke closure yang diikat `let` jalan**, seperti interpreter dan `--vm`
+  (dulu ditolak saat kompilasi). Spread berjumlah salah gagal saat jalan dengan kalimat yang sama dengan interpreter.
+
 ## [0.3.0] — 2026-11-15
 
 ### Memutus

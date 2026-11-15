@@ -196,6 +196,71 @@ pub fn skrip_tanpa_penafsir(prog: &std::path::Path) -> Option<String> {
                   biasa, atau pasang `termux-exec` lalu buka sesi baru", prog.display(), baris, penafsir))
 }
 
+/// Batas satu bacaan berkas utuh — angka yang sama dengan jawaban `http::` dan bom `gzip::`. Kalimatnya
+/// sama dengan lapis LLVM (`-100002`): `/dev/zero`, FIFO tanpa ujung atau jalur dari luar dulu memakan RAM mesin.
+pub const MAKS_BACA_UTUH: u64 = 256 << 20;
+pub const PESAN_BACA_UTUH: &str = "isinya lebih dari 256 MiB, batas satu bacaan utuh \
+    (berkas raksasa atau perangkat tanpa ujung seperti /dev/zero tidak dibaca ke memori)";
+
+/// SATU pintu membaca seluruh isi berkas dari jalur pemakai (`fs::`, `file::`, `zip::`, `tar::`, `wasm::`, ...).
+pub fn baca_berkas(p: impl AsRef<std::path::Path>) -> io::Result<Vec<u8>> { baca_berbatas(p.as_ref(), MAKS_BACA_UTUH) }
+
+/// `baca_berkas` sebagai teks; byte yang bukan UTF-8 jadi `InvalidData`, seperti `read_to_string`.
+pub fn baca_teks(p: impl AsRef<std::path::Path>) -> io::Result<String> {
+    String::from_utf8(baca_berkas(p)?).map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bukan UTF-8"))
+}
+
+fn baca_berbatas(p: &std::path::Path, batas: u64) -> io::Result<Vec<u8>> {
+    use std::io::Read;
+    let besar = || io::Error::new(io::ErrorKind::Other, PESAN_BACA_UTUH);
+    let f = std::fs::File::open(p)?;
+    let m = f.metadata()?;
+    // Berkas biasa yang sudah kebesaran ditolak sebelum dibaca; perangkat, pipa dan `/proc` dibaca sampai batas+1.
+    if m.is_file() && m.len() > batas { return Err(besar()); }
+    let mut isi = Vec::with_capacity(if m.is_file() { m.len() as usize + 1 } else { 0 });
+    f.take(batas + 1).read_to_end(&mut isi)?;
+    if isi.len() as u64 > batas { return Err(besar()); }
+    Ok(isi)
+}
+
+/// Folder sementara BARU milik proses ini: nama acak, mode 0700, dan gagal kalau sudah ada — tidak pernah memakai
+/// folder atau berkas bernama tebakan yang bisa disiapkan pemakai lain di `/tmp` lalu diganti isinya sebelum
+/// dijalankan atau dikompilasi (CWE-377/379). Pemanggilnya yang menghapus.
+pub fn dir_sementara(awalan: &str) -> io::Result<std::path::PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    static URUT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    for _ in 0..32 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(sejak_epoch().unwrap_or_default().as_nanos());
+        h.write_u64(URUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
+        let p = std::env::temp_dir().join(format!("{}-{}-{:016x}", awalan, std::process::id(), h.finish()));
+        let mut b = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        { use std::os::unix::fs::DirBuilderExt; b.mode(0o700); }
+        match b.create(&p) {
+            Ok(()) => return Ok(p),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+    }
+    Err(io::Error::new(io::ErrorKind::AlreadyExists, "folder sementara: tiga puluh dua nama acak sudah terpakai"))
+}
+
+/// Folder pribadi pemakai untuk berkas yang dipakai ulang antar-proses (`$XDG_CACHE_HOME/jrgc/<nama>` atau
+/// `~/.cache/jrgc/<nama>`, 0700); tanpa folder rumah, `dir_sementara`.
+pub fn dir_pribadi(nama: &str) -> io::Result<std::path::PathBuf> {
+    let akar = std::env::var_os("XDG_CACHE_HOME").filter(|v| !v.is_empty()).map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").filter(|v| !v.is_empty()).map(|h| std::path::PathBuf::from(h).join(".cache")));
+    let Some(akar) = akar else { return dir_sementara(&format!("jrgc-{}", nama)) };
+    let d = akar.join("jrgc").join(nama);
+    let mut b = std::fs::DirBuilder::new();
+    b.recursive(true);
+    #[cfg(unix)]
+    { use std::os::unix::fs::DirBuilderExt; b.mode(0o700); }
+    b.create(&d)?;
+    Ok(d)
+}
+
 /// Sebab sebuah galat I/O dalam kalimat JRG — tanpa ini kalimat OS (`No such file or
 /// directory (os error 2)`) bocor ke pesan. Tiap pintu yang melaporkan `io::Error` lewat sini.
 pub fn galat_io(e: &io::Error) -> String {
@@ -350,6 +415,33 @@ pub fn tanpa_thread(apa: &str, e: &io::Error) -> Option<String> {
 
 #[cfg(test)]
 mod tes {
+    /// `dir_sementara` membuat folder baru tiap kali, mode 0700, dan tidak pernah memakai yang sudah ada.
+    #[cfg(unix)]
+    #[test]
+    fn folder_sementara_baru_dan_pribadi() {
+        use std::os::unix::fs::PermissionsExt;
+        let (a, b) = (super::dir_sementara("jrg-uji").unwrap(), super::dir_sementara("jrg-uji").unwrap());
+        assert_ne!(a, b);
+        assert_eq!(std::fs::metadata(&a).unwrap().permissions().mode() & 0o777, 0o700);
+        assert!(std::fs::DirBuilder::new().create(&a).is_err(), "nama yang sama harus sudah terpakai");
+        let _ = (std::fs::remove_dir(&a), std::fs::remove_dir(&b));
+    }
+
+    /// Perangkat tanpa ujung dan berkas di atas batas jadi `Err` berkalimat JRG, tidak menghabiskan memori.
+    #[cfg(unix)]
+    #[test]
+    fn baca_utuh_berbatas() {
+        let e = super::baca_berbatas(std::path::Path::new("/dev/zero"), 4096).unwrap_err();
+        assert_eq!(super::galat_io(&e), super::PESAN_BACA_UTUH);
+        let p = std::env::temp_dir().join(format!("jrg_baca_{}", std::process::id()));
+        std::fs::write(&p, [7u8; 5000]).unwrap();
+        assert!(super::baca_berbatas(&p, 4096).is_err());
+        assert_eq!(super::baca_berbatas(&p, 5000).unwrap().len(), 5000);
+        std::fs::write(&p, [0xff]).unwrap();
+        assert_eq!(super::galat_io(&super::baca_teks(&p).unwrap_err()), "isinya bukan teks UTF-8 yang sah");
+        let _ = std::fs::remove_file(&p);
+    }
+
     /// `baca_baris` dan pembaca tombol memakai SATU antrean: baris diambil utuh sampai
     /// `\n`, sisanya tetap menunggu pembaca berikutnya, dan yang bukan UTF-8 ditolak.
     #[cfg(not(target_arch = "wasm32"))]

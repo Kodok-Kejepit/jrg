@@ -32,7 +32,7 @@ pub(crate) fn scan_python_deps_from_tokens(tokens: &[crate::lexer::Token]) -> Ve
 
 /// Gabungkan daftar eksplisit di manifest dengan hasil scan otomatis atas
 /// entry file, lalu pastikan semuanya terpasang (lihat …
-pub(crate) fn resolve_and_ensure_python_deps(manifest: &Manifest, verbose: bool, skip: bool) -> Result<(), String> {
+pub(crate) fn resolve_and_ensure_python_deps(manifest: &Manifest, verbose: bool, skip: bool, pasang: bool) -> Result<(), String> {
     if skip {
         return Ok(());
     }
@@ -69,7 +69,7 @@ pub(crate) fn resolve_and_ensure_python_deps(manifest: &Manifest, verbose: bool,
     if verbose {
         eprintln!("[jrgm] python packages terdeteksi: {}", packages.join(", "));
     }
-    ensure_python_packages(&packages, verbose)
+    pasang_python(&packages, verbose, pasang)
 }
 
 /// Nama modul Python yang BERBEDA dari nama paket pip-nya.
@@ -120,12 +120,6 @@ pub(crate) fn periksa_entri_pip(entri: &str) -> Result<(), String> {
                 entri.escape_debug()))
 }
 
-/// `a.b_c` — cuma bentuk ini yang boleh masuk ke kode `import ..`.
-fn modul_python_sah(m: &str) -> bool {
-    m.split('.').all(|s| s.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
-        && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_'))
-}
-
 /// Nama modul yang bisa di-`import`, dari sebuah entri manifest.
 pub(crate) fn nama_modul(entri: &str) -> &str {
     entri
@@ -143,16 +137,21 @@ pub(crate) fn pip_install(pkg: &str, extra_args: &[&str]) -> std::io::Result<std
         .output()
 }
 
-/// Modul yang belum bisa ditemukan `python3`, ditanyakan dalam SATU proses lewat
-/// `find_spec` (modulnya tidak dijalankan: `import pandas` sendiri ±2,8 s per jalan).
+/// Modul yang belum bisa ditemukan `python3`, ditanyakan dalam SATU proses lewat `find_spec` atas paket TERATAS:
+/// `find_spec("a.b")` mengimpor `a/__init__.py`, jadi memeriksa repo asing dulu menjalankan Python miliknya.
 /// `Err` kalau `python3` tidak bisa dijalankan; `None` kalau pemeriksanya gagal.
-pub(crate) fn modul_belum_ada(modul: &[&str]) -> std::io::Result<Option<Vec<String>>> {
+pub(crate) fn modul_belum_ada(modul: &[&str]) -> std::io::Result<Option<Vec<String>>> { modul_belum_ada_di(None, modul) }
+
+pub(crate) fn modul_belum_ada_di(di: Option<&std::path::Path>, modul: &[&str]) -> std::io::Result<Option<Vec<String>>> {
     const PERIKSA: &str = "import sys, importlib.util as u\n\
         for m in sys.argv[1:]:\n\
-        \x20   try: ada = u.find_spec(m) is not None\n\
+        \x20   try: ada = u.find_spec(m.split('.')[0]) is not None\n\
         \x20   except Exception: ada = False\n\
         \x20   if not ada: print(m)\n";
-    let o = std::process::Command::new("python3").arg("-c").arg(PERIKSA).args(modul).output()?;
+    let mut c = std::process::Command::new("python3");
+    c.arg("-c").arg(PERIKSA).args(modul);
+    if let Some(d) = di { c.current_dir(d); }
+    let o = c.output()?;
     if !o.status.success() {
         return Ok(None);
     }
@@ -162,6 +161,12 @@ pub(crate) fn modul_belum_ada(modul: &[&str]) -> std::io::Result<Option<Vec<Stri
 /// Pastikan tiap nama di `packages` bisa di-`import` oleh `python3` — kalau
 /// belum, pasang otomatis lewat `python3 -m pip install <nama>` (dipanggil …
 pub(crate) fn ensure_python_packages(packages: &[String], verbose: bool) -> Result<(), String> {
+    pasang_python(packages, verbose, true)
+}
+
+/// `pasang` = false (`jrgm build`): cuma melaporkan modul yang belum ada — memasang paket pip menjalankan
+/// `setup.py` milik paket yang disebut proyek, dan memeriksa sintaks tidak boleh menjalankan kode siapa pun.
+pub(crate) fn pasang_python(packages: &[String], verbose: bool, pasang: bool) -> Result<(), String> {
     for p in packages { periksa_entri_pip(p)?; }
     let semua: Vec<&str> = packages.iter().map(|p| nama_modul(p)).collect();
     let Ok(belum) = modul_belum_ada(&semua) else {
@@ -177,13 +182,17 @@ pub(crate) fn ensure_python_packages(packages: &[String], verbose: bool) -> Resu
         // pip.
         let modul = nama_modul(pkg);
         let paket = paket_pip(modul);
-        let ada = match &belum {
-            Some(b) => !b.iter().any(|m| m == modul),
-            None => modul_python_sah(modul) && matches!(std::process::Command::new("python3")
-                .args(["-c", &format!("import {}", modul)]).output(), Ok(o) if o.status.success()),
+        // Pemeriksanya gagal: dulu cadangannya `import <modul>`, yang menjalankan modul itu.
+        let Some(b) = &belum else {
+            return Err("jrgm: pemeriksa modul python gagal jalan (`python3 -c ..` keluar tidak 0)".to_string());
         };
-        if ada {
+        if !b.iter().any(|m| m == modul) {
             if verbose { eprintln!("[jrgm] python: `{}` sudah terpasang", modul); }
+            continue;
+        }
+        if !pasang {
+            eprintln!("[jrgm] python: modul `{}` belum terpasang — `jrgm build` tidak memasang apa pun; \
+                       `jrgm run` memasangnya, atau `python3 -m pip install {}`", modul, paket);
             continue;
         }
 

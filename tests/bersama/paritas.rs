@@ -694,6 +694,26 @@ pub fn main() {
     wok(fs::try_read(f))
     fs::delete(f)
 }"#),
+    // Fase AMAN-44 (#1021): kunci JSON kembar ditolak — pengurai lain memilih yang pertama (CouchDB CVE-2017-12635).
+    ("dok::json_decode: kunci kembar, lewat escape, bersarang, di objek besar jadi Err; kunci beda tetap", r#"package main
+pub fn main() {
+    wok(dok::json_decode("{\"admin\": false, \"adm\\u0069n\": true}"))
+    wok(dok::json_decode("{\"a\": {\"b\": 1, \"b\": 2}}"))
+    var t = "{"
+    for i in 0..20 { t += "\"k" + str(i) + "\": " + str(i) + ", " }
+    wok(dok::json_decode(t + "\"k3\": 0}"))
+    wok(dok::json_decode(t + "\"k20\": 0}").is_ok(), dok::json_decode("{\"a\": 1, \"A\": 2}"))
+}"#),
+    // Fase AMAN-44: bacaan berkas utuh berbatas 256 MiB; `/dev/zero` dulu dibaca sampai memori mesin habis.
+    ("bacaan utuh berbatas: perangkat tanpa ujung jadi Err", r#"package main
+pub fn main() {
+    wok(fs::try_read("/dev/zero"))
+    wok(fs::read_base64("/dev/zero"))
+    let f = fs::temp_dir() + "/jrg_paritas_batas.txt"
+    fs::write(f, "kecil")
+    wok(fs::try_read(f), file::read(f))
+    fs::delete(f)
+}"#),
     ("literal struct yang isinya cuma basis sebar",
      "package main\nstruct A { pub x: int, pub y: int }\npub fn main() {\n let a = A { x: 1, y: 2 }\n wok(A { ...a })\n let b = A { ...a }\n wok(b.x + b.y)\n}"),
     // Fase WAJIB: default cuma untuk field yang tidak diisi, sesudah field tertulis, di tempat
@@ -2333,8 +2353,8 @@ pub fn main() {
     ("fs::join: semua potongan ikut", "package main\npub fn main() { wok(fs::join(\"a\", \"b\", \"c\"), fs::join(\"a/\", \"b\", \"c\", \"d\"), fs::join(\"a\", \"/b\", \"c\")) }"),
     // Fase JSON: satu pengurai ketat (`json_inti`) untuk `json::parse` dan `dok::json_decode`.
     // Dulu teks non-ASCII rusak (`é` jadi `Ã©`) dan pasangan surrogate hilang.
-    ("json::parse: teks non-ASCII utuh, surrogate, angka, kunci kembar, bolak-balik stringify",
-     "package main\npub fn main() {\n    wok(json::parse(\"{\\\"a\\\": 1, \\\"b\\\": [true, null, 2.5, \\\"x\\\"], \\\"é\\\": \\\"naïve 😀\\\"}\"))\n    wok(json::parse(\"\\\"é\\\"\") == \"é\", len(json::parse(\"\\\"é\\\"\")), json::parse(\"\\\"\\\\ud83d\\\\ude00\\\\u00e9\\\\n\\\\b\\\\f\\\"\"))\n    wok(json::parse(\" [1, -0, 1e3, 123456789012345678901234567890] \"), typeof(json::parse(\"3\")), typeof(json::parse(\"3.0\")), typeof(json::parse(\"null\")))\n    wok(json::parse(\"{\\\"a\\\": 1, \\\"a\\\": 2}\"), json::parse(\"{}\"), json::parse(\"[]\"), json::parse(\"true\"), json::parse(\"false\"))\n    wok(json::parse(json::stringify({\"k\": [\"é\", 1.5, nil, {\"z\": true}]})))\n    wok(dok::json_decode(\"{\\\"a\\\": [1, 2.5, null], \\\"é\\\": \\\"ü\\\"}\"), dok::json_decode(\"tidak\"), dok::json_decode(\"1 2\"))\n}\n"),
+    ("json::parse: teks non-ASCII utuh, surrogate, angka, bolak-balik stringify",
+     "package main\npub fn main() {\n    wok(json::parse(\"{\\\"a\\\": 1, \\\"b\\\": [true, null, 2.5, \\\"x\\\"], \\\"é\\\": \\\"naïve 😀\\\"}\"))\n    wok(json::parse(\"\\\"é\\\"\") == \"é\", len(json::parse(\"\\\"é\\\"\")), json::parse(\"\\\"\\\\ud83d\\\\ude00\\\\u00e9\\\\n\\\\b\\\\f\\\"\"))\n    wok(json::parse(\" [1, -0, 1e3, 123456789012345678901234567890] \"), typeof(json::parse(\"3\")), typeof(json::parse(\"3.0\")), typeof(json::parse(\"null\")))\n    wok(json::parse(\"{}\"), json::parse(\"[]\"), json::parse(\"true\"), json::parse(\"false\"))\n    wok(json::parse(json::stringify({\"k\": [\"é\", 1.5, nil, {\"z\": true}]})))\n    wok(dok::json_decode(\"{\\\"a\\\": [1, 2.5, null], \\\"é\\\": \\\"ü\\\"}\"), dok::json_decode(\"tidak\"), dok::json_decode(\"1 2\"))\n}\n"),
     // Fase JSON-LLVM: `json::` lewat LLVM, dan karakter kendali di-escape oleh penyandinya.
     ("json:: urai, sandi rapat dan rapi, get/has/keys/values, bolak-balik, iterasi hasil urai",
      "package main\npub fn main() {\n    let j = json::parse(\"{\\\"a\\\": 1, \\\"b\\\": [true, null, 2.5, \\\"x\\\"], \\\"é\\\": \\\"naïve 😀\\\", \\\"o\\\": {\\\"z\\\": []}}\")\n    wok(j)\n    wok(json::stringify(j))\n    wok(json::pretty(j))\n    wok(json::pretty([1, 2], 0), json::pretty({\"a\": 1}, 4))\n    wok(json::stringify({\"a\": 1, \"b\": [true, nil, 2.5, \"x\\\"y\\n\"]}), json::stringify([1, 2.0, \"é\"]), json::stringify(1.0), json::stringify(\"teks\"), json::stringify(nil), json::stringify([[1, 2], [3]]))\n    wok(json::get(j, \"a\"), json::get(j, \"tak ada\"), json::has(j, \"b\"), json::has(j, \"q\"), json::keys(j), json::values(json::parse(\"{\\\"b\\\": 1, \\\"a\\\": 2}\")))\n    wok(json::parse(\"[1, -0, 1e3]\"), typeof(json::parse(\"3\")), typeof(json::parse(\"3.0\")), typeof(json::parse(\"null\")), typeof(json::parse(\"\\\"s\\\"\")), typeof(json::parse(\"[]\")), typeof(json::parse(\"{}\")))\n    wok(json::parse(json::stringify({\"k\": [\"é\", 1.5, nil, {\"z\": true}]})))\n    let a = json::parse(\"[10, 20, 30]\")\n    wok(len(a), a[1])\n    for _, x in a { wok(x) }\n}\n"),

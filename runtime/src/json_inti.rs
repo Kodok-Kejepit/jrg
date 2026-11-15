@@ -15,7 +15,7 @@ pub enum Json {
     Float(f64),
     Str(String),
     Arr(Vec<Json>),
-    /// Pasangan dalam urutan tulis; kunci kembar dibiarkan, pemakainya yang memutuskan.
+    /// Pasangan dalam urutan tulis; kunci kembar sudah ditolak `objek`.
     Obj(Vec<(String, Json)>),
 }
 
@@ -75,6 +75,7 @@ fn kata(s: &str, b: &[u8], pos: &mut usize, lit: &str) -> Result<(), String> {
 fn objek(s: &str, b: &[u8], pos: &mut usize, dalam: usize) -> Result<Json, String> {
     *pos += 1;
     let mut isi = Vec::new();
+    let mut lihat: alloc::collections::BTreeSet<String> = alloc::collections::BTreeSet::new();
     lewati_spasi(b, pos);
     if b.get(*pos) == Some(&b'}') { *pos += 1; return Ok(Json::Obj(isi)); }
     loop {
@@ -84,6 +85,16 @@ fn objek(s: &str, b: &[u8], pos: &mut usize, dalam: usize) -> Result<Json, Strin
                        else { "harusnya ada `\"` untuk mengawali kunci".to_string() });
         }
         let kunci = teks(s, b, pos)?;
+        // Kunci kembar ditolak: pengurai lain memilih yang PERTAMA, jadi dua pembaca melihat data berbeda (CouchDB
+        // CVE-2017-12635, `"adm\u0069n"` lawan `"admin"`). Objek kecil dipindai, yang besar lewat himpunan.
+        let kembar = if isi.len() < 16 { isi.iter().any(|(k, _)| *k == kunci) } else {
+            if lihat.is_empty() { lihat.extend(isi.iter().map(|(k, _): &(String, Json)| k.clone())); }
+            !lihat.insert(kunci.clone())
+        };
+        if kembar {
+            return Err(format!("kunci `{}` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama",
+                               crate::kutip_inti::kutip(&kunci)));
+        }
         lewati_spasi(b, pos);
         if b.get(*pos) != Some(&b':') { return Err("harusnya ada `:` sesudah kunci".to_string()); }
         *pos += 1;

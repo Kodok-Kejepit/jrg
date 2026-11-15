@@ -298,8 +298,9 @@ impl Codegen {
         if matches!(ty, JrgType::Nil | JrgType::Unit) {
             return None;
         }
-        // String dan pegangan (`Atomic`, `Mutex`, channel) tidak memaksa tipe sisi lain.
-        if *ty == JrgType::Str || matches!(ty, JrgType::Sinkron(_) | JrgType::Chan(_)) {
+        // String, pegangan (`Atomic`, `Mutex`, channel) dan fungsi tidak memaksa tipe sisi lain: `f == 1` adalah
+        // `false` seperti acuan, bukan literal `1` yang dipaksa jadi fungsi lalu ditolak.
+        if *ty == JrgType::Str || matches!(ty, JrgType::Sinkron(_) | JrgType::Chan(_) | JrgType::Fn(..)) {
             None
         } else {
             Some(ty.clone())
@@ -308,7 +309,7 @@ impl Codegen {
 
     fn koersi_dengan_lawan(&mut self, op: &BinaryOp, e: &Expr, v: Val, lawan: &JrgType, punya_hint: bool) -> Val {
         let skalar = |t: &JrgType| !matches!(t, JrgType::Array(_, _) | JrgType::Slice(_)
-                                           | JrgType::Tuple(_) | JrgType::Struct(_));
+                                           | JrgType::Tuple(_) | JrgType::Struct(_) | JrgType::Fn(..));
         // Literal pecahan tidak dipotong ke int; literal angka di `==` tidak ikut rune/bool.
         let boleh_ikut = |dari: &JrgType, ke: &JrgType| !(dari.is_float() && ke.is_int());
         let angka_ke_non = matches!(op, BinaryOp::Eq | BinaryOp::Ne)
@@ -1102,12 +1103,40 @@ impl Codegen {
             // supaya jalur terpanas (`icmp` int) tidak kena cabang tambahan.
             return self.agregat_cmp(op, lv, rv, _span);
         }
-        // Dua nilai yang sama-sama bisa dipanggil: DITOLAK, dengan kalimat
-        // yang sama persis dengan dua mesin acuan — satu definisi untuk tiga
-        // mesin, bukan tiga kalimat untuk satu kesalahan.
+        // Dua nilai yang bisa dipanggil: gagal SAAT JALAN dengan kalimat acuan — `arr::unique([f])` tidak pernah
+        // membandingkan apa pun dan menjawab `[<closure>]`; dulu instans lapisnya ditolak saat kompilasi.
         if matches!(lv.ty, JrgType::Fn(..)) && matches!(rv.ty, JrgType::Fn(..)) {
-            return Err(super::galat::tandai(_span, crate::interpreter::pesan_banding(
-                &lv.ty.nama_typeof(), &rv.ty.nama_typeof())));
+            // Nama tiap sisi dari nilainya, seperti `typeof`: lingkungan `null` = `function`, selain itu `closure`.
+            let null = |cg: &mut Self, v: &Val| {
+                let (e, n) = (cg.fresh("bfe."), cg.fresh("bfn."));
+                cg.emit(format!("{} = extractvalue %JrgFn {}, 1", e, v.text));
+                cg.emit(format!("{} = icmp eq ptr {}, null", n, e));
+                n
+            };
+            let (ln, rn) = (null(self, &lv), null(self, &rv));
+            let mut pilihan = Vec::new();
+            for ki in ["function", "closure"] {
+                for ka in ["function", "closure"] {
+                    let p = self.intern_string(&crate::interpreter::pesan_banding(ki, ka));
+                    pilihan.push(self.split_str(&p));
+                }
+            }
+            let pilih = |cg: &mut Self, ty: &str, ambil: &dyn Fn(&(String, String)) -> String| {
+                let (ff, fc, cf, cc) = (ambil(&pilihan[0]), ambil(&pilihan[1]), ambil(&pilihan[2]), ambil(&pilihan[3]));
+                let (f, c, h) = (cg.fresh("bfs."), cg.fresh("bfs."), cg.fresh("bfs."));
+                cg.emit(format!("{} = select i1 {}, {} {}, {} {}", f, rn, ty, ff, ty, fc));
+                cg.emit(format!("{} = select i1 {}, {} {}, {} {}", c, rn, ty, cf, ty, cc));
+                cg.emit(format!("{} = select i1 {}, {} {}, {} {}", h, ln, ty, f, ty, c));
+                h
+            };
+            let mp = pilih(self, "ptr", &|x| x.0.clone());
+            let ml = pilih(self, "i64", &|x| x.1.clone());
+            self.ensure_extern("declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
+            self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+            self.terminate("unreachable".to_string());
+            let mati = self.fresh_label("bk.fn.");
+            self.start_block(mati);
+            return Ok(self.from_i1("false"));
         }
         // `{:?}` di sini dulu mencetak NAMA VARIAN Rust (`Eq`) kepada orang
         // yang menulis `==` — kelas Fase EJAAN, di pintu yang belum tersapu.
@@ -1284,7 +1313,7 @@ impl Codegen {
     }
 
     /// `==`/`!=` dua nilai dari golongan BERBEDA: tidak pernah sama, seperti di dua mesin lain.
-    fn banding_beda_golongan(op: &BinaryOp, l: &JrgType, r: &JrgType) -> Option<Val> {
+    pub(crate) fn banding_beda_golongan(op: &BinaryOp, l: &JrgType, r: &JrgType) -> Option<Val> {
         if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) { return None; }
         let golongan = |t: &JrgType| match t {
             JrgType::Str => Some(0),

@@ -23,7 +23,7 @@ pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip
             manifest.name, manifest.version,
             profile, target.unwrap_or("host"));
     }
-    resolve_and_ensure_python_deps(&manifest, verbose, skip_python_deps)?;
+    resolve_and_ensure_python_deps(&manifest, verbose, skip_python_deps, false)?;
 
     // Graf dependensi diperiksa di sini, bukan cuma saat dijalankan.
     let mut jalur = vec![cwd.join("src"), cwd.join("tests"), cwd.clone()];
@@ -111,7 +111,7 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
             if watch { "+watch" } else { "" });
     }
 
-    resolve_and_ensure_python_deps(&manifest, verbose, skip_python_deps)?;
+    resolve_and_ensure_python_deps(&manifest, verbose, skip_python_deps, true)?;
 
     if watch {
         // Hot reload mode

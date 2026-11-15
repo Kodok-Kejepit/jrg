@@ -248,7 +248,7 @@ fn teks_arg(a: &[Value], ke: usize, nama: &str) -> Result<String, String> {
 /// Baca berkas arsip (gzip dibongkar) lalu daftarnya; galat apa pun jadi `Err` berawalan nama builtin dan jalurnya.
 fn buka(a: &[Value], nama: &str) -> Result<Result<(Vec<u8>, Vec<Entri>), Value>, String> {
     let jalur = teks_arg(a, 0, nama)?;
-    let b = match std::fs::read(&jalur) {
+    let b = match crate::host::baca_berkas(&jalur) {
         Ok(b) => b,
         Err(e) => return Ok(Err(err_value(format!("{} '{}': {}", nama, jalur, crate::host::galat_io(&e))))),
     };

@@ -140,7 +140,22 @@ fn singkatan_bahasa(mut a: Vec<String>) -> Vec<String> {
 #[cfg(test)]
 mod tes {
     use super::*;
-    use python::{paket_pip, nama_modul, modul_belum_ada};
+    use python::{paket_pip, nama_modul, modul_belum_ada, modul_belum_ada_di};
+
+    /// Memeriksa `py::import("jahat.sub")` dari folder proyek tidak menjalankan `jahat/__init__.py` milik proyek.
+    #[test]
+    fn memeriksa_modul_tidak_menjalankan_paket_proyek() {
+        let d = crate::host::dir_sementara("jrgm-uji-py").unwrap();
+        std::fs::create_dir_all(d.join("jahat")).unwrap();
+        let tanda = d.join("dijalankan");
+        std::fs::write(d.join("jahat/__init__.py"), format!("open({:?}, 'w').write('x')\n", tanda.display().to_string())).unwrap();
+        std::fs::write(d.join("jahat/sub.py"), "").unwrap();
+        let Ok(hasil) = modul_belum_ada_di(Some(&d), &["jahat.sub", "jahat", "tak_ada_jrg.x"]) else { return };
+        let ada = tanda.exists();
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(!ada, "paket proyek dijalankan saat diperiksa");
+        assert_eq!(hasil, Some(vec!["tak_ada_jrg.x".to_string()]));
+    }
 
     /// Satu proses `python3` menyebut tepat modul yang tidak ada, termasuk yang bertitik.
     #[test]

@@ -11,7 +11,8 @@ pub fn arr_count_if<T, B>(a: []T, f: fn(T) -> B) -> int {
 
 pub fn arr_count<T, B>(a: []T, f: fn(T) -> B) -> int { return arr_count_if(a, f) }
 
-pub fn arr_index_of<T>(a: []T, nilai: T) -> Option<int> {
+// Jarum boleh bertipe lain dari elemennya: `==` lintas golongan `false` (`None`), bulat lawan pecahan menurut nilai.
+pub fn arr_index_of<T, U>(a: []T, nilai: U) -> Option<int> {
     for i, x in a { if x == nilai { return Some(i) } }
     return None
 }
@@ -603,6 +604,7 @@ pub fn time_format(ms: int = time_now_ms(), pola: string = "%Y-%m-%d %H:%M:%S") 
 fn _galat_os(kode: int) -> string {
     let n = 0 - kode
     if n == 100000 { return "isinya bukan teks UTF-8 yang sah" }
+    if n == 100002 { return "isinya lebih dari 256 MiB, batas satu bacaan utuh (berkas raksasa atau perangkat tanpa ujung seperti /dev/zero tidak dibaca ke memori)" }
     if n == 100001 { return "teksnya memuat karakter NUL, yang tidak bisa diserahkan ke sistem operasi" }
     if n == 2 { return "berkas atau direktorinya tidak ada" }
     if n == 13 || n == 1 { return "tidak diizinkan (izin aksesnya kurang)" }

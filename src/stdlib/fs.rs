@@ -109,7 +109,7 @@ pub fn register(vm: &mut Vm) {
     });
 
     vm.def("fs::read", |a| match a.get(0) {
-        Some(Str(p)) => std::fs::read_to_string(p.as_str())
+        Some(Str(p)) => crate::host::baca_teks(p.as_str())
             .map(|s| Str(Arc::new(s)))
             .map_err(|e| format!("fs::read '{}': {}", p, crate::host::galat_io(&e))),
         _ => Err("fs::read(path: string)".to_string()),
@@ -195,7 +195,7 @@ pub fn register(vm: &mut Vm) {
 
     vm.def("fs::read_lines", |a| match a.get(0) {
         Some(Str(p)) => {
-            let content = std::fs::read_to_string(p.as_str())
+            let content = crate::host::baca_teks(p.as_str())
                 .map_err(|e| format!("fs::read_lines '{}': {}", p, crate::host::galat_io(&e)))?;
             let lines: Vec<VmValue> = content.lines()
                 .map(|l| Str(Arc::new(l.to_string())))
@@ -310,7 +310,7 @@ fn teks_b64(a: &[Value], ke: usize, nama: &str) -> Result<String, String> {
 /// yang menghentikan program. Kalimatnya sama dengan `fs::read`.
 fn b_try_read(a: &[Value]) -> Result<Value, String> {
     let p = teks_b64(a, 0, "fs::try_read")?;
-    Ok(match std::fs::read_to_string(&p) {
+    Ok(match crate::host::baca_teks(&p) {
         Ok(isi) => ok_value(Value::teks(isi)),
         Err(e) => err_value(format!("fs::try_read '{}': {}", p, crate::host::galat_io(&e))),
     })
@@ -319,7 +319,7 @@ fn b_try_read(a: &[Value]) -> Result<Value, String> {
 /// Isi berkas APA PUN sebagai base64: jalan untuk berkas biner, yang ditolak `fs::read`.
 fn b_read_base64(a: &[Value]) -> Result<Value, String> {
     let p = teks_b64(a, 0, "fs::read_base64")?;
-    Ok(match std::fs::read(&p) {
+    Ok(match crate::host::baca_berkas(&p) {
         Ok(isi) => ok_value(Value::Str(crate::dok::crypto::base64_encode_bytes(&isi).into())),
         Err(e) => err_value(format!("fs::read_base64 '{}': {}", p, crate::host::galat_io(&e))),
     })

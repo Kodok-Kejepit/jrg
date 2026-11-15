@@ -55,9 +55,11 @@ int64_t jrg_rune_utf8(int32_t cp, char *buf) {
 }
 
 // `str::join(isi, pemisah)`: satu alokasi sebesar hasilnya, lalu disalin berurutan.
+void jrg_gabung_kegedean(int64_t n, const char *sp, int64_t sl, int64_t total);
 void jrg_str_join(const JrgStr *isi, int64_t n, const char *sp, int64_t sl, const char **op, int64_t *ol) {
     int64_t total = n > 1 ? jrg_kali(n - 1, sl) : 0;
     for (int64_t i = 0; i < n; i++) total = jrg_tambah(total, isi[i].len);
+    if (total > ((int64_t)256 << 20)) jrg_gabung_kegedean(n, sp, sl, total);
     char *p = total > 0 ? jrg_alloc(total, 1) : (char *)"";
     char *t = p;
     for (int64_t i = 0; i < n; i++) {
@@ -977,6 +979,9 @@ int64_t jrg_os(int32_t op, const char *ap, int64_t an, const char *bp, int64_t b
             if (fd < 0) return -errno;
             if (fstat(fd, &st) != 0) { int e = errno; close(fd); return -e; }
             if (S_ISDIR(st.st_mode)) { close(fd); return -EISDIR; }
+            // Batas satu bacaan utuh = `host::MAKS_BACA_UTUH` (256 MiB); lebih dari itu -100002, juga /dev/zero.
+            const int64_t maks = (int64_t)256 << 20;
+            if (S_ISREG(st.st_mode) && st.st_size > maks) { close(fd); return -100002; }
             int64_t kap = st.st_size > 0 ? st.st_size + 1 : 4096, n = 0;
             char *buf = jrg_alloc(kap, 1);
             for (;;) {
@@ -990,6 +995,7 @@ int64_t jrg_os(int32_t op, const char *ap, int64_t an, const char *bp, int64_t b
                 if (k < 0) { int e = errno; close(fd); return -e; }
                 if (k == 0) break;
                 n += k;
+                if (n > maks) { close(fd); return -100002; }
             }
             close(fd);
             // `i` = 1: isinya dipakai sebagai teks, jadi byte yang bukan UTF-8 ditolak (kode -100000).

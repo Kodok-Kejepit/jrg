@@ -159,7 +159,11 @@ impl Codegen {
         let lama = self.masuk_span(l.init.span());
         let v = self.coerce(&v, &final_ty);
         self.pulih_span(lama);
-        self.bind_pattern(&l.pattern, &v, &final_ty)
+        self.bind_pattern(&l.pattern, &v, &final_ty)?;
+        if let (false, Expr::Closure { params, .. }, Some(n)) = (l.is_mut, &*l.init, pattern_simple_name(&l.pattern)) {
+            if let Some((ptr, _)) = self.lookup_local(&n) { self.param_closure.insert(ptr, params.clone()); }
+        }
+        Ok(())
     }
 
     pub(crate) fn codegen_var(&mut self, v: &VarStmt) -> Result<(), String> {

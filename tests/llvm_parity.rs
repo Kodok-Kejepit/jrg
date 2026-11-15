@@ -858,16 +858,14 @@ pub fn main() {
 
     // Dict bernilai campur tipe DULU di sini, dengan alasan yang benar: satu
     // buffer pasangan `{ %JrgStr, V }` cuma punya satu `V`, jadi nilai campur …
-    // Fase SEBAR-LLVM: ke fungsi bernama milik program sudah jalan; ke NILAI fungsi belum.
-    ("spread di pemanggilan nilai fungsi",
-     "package main\npub fn main() { let tambah = |a, b| a + b\n wok(tambah(...[1, 2])) }",
-     "spread di pemanggilan"),
 
-    // Argumen bernama: urutannya ditentukan dari nama parameter fungsinya saat
-    // JALAN. Yang dikunci di sini bahwa penolakannya menyebut sebabnya, bukan
-    // nama turunan `terap_bernama` yang pemakainya tidak pernah tulis.
-    ("argumen bernama ke nilai fungsi",
-     "package main\npub fn main() { let bagi = |a, b| a / b\n wok(bagi(a: 10, b: 2)) }",
+    // Fase SEBAR-CLOSURE: closure literal yang diikat `let` sudah jalan (`PARITAS_LLVM`); yang fungsinya baru
+    // diketahui saat jalan — `var` yang bisa ditugasi closure lain, parameter — tetap ditolak menyebut gulanya.
+    ("spread di pemanggilan nilai fungsi dari var",
+     "package main\npub fn main() { var tambah = |a, b| a + b\n wok(tambah(...[1, 2])) }",
+     "spread di pemanggilan"),
+    ("argumen bernama ke parameter bernilai fungsi",
+     "package main\nfn pakai(g) { return g(a: 10, b: 2) }\npub fn main() { wok(pakai(|a, b| a / b)) }",
      "argumen bernama"),
 
 
@@ -881,6 +879,12 @@ pub fn main() {
 
 /// `(nama, program, kata-kunci-interpreter, kata-kunci-llvm)`
 const DITOLAK_INTERP_DAN_LLVM: &[(&str, &str, &str, &str)] = &[
+    // Fase SEBAR-CLOSURE: nama parameter asing di argumen bernama — acuan gagal saat jalan, LLVM saat kompilasi,
+    // satu kalimat (dulu berawalan nama turunan `terap_bernama`).
+    ("argumen bernama asing ke closure", "package main\npub fn main() { let f = |a, b| a + b\n wok(f(a: 1, c: 2)) }",
+     "tidak ada parameter bernama `c` — yang ada: a, b", "tidak ada parameter bernama `c` — yang ada: a, b"),
+    ("argumen bernama asing ke fungsi bernama", "package main\nfn f(a, b) { return a + b }\npub fn main() { wok(f(a: 1, c: 2)) }",
+     "tidak ada parameter bernama `c` — yang ada: a, b", "tidak ada parameter bernama `c` — yang ada: a, b"),
     // Keputusan pemilik 2026-11-14: `let`/`const` LOKAL bernama varian telanjang milik berkas ditolak parser,
     // seperti `fn`/`const`/`var` tingkat atas — dulu `let A = E::A` lolos tanpa mengikat, `const` mengikat.
     ("let lokal bernama varian unit milik berkas", "enum E { A, B }\nlet A = E::A\nwok(\"ok\")\n",

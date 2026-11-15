@@ -422,6 +422,17 @@ pub extern "C" fn masuk_ringan(
     0
 }
 
+/// `keluar_ringan` di situs yang memakai hasil berstatus `kode` (bulat/pecahan) dari register: hasil itu tidak
+/// ditaruh di slot (posisinya berjenis native di pemanggil); status lain lewat `keluar_ringan`.
+pub extern "C" fn keluar_ringan_angka(st: i64, hasil: i64, titip: *const [usize; 9], kode: i64) -> i32 {
+    if st != kode { return keluar_ringan(st, hasil, titip); }
+    let (vm, _) = konteks();
+    let [_, basis, slot, ..] = unsafe { *titip };
+    KONTEKS.with(|k| k.set((vm, basis)));
+    potong(&mut vm.stack, slot);
+    0
+}
+
 /// `keluar` untuk `masuk_ringan`. Hasil biasa: tanpa bingkai yang perlu dilepas. Deopt, belum mulai, atau
 /// galat: bingkai callee diwujudkan dulu persis seperti `masuk`, lalu jalur `keluar` biasa.
 pub extern "C" fn keluar_ringan(st: i64, hasil: i64, titip: *const [usize; 9]) -> i32 {
@@ -770,7 +781,7 @@ impl SitusPola {
             crate::vm::value::Label::Enum { nama, .. } if *nama as *const _ as usize != self.nama))
     }
 
-    #[inline]
+    #[inline(always)]
     fn cocok(&self, v: &VmValue) -> Result<bool, String> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
         let kunci = match v {
@@ -883,6 +894,33 @@ pub extern "C" fn payload_angka_lokal(slot: i64, ke: i64, jenis: i32, keluar: *m
         }
         None => 1,
     }
+}
+
+/// `AmbilPayload; Typeof; Const; Eq` atas lokal `slot`: 1 kalau nama jenis payload-nya (`VmValue::type_name`)
+/// sama dengan teks konstanta `nama`, 0 kalau tidak; 2 = bukan enum berpayload (VM yang menjalankannya).
+pub extern "C" fn payload_jenis_sama(slot: i64, nama: *const VmValue) -> i32 {
+    let VmValue::Str(n) = (unsafe { &*nama }) else { return 2 };
+    lihat_lokal(slot, |v| match v.bagian_enum() {
+        Some((_, _, Some(isi))) => (isi.type_name() == n.as_str()) as i32,
+        _ => 2,
+    }).unwrap_or(2)
+}
+
+/// `AmbilPayload; Len` atas lokal `slot` (`Vm::vm_len` atas payload-nya): panjangnya di `*keluar`; 1 = bukan
+/// enum berpayload atau tak berpanjang (VM yang menjalankannya dan melapor).
+pub extern "C" fn payload_panjang(slot: i64, keluar: *mut i64) -> i32 {
+    let (vm, basis) = konteks();
+    let vm: &Vm = vm;
+    let ukur = |v: &VmValue| match v.bagian_enum() {
+        Some((_, _, Some(isi))) => vm.vm_len(isi, None).ok(),
+        _ => None,
+    };
+    let n = match vm.stack.get(basis + slot as usize) {
+        Some(VmValue::Cell(c)) => ukur(&c.lock().unwrap_or_else(|p| p.into_inner())),
+        Some(v) => ukur(v),
+        None => None,
+    };
+    match n { Some(n) => { unsafe { *keluar = n as i64 }; 0 } None => 1 }
 }
 
 /// `LoadLocal` + `AmbilPayload`: posisi `ke` = payload lokal `slot`; 1 = VM yang menjalankan keduanya.
@@ -1019,14 +1057,17 @@ pub struct SitusBanyak {
     situs: Box<[&'static SitusField]>,
     bentuk: std::sync::atomic::AtomicPtr<crate::vm::peta::Bentuk>,
     indeks: Box<[std::sync::atomic::AtomicUsize]>,
+    /// Semua situsnya berspekulasi pecahan: loop baca tanpa melihat jenis per field.
+    pecahan: bool,
 }
 
 impl SitusBanyak {
     /// Hidup selama kode yang memakainya (kode JIT tidak pernah dibebaskan).
     pub fn bocor(situs: Vec<&'static SitusField>) -> &'static SitusBanyak {
         let indeks = situs.iter().map(|_| std::sync::atomic::AtomicUsize::new(0)).collect();
+        let pecahan = situs.iter().all(|s| s.jenis == 5);
         Box::leak(Box::new(SitusBanyak {
-            situs: situs.into_boxed_slice(), bentuk: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), indeks,
+            situs: situs.into_boxed_slice(), bentuk: std::sync::atomic::AtomicPtr::new(std::ptr::null_mut()), indeks, pecahan,
         }))
     }
 
@@ -1049,6 +1090,15 @@ impl SitusBanyak {
             }
         }
         let mut bit = 0i64;
+        if self.pecahan {
+            for (j, i) in self.indeks.iter().enumerate() {
+                if let Some(VmValue::Float(x)) = nilai.get(i.load(Relaxed)) {
+                    unsafe { *keluar.add(j) = x.to_bits() as i64 };
+                    bit |= 1 << j;
+                }
+            }
+            return Some(bit);
+        }
         for (j, (s, i)) in self.situs.iter().zip(self.indeks.iter()).enumerate() {
             let n = match (nilai.get(i.load(Relaxed)), s.jenis) {
                 (Some(VmValue::Int(n)), 1) => i64::try_from(*n).ok(),
@@ -1329,13 +1379,13 @@ pub(crate) fn dengan_konteks<T>(vm: *mut Vm, basis: usize, f: impl FnOnce() -> T
 }
 
 /// Slot lokal `rel` bingkai terluar sebagai larik (bukan sel tangkapan): `f` atas isinya.
-fn atas_larik<T>(rel: i64, f: impl FnOnce(&mut VmValue) -> Option<T>) -> Option<T> {
+fn atas_larik<T>(rel: i64, tuple: bool, f: impl FnOnce(&mut VmValue) -> Option<T>) -> Option<T> {
     let (vm, basis) = KONTEKS.with(|k| k.get());
     if vm.is_null() { return None; }
     // Kode native berjalan di dalam `panggil::jalankan`, yang tidak menyentuh VM sampai kode itu kembali.
     let vm = unsafe { &mut *vm };
     let tempat = vm.stack.get_mut(basis.checked_add(usize::try_from(rel).ok()?)?)?;
-    if !matches!(tempat, VmValue::Array(_)) { return None; }
+    if !(matches!(tempat, VmValue::Array(_)) || tuple && matches!(tempat, VmValue::Tuple(_))) { return None; }
     f(tempat)
 }
 
@@ -1374,10 +1424,11 @@ pub extern "C" fn baca_pecahan(rel: i64, i: i64, keluar: *mut i64) -> i32 {
 
 #[inline(always)]
 fn baca_dengan(rel: i64, keluar: *mut i64, bulat: impl Fn(&[VmValue]) -> Option<i64>) -> i32 {
-    let v = atas_larik(rel, |t| {
+    // Tuple dibaca dengan aturan indeks yang sama (`GetIndex` atas salinan maya).
+    let v = atas_larik(rel, true, |t| {
         // Milik tunggal: tanpa kunci (aturan `IndeksLokal` VM).
         if let Some(g) = crate::vm::larik_milik_tunggal(t) { return bulat(g); }
-        let VmValue::Array(a) = t else { return None };
+        let (VmValue::Array(a) | VmValue::Tuple(a)) = t else { return None };
         let g = a.lock().unwrap_or_else(|p| p.into_inner());
         bulat(&g)
     });
@@ -1390,7 +1441,7 @@ fn baca_dengan(rel: i64, keluar: *mut i64, bulat: impl Fn(&[VmValue]) -> Option<
 /// `TulisIndexLokal`: elemen ke-`i` = nilai berjenis `jenis` (1 bulat, 2 bool, 5 pecahan); 0 = tertulis.
 pub extern "C" fn tulis(rel: i64, i: i64, nilai: i64, jenis: i32) -> i32 {
     let Some(v) = skalar_kode(jenis, nilai) else { return 1 };
-    let ok = atas_larik(rel, |t| {
+    let ok = atas_larik(rel, false, |t| {
         if let Some(g) = crate::vm::larik_milik_tunggal(t) {
             let k = norm_indeks(i, g.len())?;
             g[k] = v;

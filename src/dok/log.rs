@@ -56,13 +56,36 @@ fn now_parts() -> (i64, u32, u32, u32, u32, u32, u32) {
 fn format_line(level: usize, msg: &str, fields: &str) -> String {
     let (y, mo, d, h, mi, s, ms) = now_parts();
     let name_prefix = match &*log_name().lock().unwrap_or_else(|p| p.into_inner()) {
-        Some(n) => format!(" [{}]", n),
+        Some(n) => format!(" [{}]", crate::kutip_inti::lolos_utuh(n)),
         None => String::new(),
     };
     format!(
         "{:04}-{:02}-{:02} {:02}:{:02}:{:02}.{:03} [{}]{} {}{}",
-        y, mo, d, h, mi, s, ms, LEVEL_NAMES[level], name_prefix, msg, fields
+        y, mo, d, h, mi, s, ms, LEVEL_NAMES[level], name_prefix, crate::kutip_inti::lolos_utuh(msg), fields
     )
+}
+
+/// Satu panggilan = tepat satu baris: `\n`, ESC dan pengubah arah di pesan, kunci dan nilai di-escape (CWE-117/150),
+/// dan `"`/`\` di nilai teks supaya kutipnya tidak bisa ditutup dari dalam — aturan yang sama dengan `std/log`.
+fn isi_field(k: &str, v: &Value) -> String {
+    let k = crate::kutip_inti::lolos_utuh(k);
+    match v {
+        Value::Str(s) => format!(" {}=\"{}\"", k, crate::kutip_inti::lolos_utuh(&s.replace('\\', "\\\\").replace('"', "\\\""))),
+        other => format!(" {}={}", k, crate::kutip_inti::lolos_utuh(&format!("{}", other))),
+    }
+}
+
+#[cfg(test)]
+mod tes {
+    use crate::interpreter::Value;
+    /// Pesan dan field dari luar tidak bisa memalsukan baris berikutnya atau menulis kode warna terminal.
+    #[test]
+    fn baris_log_tidak_bisa_dipalsukan() {
+        let b = super::format_line(2, "bob\n[INFO] admin masuk\x1b[31m", "");
+        assert!(!b.contains('\n') && !b.contains('\x1b') && b.ends_with("bob\\u{a}[INFO] admin masuk\\u{1b}[31m"), "{}", b);
+        let s = Value::Str(std::sync::Arc::new("a\" b=\"c\nd".to_string()));
+        assert_eq!(super::isi_field("u", &s), " u=\"a\\\" b=\\\"c\\u{a}d\"");
+    }
 }
 
 fn emit(level: usize, line: &str) {
@@ -110,10 +133,7 @@ pub fn log_with(args: &[Value]) -> Result<Value, String> {
     for item in &fields_arr {
         if let Value::Tuple(t) = item {
             if let (Some(Value::Str(k)), Some(v)) = (t.get(0), t.get(1)) {
-                match v {
-                    Value::Str(s) => fstr.push_str(&format!(" {}=\"{}\"", k, s)),
-                    other => fstr.push_str(&format!(" {}={}", k, other)),
-                }
+                fstr.push_str(&isi_field(k, v));
             }
         }
     }

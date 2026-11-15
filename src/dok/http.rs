@@ -798,6 +798,11 @@ fn write_response_bytes(stream: &mut TcpStream, status: i128, content_type: &str
         status, status_reason(status), content_type, body.len()
     );
     for (k, v) in extra_headers { out.push_str(&format!("{}: {}\r\n", k, v)); }
+    // Peramban tidak menebak jenis isi: unggahan `.txt`/tanpa ekstensi berisi HTML tidak jadi halaman (stored XSS),
+    // bawaan Django dan helmet. Aplikasi yang memasang kepalanya sendiri tidak ditimpa.
+    if !extra_headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("x-content-type-options")) {
+        out.push_str("X-Content-Type-Options: nosniff\r\n");
+    }
     out.push_str("\r\n");
     let mut semua = out.into_bytes();
     semua.extend_from_slice(body);
@@ -826,6 +831,13 @@ fn guess_content_type(path: &Path) -> &'static str {
     }
 }
 
+/// Berkas dan folder bertitik (`.env`, `.git/`, `.htpasswd`) tidak disajikan — dijawab seperti tidak ada, bawaan
+/// `serve-static` Express (CWE-538). `.well-known` (RFC 8615, tantangan ACME) memang publik.
+pub(crate) fn segmen_tersembunyi(rel: &str) -> bool {
+    // `.`/`..` bukan berkas bertitik: traversal tetap dijawab 403 oleh `gabung_aman`, bukan disamarkan jadi 404.
+    rel.split('/').any(|g| g.starts_with('.') && !matches!(g, "." | ".." | ".well-known"))
+}
+
 /// Coba layani file statis. `None` kalau tidak ada mount yang cocok atau
 /// filenya tidak ada — supaya caller bisa lanjut ke pencarian route biasa.
 fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, String, Vec<u8>)> {
@@ -835,6 +847,7 @@ fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, S
         if !path_norm.starts_with(&prefix_norm) && path != prefix.trim_end_matches('/') { continue; }
         let rel = path.strip_prefix(prefix.as_str()).unwrap_or("").trim_start_matches('/');
         let sasaran = if rel.is_empty() { "index.html" } else { rel };
+        if segmen_tersembunyi(sasaran) { continue; }
         let Some(dasar) = dir.to_str() else { continue };
         // `gabung_aman` menolak `..`, `\`, NUL, dan tautan simbolik yang keluar dari `dir`.
         let Ok(penuh) = crate::stdlib::fs::gabung_aman(dasar, sasaran) else {
@@ -847,7 +860,7 @@ fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, S
                     return Some((413, "text/plain".to_string(), b"Payload Too Large".to_vec()));
                 }
             }
-            if let Ok(bytes) = std::fs::read(full) {
+            if let Ok(bytes) = crate::host::baca_berkas(full) {
                 let ctype = guess_content_type(full);
                 return Some((200, ctype.to_string(), bytes));
             }
@@ -1189,6 +1202,16 @@ impl Drop for Sambungan {
 
 #[cfg(test)]
 mod tes_permintaan {
+    #[test]
+    fn berkas_bertitik_tidak_disajikan() {
+        for r in [".env", ".git/config", "sub/.htpasswd", "a/.ssh/id_rsa", ".well-known/../.env"] {
+            assert!(super::segmen_tersembunyi(r), "{}", r);
+        }
+        for r in ["a.txt", "sub/x.min.js", ".well-known/acme-challenge/tok", "index.html", "../luar/x", "./a"] {
+            assert!(!super::segmen_tersembunyi(r), "{}", r);
+        }
+    }
+
     #[test]
     fn jalur_cuma_satu_ejaan() {
         use super::jalur_satu_ejaan as j;

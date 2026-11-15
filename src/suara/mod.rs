@@ -217,7 +217,7 @@ pub fn register(vm: &mut Vm) {
     });
     vm.def("suara::muat_wav", |a| {
         let p = teks(a.get(0), "suara::muat_wav", 1)?;
-        Ok(match std::fs::read(&p) {
+        Ok(match crate::host::baca_berkas(&p) {
             Ok(d) => match baca_wav(&d, &p) {
                 Ok(s) => VmValue::varian("Result", "Ok", Some(jadi(s))),
                 Err(e) => err_teks(e),

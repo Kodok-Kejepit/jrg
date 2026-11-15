@@ -87,7 +87,7 @@ pub(crate) fn pulihkan(vm: &mut Vm, catatan: Catatan) {
         let mut jenis = rencana.keadaan[ip].clone().expect("ip lanjut selalu terjangkau");
         // `keadaan[ip]` sudah sesudah `wujud[ip]`; rekaman yang dipasang instruksi SEBELUMNYA untuk `ip` tiba
         // sebelum `muat`-nya berjalan, jadi salinan mayanya dibaca dari lokal asalnya (sama isinya bila sudah).
-        for &(p, l) in &rencana.wujud[ip] { jenis[p] = Jenis::Salinan(l); }
+        for &(p, j) in &rencana.wujud[ip] { jenis[p] = j; }
         // Bukaan yang sudah berhasil: angkanya di bingkai native (lokal gabungan tidak pernah di stack VM).
         if let (true, Cara::Buka(daftar)) = (bendera & BUKA_SUDAH != 0, &rencana.cara[ip]) {
             for &(p, j) in daftar { jenis[p] = j; }
@@ -156,7 +156,7 @@ pub fn sebab() -> Vec<(String, u64)> {
 fn nilai_dari(j: Jenis, v: i64, callee: &[Arc<crate::vm::value::VmFunction>], konstanta: &[VmValue]) -> VmValue {
     match j {
         // Fungsi bawaan maya: tidak pernah ditulis ke stack VM, dibangun dari konstantanya.
-        Jenis::Bawaan(i) | Jenis::Bungkus(_, i) => konstanta[i as usize].clone(),
+        Jenis::Bawaan(i) | Jenis::Bungkus(_, i) | Jenis::Konst(i) => konstanta[i as usize].clone(),
         Jenis::Bulat => VmValue::Int(v as i128),
         Jenis::Bool => VmValue::Bool(v != 0),
         Jenis::Pecahan => VmValue::Float(f64::from_bits(v as u64)),

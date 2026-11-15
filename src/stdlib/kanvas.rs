@@ -46,7 +46,7 @@ pub fn register(vm: &mut Vm) {
                 "Canvas::load_png butuh 1 arg: (path), dapat `{}`",
                 a.first().map(|v| v.type_name_penuh()).unwrap_or_else(|| "tidak ada".to_string())));
         };
-        let isi = std::fs::read(path.as_str()).map_err(|e|
+        let isi = crate::host::baca_berkas(path.as_str()).map_err(|e|
             // Sebabnya disebut, bukan "gagal" polos: path salah, izin, dan
             // berkas tidak ada adalah tiga masalah dengan tiga perbaikan.
             format!("Canvas::load_png '{}': {}", path, crate::host::galat_io(&e)))?;
