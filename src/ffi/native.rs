@@ -734,7 +734,7 @@ fn raw_to_value(raw: CRawRet, kind: FfiType) -> Value {
                 // Safety relies on the callee having returned a genuine NUL-terminated C
                 // string, which is the documented contract of every standard libc function …
                 let cstr = unsafe { std::ffi::CStr::from_ptr(r as *const c_char) };
-                Value::Str(cstr.to_string_lossy().into_owned())
+                Value::Str(std::sync::Arc::new(cstr.to_string_lossy().into_owned()))
             }
             _ => Value::Unit,
         },

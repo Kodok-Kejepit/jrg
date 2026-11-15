@@ -30,6 +30,7 @@ fn graf(akar: &Path, dev: bool) -> Result<Vec<Simpul>, String> {
     fn turun(
         akar: &Path, kedalaman: usize, jalur: &mut Vec<(String, PathBuf)>,
         terlihat: &mut Vec<PathBuf>, keluar: &mut Vec<Simpul>, kunci: &mut super::git::Kunci, dev: bool,
+        batas: Option<&Path>,
     ) -> Result<(), String> {
         let m = Manifest::load(akar)?;
         let mut semua = m.dependencies.clone();
@@ -40,6 +41,14 @@ fn graf(akar: &Path, dev: bool) -> Result<Vec<Simpul>, String> {
                     .map_err(|e| format!("dependency `{}`: {}", d.nama, e))?;
             }
             let k = kanonik(&d.akar);
+            // Paket dari git cuma boleh menunjuk path di dalam salinannya sendiri, bukan berkas pemakai.
+            if let (None, Some(b)) = (&d.git, batas) {
+                if !k.starts_with(b) {
+                    return Err(format!("dependency `{}` dari paket git menunjuk `{}`, di luar salinan \
+                        paket itu\n  bantuan: paket git cuma boleh memakai path di dalam repositorinya \
+                        sendiri, atau dependensi git lain", d.nama, d.akar.display()));
+                }
+            }
             // Siklus: paket ini sedang berada di jalur yang sedang ditelusuri.
             if let Some(i) = jalur.iter().position(|(_, p)| *p == k) {
                 let rantai: Vec<String> = jalur[i..].iter().map(|(n, _)| n.clone())
@@ -61,6 +70,12 @@ fn graf(akar: &Path, dev: bool) -> Result<Vec<Simpul>, String> {
             }
             let berulang = terlihat.contains(&k);
             let dm = Manifest::load(&k)?;
+            if d.git.is_some() && dm.name != d.nama {
+                return Err(format!("dependency `{}` mengambil paket bernama `{}` — nama di `jrgm.toml` \
+                    repositorinya harus sama dengan nama yang diminta\n  bantuan: periksa url-nya, atau \
+                    ganti nama dependensinya jadi `{}` kalau memang paket itu yang dimaksud",
+                    d.nama, dm.name, dm.name));
+            }
             keluar.push(Simpul {
                 nama: d.nama.clone(), versi: dm.version.clone(),
                 // Bentuk kanonik, karena inilah yang dipakai `jrgm build` untuk menyebut
@@ -69,8 +84,9 @@ fn graf(akar: &Path, dev: bool) -> Result<Vec<Simpul>, String> {
             });
             if berulang { continue; }
             terlihat.push(k.clone());
+            let b = if d.git.is_some() { Some(k.clone()) } else { batas.map(Path::to_path_buf) };
             jalur.push((d.nama.clone(), k));
-            turun(&d.akar, kedalaman + 1, jalur, terlihat, keluar, kunci, false)?;
+            turun(&d.akar, kedalaman + 1, jalur, terlihat, keluar, kunci, false, b.as_deref())?;
             jalur.pop();
         }
         Ok(())
@@ -82,8 +98,8 @@ fn graf(akar: &Path, dev: bool) -> Result<Vec<Simpul>, String> {
     let nama_akar = Manifest::load(akar).map(|m| m.name).unwrap_or_else(|_| "?".into());
     let mut jalur = vec![(nama_akar, kanonik(akar))];
     let mut terlihat = Vec::new();
-    let mut kunci = super::git::Kunci::baca(akar);
-    turun(akar, 1, &mut jalur, &mut terlihat, &mut keluar, &mut kunci, dev)?;
+    let mut kunci = super::git::Kunci::baca(akar)?;
+    turun(akar, 1, &mut jalur, &mut terlihat, &mut keluar, &mut kunci, dev, None)?;
     kunci.simpan()?;
     Ok(keluar)
 }
@@ -127,21 +143,18 @@ pub(crate) fn path_dependensi(graf: &[Simpul]) -> Result<Vec<PathBuf>, String> {
     Ok(path)
 }
 
-/// Check syntax saja: Lex → Parse (tanpa interpret) Tambahkan jalur pencarian
-/// modul milik dependensi lokal ke `v`.
-pub(crate) fn tambah_path_dependensi(akar: &Path, v: &mut Vec<std::path::PathBuf>) {
-    if !akar.join("jrgm.toml").is_file() { return; }
-    if let Ok(g) = graf_dependensi(akar) {
-        if let Ok(pd) = path_dependensi(&g) { v.extend(pd); }
-    }
+/// Tambahkan jalur pencarian modul milik dependensi ke `v`; graf yang rusak dilaporkan, tidak dilewati.
+pub(crate) fn tambah_path_dependensi(akar: &Path, v: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    if !akar.join("jrgm.toml").is_file() { return Ok(()); }
+    v.extend(path_dependensi(&graf_dependensi(akar)?)?);
+    Ok(())
 }
 
 /// Sama, ditambah `[dev-dependencies]`.
-pub(crate) fn tambah_path_dependensi_dev(akar: &Path, v: &mut Vec<std::path::PathBuf>) {
-    if !akar.join("jrgm.toml").is_file() { return; }
-    if let Ok(g) = graf_dependensi_dev(akar) {
-        if let Ok(pd) = path_dependensi(&g) { v.extend(pd); }
-    }
+pub(crate) fn tambah_path_dependensi_dev(akar: &Path, v: &mut Vec<std::path::PathBuf>) -> Result<(), String> {
+    if !akar.join("jrgm.toml").is_file() { return Ok(()); }
+    v.extend(path_dependensi(&graf_dependensi_dev(akar)?)?);
+    Ok(())
 }
 
 /// Mengumpulkan tiap `.jrg` di bawah sebuah direktori, rekursif.

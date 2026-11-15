@@ -101,7 +101,7 @@ pub fn normalize(p) {
             let n = len(tumpuk)
             if n > 0 {
                 if tumpuk[n - 1] != ".." {
-                    tumpuk = arr::take(tumpuk, n - 1)
+                    tumpuk = arr::pop(tumpuk)[0]
                     continue
                 }
             }

@@ -2,7 +2,7 @@
 
 use crate::interpreter::{err_value, ok_value, Value};
 
-use super::crypto::{base64_decode_str, base64_encode_bytes, hmac_sha256, secure_random_bytes};
+use super::crypto::{acak_aman, hmac_sha256};
 
 // ─────────────────────────────────────────────────────────────────────────
 // Pembantu
@@ -13,7 +13,7 @@ use super::crypto::{base64_decode_str, base64_encode_bytes, hmac_sha256, secure_
 /// teks `<closure>` dan `dok::cookie_get(req, nil)` mencari cookie bernama "nil".
 fn teks_arg(v: Option<&Value>, nama: &str, peran: &str) -> Result<String, String> {
     match v {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(String::clone(&s.clone())),
         Some(lain) => Err(crate::interpreter::pesan_arg_harus_teks(nama, peran, &lain.type_name())),
         None => Err(format!("{}: argumennya kurang", nama)),
     }
@@ -22,7 +22,7 @@ fn teks_arg(v: Option<&Value>, nama: &str, peran: &str) -> Result<String, String
 /// Argumen yang DIRENDER jadi teks (nilai cookie/header, isi yang di-escape).
 fn render_arg(v: Option<&Value>, nama: &str) -> Result<String, String> {
     match v {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(String::clone(&s.clone())),
         Some(lain) => Ok(format!("{}", lain)),
         None => Err(format!("{}: argumennya kurang", nama)),
     }
@@ -37,23 +37,11 @@ fn ladang<'a>(v: &'a Value, nama: &str) -> Option<&'a Value> {
 
 /// Base64 varian URL tanpa padding — aman ditaruh di dalam cookie, yang
 /// melarang `=` tanpa tanda kutip dan memperlakukan `/` sebagai pemisah path.
-fn b64url(b: &[u8]) -> String {
-    base64_encode_bytes(b).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
-}
+fn b64url(b: &[u8]) -> String { super::crypto::base64url_encode_bytes(b) }
 
-fn b64url_balik(s: &str) -> Result<Vec<u8>, String> {
-    let mut t = s.replace('-', "+").replace('_', "/");
-    while t.len() % 4 != 0 { t.push('='); }
-    base64_decode_str(&t)
-}
+fn b64url_balik(s: &str) -> Result<Vec<u8>, String> { super::crypto::base64url_decode_str(s) }
 
-/// Perbandingan yang waktunya tidak bergantung pada isinya.
-fn sama_waktu_tetap(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
-    let mut beda = 0u8;
-    for i in 0..a.len() { beda |= a[i] ^ b[i]; }
-    beda == 0
-}
+use super::crypto::sama_waktu_tetap;
 
 // ─────────────────────────────────────────────────────────────────────────
 // Cookie
@@ -83,7 +71,7 @@ pub fn cookie_get(args: &[Value]) -> Result<Value, String> {
             if bk.trim() == nama {
                 return Ok(Value::Enum {
                     type_name: "Option".into(), variant: "Some".into(),
-                    payload: Some(Box::new(Value::Str(bv.trim().to_string()))),
+                    payload: Some(Box::new(Value::Str(std::sync::Arc::new(bv.trim().to_string())))),
                 });
             }
         }
@@ -91,13 +79,49 @@ pub fn cookie_get(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Enum { type_name: "Option".into(), variant: "None".into(), payload: None })
 }
 
+/// `token` RFC 6265/7230: huruf, angka dan `!#$%&'*+-.^_`|~`.
+fn token_cookie(b: u8) -> bool {
+    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// `cookie-octet` RFC 6265: ASCII tampak kecuali `"` `,` `;` `\`.
+fn oktet_cookie(b: u8) -> bool {
+    (0x21..=0x7e).contains(&b) && !matches!(b, b'"' | b',' | b';' | b'\\')
+}
+
+/// Atribut teks tidak boleh membawa `;` atau karakter kendali — dulu `path: "/; Domain=x"` lolos.
+fn periksa_atribut(k: &str, t: &str) -> Result<(), String> {
+    let salah = match k {
+        "path" => t.chars().find(|&c| c == ';' || c.is_control()),
+        "domain" => t.chars().find(|&c| !(c.is_ascii_alphanumeric() || c == '.' || c == '-')),
+        _ => {
+            let ok = ["", "strict", "lax", "none"].iter().any(|v| t.eq_ignore_ascii_case(v));
+            if ok { return Ok(()); }
+            return Err(format!("dok::cookie_set: `same_site` cuma \"Strict\", \"Lax\", \"None\" atau \"\", \
+                                dapat `{}`", t.escape_debug()));
+        }
+    };
+    match salah {
+        Some(c) => Err(format!("dok::cookie_set: opsi `{}` memuat `{}` yang tidak boleh ada di sana", k, c.escape_debug())),
+        None => Ok(()),
+    }
+}
+
 /// `dok::cookie_set(resp, nama, nilai, opsi?)` → respons baru.
 pub fn cookie_set(args: &[Value]) -> Result<Value, String> {
     let resp = args.get(0).cloned().ok_or("dok::cookie_set(resp, nama, nilai, opsi?)")?;
     let nama = teks_arg(args.get(1), "dok::cookie_set", "nama cookie-nya")?;
     let nilai = render_arg(args.get(2), "dok::cookie_set")?;
-    if nama.is_empty() || nama.contains(['=', ';', ' ']) {
-        return Err(format!("dok::cookie_set: nama cookie `{}` tidak sah", nama));
+    if nama.is_empty() || !nama.bytes().all(token_cookie) {
+        return Err(format!("dok::cookie_set: nama cookie `{}` tidak sah — cuma huruf, angka dan \
+                            `!#$%&'*+-.^_`|~` (RFC 6265)", nama.escape_debug()));
+    }
+    // Nilai ber-`;` dulu menyisipkan atribut (`x; Domain=evil`), kelas CVE-2024-47764.
+    if let Some(c) = nilai.chars().find(|&c| !(c.is_ascii() && oktet_cookie(c as u8))) {
+        return Err(format!("dok::cookie_set: nilai cookie `{}` memuat `{}` yang tidak boleh ada di \
+                            cookie (spasi, `\"`, `,`, `;`, `\\`, karakter kendali, non-ASCII) — \
+                            bungkus dengan `dok::url_encode(nilai)` dan buka dengan `dok::url_decode`",
+                           nama, c.escape_debug()));
     }
 
     let opsi = args.get(3);
@@ -118,6 +142,7 @@ pub fn cookie_set(args: &[Value]) -> Result<Value, String> {
             if !sah {
                 return Err(format!("dok::cookie_set: opsi `{}` bertipe salah, dapat `{}`", k, v.type_name()));
             }
+            if let Value::Str(t) = v { periksa_atribut(k, t)?; }
         }
     }
     let ambil = |k: &str| -> Option<Value> { opsi.and_then(|o| ladang(o, k).cloned()) };
@@ -126,13 +151,18 @@ pub fn cookie_set(args: &[Value]) -> Result<Value, String> {
     };
 
     let mut c = format!("{}={}", nama, nilai);
-    let path = match ambil("path") { Some(Value::Str(s)) => s, _ => "/".to_string() };
+    let path = match ambil("path") { Some(Value::Str(s)) => s, _ => std::sync::Arc::new("/".to_string()) };
     c.push_str(&format!("; Path={}", path));
     if let Some(Value::Int(n)) = ambil("max_age") { c.push_str(&format!("; Max-Age={}", n)); }
     if let Some(Value::Str(d)) = ambil("domain") { c.push_str(&format!("; Domain={}", d)); }
     if bool_opsi("http_only", true) { c.push_str("; HttpOnly"); }
     if bool_opsi("secure", false) { c.push_str("; Secure"); }
-    let same = match ambil("same_site") { Some(Value::Str(s)) => s, _ => "Lax".to_string() };
+    let same = match ambil("same_site") { Some(Value::Str(s)) => s, _ => std::sync::Arc::new("Lax".to_string()) };
+    // Peramban MEMBUANG diam-diam cookie `SameSite=None` tanpa `Secure`.
+    if same.eq_ignore_ascii_case("none") && !bool_opsi("secure", false) {
+        return Err("dok::cookie_set: `same_site: \"None\"` butuh `secure: true` — tanpa itu peramban \
+                    membuang cookie-nya tanpa pesan".to_string());
+    }
     if !same.is_empty() { c.push_str(&format!("; SameSite={}", same)); }
 
     tambah_header(resp, "Set-Cookie", &c, "dok::cookie_set")
@@ -157,7 +187,7 @@ fn tambah_header(resp: Value, nama: &str, nilai: &str, fungsi: &str) -> Result<V
     }
     let mut f = (*fields).clone();
     let mut hs = match f.get("headers") { Some(Value::Array(a)) => (**a).clone(), _ => Vec::new() };
-    hs.push(Value::Tuple(vec![Value::Str(nama.to_string()), Value::Str(nilai.to_string())].into()));
+    hs.push(Value::Tuple(vec![Value::Str(std::sync::Arc::new(nama.to_string())), Value::Str(std::sync::Arc::new(nilai.to_string()))].into()));
     f.insert("headers".to_string(), Value::Array(hs.into()));
     Ok(Value::Struct { name, fields: f.into() })
 }
@@ -178,7 +208,7 @@ pub fn session_encode(args: &[Value]) -> Result<Value, String> {
     let json = super::json::encode(data)?;
     let muatan = b64url(json.as_bytes());
     let mac = hmac_sha256(rahasia.as_bytes(), muatan.as_bytes());
-    Ok(Value::Str(format!("{}.{}", muatan, b64url(&mac))))
+    Ok(Value::teks(format!("{}.{}", muatan, b64url(&mac))))
 }
 
 /// `dok::session_decode(teks, rahasia)` → `Result<data, string>`.
@@ -214,6 +244,10 @@ const PUTARAN_BAWAAN: u32 = 210_000;
 /// PBKDF2-HMAC-SHA256, ditulis di sini karena satu-satunya bahan yang
 /// dibutuhkannya — HMAC-SHA256 — sudah ada.
 fn pbkdf2(kata: &[u8], garam: &[u8], putaran: u32, panjang: usize) -> Vec<u8> {
+    // Kunci HMAC di atas 64 byte diganti hash-nya (RFC 2104) — SEKALI, bukan tiap putaran:
+    // dulu sandi 100 KB berharga 210 ribu kali hash 100 KB (kelas CVE-2013-1443 Django).
+    let ringkas;
+    let kata = if kata.len() > 64 { ringkas = super::crypto::sha256(kata); &ringkas[..] } else { kata };
     let mut keluar = Vec::with_capacity(panjang);
     let mut blok: u32 = 1;
     while keluar.len() < panjang {
@@ -245,9 +279,9 @@ pub fn password_hash(args: &[Value]) -> Result<Value, String> {
             "dok::password_hash: argumen ke-2 (putaran) harus bilangan bulat, dapat `{}`", lain.type_name())),
         None => PUTARAN_BAWAAN,
     };
-    let garam = secure_random_bytes(16);
+    let garam = acak_aman(16, "dok::password_hash")?;
     let hash = pbkdf2(kata.as_bytes(), &garam, putaran, 32);
-    Ok(Value::Str(format!(
+    Ok(Value::teks(format!(
         "pbkdf2$sha256${}${}${}", putaran, b64url(&garam), b64url(&hash))))
 }
 
@@ -266,6 +300,80 @@ pub fn password_verify(args: &[Value]) -> Result<Value, String> {
     };
     let hitung = pbkdf2(kata.as_bytes(), &garam, putaran, harusnya.len().max(1));
     Ok(Value::Bool(sama_waktu_tetap(&hitung, &harusnya)))
+}
+
+/// Umur token CSRF bawaan: 12 jam.
+const UMUR_CSRF: i128 = 43_200;
+/// Jam yang maju sedikit dari jam penanda tangan tidak membuat token jadi tidak sah.
+const SELISIH_JAM: i128 = 60;
+
+fn rahasia_csrf(v: Option<&Value>, nama: &str) -> Result<String, String> {
+    let r = teks_arg(v, nama, "rahasianya")?;
+    if r.len() < crate::stdlib::jwt::MIN_RAHASIA {
+        return Err(format!("{}: rahasianya {} byte, paling sedikit {} — rahasia pendek bisa ditebak dari satu \
+                            token; buat dengan `crypto::random_hex(32)`", nama, r.len(), crate::stdlib::jwt::MIN_RAHASIA));
+    }
+    Ok(r)
+}
+
+fn ikatan_csrf(v: Option<&Value>, nama: &str) -> Result<String, String> {
+    let i = teks_arg(v, nama, "ikatannya (id sesi atau pengguna)")?;
+    if i.is_empty() {
+        return Err(format!("{}: ikatannya kosong — token yang tidak terikat ke sesi bisa diambil penyerang dari \
+                            sesinya sendiri lalu dipakai atas nama korban; isi dengan id sesi", nama));
+    }
+    Ok(i)
+}
+
+/// Pesan yang ditandatangani: berawalan domain (bukan tanda sesi) dan panjang ikatan (tak ambigu).
+fn mac_csrf(rahasia: &str, ikatan: &str, waktu: &str, acak: &str) -> String {
+    let pesan = format!("jrg-csrf\0{}\0{}\0{}\0{}", ikatan.len(), ikatan, waktu, acak);
+    b64url(&hmac_sha256(rahasia.as_bytes(), pesan.as_bytes()))
+}
+
+fn detik_kini(nama: &str) -> Result<i128, String> {
+    crate::host::sejak_epoch().map(|d| d.as_secs() as i128)
+        .ok_or_else(|| format!("{}: jam sistem tidak bisa dibaca, jadi umur token tidak bisa diperiksa", nama))
+}
+
+/// `dok::csrf_token(rahasia, ikatan)` → string `waktu.acak.tanda`.
+pub fn csrf_token(args: &[Value]) -> Result<Value, String> {
+    let rahasia = rahasia_csrf(args.get(0), "dok::csrf_token")?;
+    let ikatan = ikatan_csrf(args.get(1), "dok::csrf_token")?;
+    let waktu = detik_kini("dok::csrf_token")?.to_string();
+    let acak = b64url(&acak_aman(16, "dok::csrf_token")?);
+    let tanda = mac_csrf(&rahasia, &ikatan, &waktu, &acak);
+    Ok(Value::teks(format!("{}.{}.{}", waktu, acak, tanda)))
+}
+
+/// `dok::csrf_verify(token, rahasia, ikatan, umur_detik?)` → bool.
+pub fn csrf_verify(args: &[Value]) -> Result<Value, String> {
+    let token = teks_arg(args.get(0), "dok::csrf_verify", "token-nya")?;
+    let rahasia = rahasia_csrf(args.get(1), "dok::csrf_verify")?;
+    let ikatan = ikatan_csrf(args.get(2), "dok::csrf_verify")?;
+    let umur = match args.get(3) {
+        None => UMUR_CSRF,
+        Some(Value::Int(n)) if (1..=31_536_000).contains(n) => *n,
+        Some(Value::Int(n)) => return Err(format!("dok::csrf_verify: umur {} detik di luar 1..31536000 (setahun)", n)),
+        Some(lain) => return Err(format!("dok::csrf_verify: argumen ke-4 (umur dalam detik) harus bilangan bulat, \
+                                          dapat `{}`", lain.type_name())),
+    };
+    let kini = detik_kini("dok::csrf_verify")?;
+    Ok(Value::Bool(csrf_sah(&token, &rahasia, &ikatan, umur, kini)))
+}
+
+/// Inti pemeriksaan tanpa `Value`: bentuknya, tanda tangannya (waktu-tetap), lalu umurnya.
+pub fn csrf_sah(token: &str, rahasia: &str, ikatan: &str, umur: i128, kini: i128) -> bool {
+    let bagian: Vec<&str> = token.split('.').collect();
+    let [waktu, acak, tanda] = bagian[..] else { return false };
+    // Satu ejaan per waktu: tanpa `+`, tanpa nol di depan.
+    if waktu.is_empty() || waktu.len() > 12 || !waktu.bytes().all(|b| b.is_ascii_digit())
+        || (waktu.len() > 1 && waktu.starts_with('0')) || acak.len() != 22 {
+        return false;
+    }
+    if !sama_waktu_tetap(mac_csrf(rahasia, ikatan, waktu, acak).as_bytes(), tanda.as_bytes()) { return false; }
+    let t: i128 = waktu.parse().unwrap_or(i128::MAX);
+    t <= kini + SELISIH_JAM && kini - t <= umur
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -291,11 +399,11 @@ pub fn loloskan_html(s: &str) -> String {
 /// `dok::escape_html(s)` → string.
 pub fn escape_html(args: &[Value]) -> Result<Value, String> {
     let s = render_arg(args.get(0), "dok::escape_html")?;
-    Ok(Value::Str(loloskan_html(&s)))
+    Ok(Value::Str(std::sync::Arc::new(loloskan_html(&s))))
 }
 
 fn nilai_ke_teks(v: &Value) -> String {
-    match v { Value::Str(s) => s.clone(), lain => format!("{}", lain) }
+    match v { Value::Str(s) => String::clone(&s.clone()), lain => format!("{}", lain) }
 }
 
 fn benar(v: &Value) -> bool {
@@ -340,7 +448,7 @@ pub fn render(args: &[Value]) -> Result<Value, String> {
     let tpl = teks_arg(args.get(0), "dok::render", "template-nya")?;
     let data = data_template(args.get(1), "dok::render")?;
     match render_str(&tpl, &data) {
-        Ok(s) => Ok(ok_value(Value::Str(s))),
+        Ok(s) => Ok(ok_value(Value::Str(std::sync::Arc::new(s)))),
         Err(e) => Ok(err_value(e)),
     }
 }
@@ -354,14 +462,29 @@ pub fn render_file(args: &[Value]) -> Result<Value, String> {
         Err(e) => return Ok(err_value(format!("dok::render_file `{}`: {}", path, crate::host::galat_io(&e)))),
     };
     match render_str(&tpl, &data) {
-        Ok(s) => Ok(ok_value(Value::Str(s))),
+        Ok(s) => Ok(ok_value(Value::Str(std::sync::Arc::new(s)))),
         Err(e) => Ok(err_value(e)),
     }
 }
 
 pub fn render_str(tpl: &str, data: &Value) -> Result<String, String> {
     let mut lingkup: Vec<(&str, Value)> = Vec::new();
-    render_bagian(tpl, data, &mut lingkup, 0)
+    let mut out = String::with_capacity(tpl.len());
+    let mut jejak = super::konteks_html::Jejak::baru();
+    render_bagian(tpl, data, &mut lingkup, 0, &mut out, &mut jejak)?;
+    Ok(out)
+}
+
+/// Tulis lalu baca konteks HTML-nya; `aman` = nilai yang diloloskan, dicek tempatnya dulu.
+fn tulis(out: &mut String, jejak: &mut super::konteks_html::Jejak, teks: &str, aman: Option<&str>) -> Result<(), String> {
+    if let Some(nama) = aman {
+        jejak.periksa_nilai(nama)?;
+        out.push_str(&loloskan_html(teks));
+    } else {
+        out.push_str(teks);
+    }
+    jejak.maju(out);
+    Ok(())
 }
 
 /// Batas kedalaman blok bersarang.
@@ -369,14 +492,24 @@ const MAKS_SARANG: usize = 64;
 
 fn render_bagian(
     tpl: &str, konteks: &Value, lingkup: &mut Vec<(&str, Value)>, dalam: usize,
-) -> Result<String, String> {
+    out: &mut String, jejak: &mut super::konteks_html::Jejak,
+) -> Result<(), String> {
     if dalam > MAKS_SARANG {
         return Err(format!("dok::render: blok bersarang lebih dari {} tingkat", MAKS_SARANG));
     }
-    let mut out = String::with_capacity(tpl.len());
     let mut sisa = tpl;
     while let Some(i) = sisa.find("{{") {
-        out.push_str(&sisa[..i]);
+        tulis(out, jejak, &sisa[..i], None)?;
+        // `{{{ v }}}` = `{{& v }}` (Mustache); dulu dibaca nama `{ v` dan menyisakan `}`.
+        if let Some(dalam3) = sisa[i + 2..].strip_prefix('{') {
+            let Some(j) = dalam3.find("}}}") else {
+                return Err("dok::render: ada `{{{` yang tidak ditutup `}}}`".to_string());
+            };
+            let teks = cari(lingkup, konteks, dalam3[..j].trim()).map(|x| nilai_ke_teks(&x)).unwrap_or_default();
+            tulis(out, jejak, &teks, None)?;
+            sisa = &dalam3[j + 3..];
+            continue;
+        }
         let ekor = &sisa[i + 2..];
         let Some(j) = ekor.find("}}") else {
             return Err("dok::render: ada `{{` yang tidak ditutup `}}`".to_string());
@@ -400,7 +533,7 @@ fn render_bagian(
                     let (benar_bagian, salah_bagian) = pisah_else(badan);
                     let v = cari(lingkup, konteks, arg).unwrap_or(Value::Nil);
                     let dipakai = if benar(&v) { benar_bagian } else { salah_bagian };
-                    out.push_str(&render_bagian(dipakai, konteks, lingkup, dalam + 1)?);
+                    render_bagian(dipakai, konteks, lingkup, dalam + 1, out, jejak)?;
                 }
                 "each" => {
                     let v = cari(lingkup, konteks, arg).unwrap_or(Value::Nil);
@@ -413,9 +546,9 @@ fn render_bagian(
                     };
                     for (idx, it) in items.iter().enumerate() {
                         lingkup.push(("@index", Value::Int(idx as i128)));
-                        let s = render_bagian(badan, it, lingkup, dalam + 1)?;
+                        let r = render_bagian(badan, it, lingkup, dalam + 1, out, jejak);
                         lingkup.pop();
-                        out.push_str(&s);
+                        r?;
                     }
                 }
                 lain => return Err(format!("dok::render: blok `{}` tidak dikenal", lain)),
@@ -437,11 +570,10 @@ fn render_bagian(
             // Nama yang tidak ada jadi kosong, bukan galat.
             None => String::new(),
         };
-        out.push_str(&if mentah { teks } else { loloskan_html(&teks) });
+        tulis(out, jejak, &teks, (!mentah).then_some(jalur))?;
         sisa = setelah;
     }
-    out.push_str(sisa);
-    Ok(out)
+    tulis(out, jejak, sisa, None)
 }
 
 /// Ambil badan sebuah blok sampai `{{/kata}}` yang sepadan, hormati sarang.
@@ -497,14 +629,73 @@ mod tes {
     }
 
     #[test]
+    fn sandi_panjang_tidak_dihash_tiap_putaran() {
+        // Hasilnya tetap PBKDF2 baku: putaran pertama HMAC dengan kunci aslinya.
+        let kata = vec![b'a'; 100_000];
+        let mut pesan = b"garam".to_vec();
+        pesan.extend_from_slice(&1u32.to_be_bytes());
+        let u1 = hmac_sha256(&kata, &pesan);
+        assert_eq!(pbkdf2(&kata, b"garam", 1, 32), u1.to_vec());
+        let t = std::time::Instant::now();
+        pbkdf2(&kata, b"garam", 20_000, 32);
+        assert!(t.elapsed().as_secs() < 5, "sandi panjang masih dihash tiap putaran");
+    }
+
+    #[test]
+    fn token_csrf_terikat_dan_berumur() {
+        let r = "rahasia-yang-panjangnya-32-byte!";
+        let acak = "AAAAAAAAAAAAAAAAAAAAAA";
+        let t = format!("1000.{}.{}", acak, mac_csrf(r, "sesi-a", "1000", acak));
+        assert!(csrf_sah(&t, r, "sesi-a", 600, 1500));
+        assert!(!csrf_sah(&t, r, "sesi-b", 600, 1500), "token sesi lain");
+        assert!(!csrf_sah(&t, "rahasia-lain-yang-juga-32-byte!!", "sesi-a", 600, 1500));
+        assert!(!csrf_sah(&t, r, "sesi-a", 600, 1601), "kedaluwarsa");
+        assert!(!csrf_sah(&t, r, "sesi-a", 600, 900), "dari masa depan");
+        assert!(!csrf_sah(&format!("01000.{}", &t[5..]), r, "sesi-a", 600, 1500), "ejaan kedua");
+        assert!(!csrf_sah("", r, "sesi-a", 600, 1500));
+        // Ikatan tak ambigu: `ab` + waktu `1` lawan `a` + ...; tanda sesi tidak bisa jadi token.
+        assert_ne!(mac_csrf(r, "a", "1", acak), mac_csrf(r, "a\01", "", acak));
+        let sesi = b64url(&hmac_sha256(r.as_bytes(), b"1000"));
+        assert!(!csrf_sah(&format!("1000.{}.{}", acak, sesi), r, "sesi-a", 600, 1500));
+    }
+
+    #[test]
     fn html_diloloskan_secara_bawaan() {
-        let d = obj(&[("n", Value::Str("<script>alert(1)</script>".into()))]);
+        let d = obj(&[("n", Value::teks("<script>alert(1)</script>"))]);
         let hasil = render_str("halo {{n}}", &d).unwrap();
         assert!(!hasil.contains("<script>"), "HTML tidak diloloskan: {}", hasil);
         assert!(hasil.contains("&lt;script&gt;"), "{}", hasil);
         // Dan yang mentah harus ditulis eksplisit.
         let mentah = render_str("halo {{& n}}", &d).unwrap();
         assert!(mentah.contains("<script>"), "{}", mentah);
+    }
+
+    #[test]
+    fn nilai_ditempatkan_menurut_konteks_html() {
+        let d = obj(&[("u", Value::teks("javascript:alert(1)")), ("a", Value::teks("java")),
+                      ("ok", Value::teks("/x?a=1&b=2")), ("t", Value::teks("a onmouseover=x"))]);
+        // URL berbahaya diganti penanda, juga kalau skemanya dirangkai dari dua nilai atau nilai dan teks.
+        assert_eq!(render_str("<a href=\"{{u}}\">k</a>", &d).unwrap(), "<a href=\"#jrg-url-ditolak\">k</a>");
+        assert_eq!(render_str("<a href='{{a}}script:x'>", &d).unwrap(), "<a href='#jrg-url-ditolak'>");
+        assert_eq!(render_str("<img alt=\"{{u}}\" SRC = \"{{ok}}\">", &d).unwrap(),
+                   "<img alt=\"javascript:alert(1)\" SRC = \"/x?a=1&amp;b=2\">");
+        // Templat sendiri boleh menulis skema apa pun; yang diperiksa cuma nilai dari data.
+        assert_eq!(render_str("<a href=\"javascript:void(0)\">{{a}}</a>", &d).unwrap(),
+                   "<a href=\"javascript:void(0)\">java</a>");
+        for (tpl, kata) in [("<script>var x = '{{t}}'</script>", "<script>"),
+                            ("<b onclick=\"f('{{t}}')\">", "onclick"), ("<p style=\"{{t}}\">", "style"),
+                            ("<p title={{t}}>", "tanpa tanda kutip"), ("<p {{t}}>", "di dalam tag"),
+                            ("<{{t}}>", "di dalam tag"), ("<iframe srcdoc=\"{{t}}\">", "srcdoc")] {
+            let e = render_str(tpl, &d).unwrap_err();
+            assert!(e.contains(kata), "{} -> {}", tpl, e);
+        }
+        // Sesudah elemen mentah ditutup, teks biasa lagi; textarea dan komentar meloloskan.
+        assert_eq!(render_str("<script>1<2</SCRIPT ><p>{{t}}<textarea>{{t}}</textarea><!-- {{t}} -->", &d).unwrap(),
+                   "<script>1<2</SCRIPT ><p>a onmouseover=x<textarea>a onmouseover=x</textarea><!-- a onmouseover=x -->");
+        // Blok di dalam tag tetap jalan, dan yang mentah tidak diperiksa.
+        assert_eq!(render_str("<input {{#if a}}checked{{/if}} value=\"{{a}}\">", &d).unwrap(),
+                   "<input checked value=\"java\">");
+        assert_eq!(render_str("<script>{{{t}}}</script>", &d).unwrap(), "<script>a onmouseover=x</script>");
     }
 
     #[test]
@@ -526,6 +717,9 @@ mod tes {
     #[test]
     fn blok_tak_ditutup_ditolak_bukan_diam() {
         assert!(render_str("{{#if x}}halo", &obj(&[])).is_err());
+        let v = obj(&[("v", Value::teks("<b>"))]);
+        assert_eq!(render_str("a{{{ v }}}b{{{v}}}", &v).unwrap(), "a<b>b<b>");
+        assert!(render_str("{{{ v }}", &v).is_err());
         assert!(render_str("halo {{x", &obj(&[])).is_err());
         assert!(render_str("{{/if}}", &obj(&[])).is_err());
     }
@@ -544,32 +738,32 @@ mod tes {
         // Putaran kecil supaya tesnya tidak jadi tolok ukur.
         // `Value` tidak punya `PartialEq` — dibandingkan lewat isinya, bukan
         // lewat `assert_eq!`.
-        fn teks(v: &Value) -> String { match v { Value::Str(s) => s.clone(), l => format!("{}", l) } }
+        fn teks(v: &Value) -> String { match v { Value::Str(s) => String::clone(&s.clone()), l => format!("{}", l) } }
         fn benar_bool(v: &Value) -> bool { matches!(v, Value::Bool(true)) }
 
-        let a = password_hash(&[Value::Str("rahasia".into()), Value::Int(1000)]).unwrap();
-        let b = password_hash(&[Value::Str("rahasia".into()), Value::Int(1000)]).unwrap();
+        let a = password_hash(&[Value::teks("rahasia"), Value::Int(1000)]).unwrap();
+        let b = password_hash(&[Value::teks("rahasia"), Value::Int(1000)]).unwrap();
         assert_ne!(teks(&a), teks(&b),
             "dua hash sandi yang sama identik — garamnya tidak dipakai");
         let sa = teks(&a);
         assert!(benar_bool(&password_verify(
-            &[Value::Str("rahasia".into()), Value::Str(sa.clone())]).unwrap()),
+            &[Value::teks("rahasia"), Value::Str(std::sync::Arc::new(sa.clone()))]).unwrap()),
             "sandi yang benar tidak diterima");
         assert!(!benar_bool(&password_verify(
-            &[Value::Str("salah".into()), Value::Str(sa.clone())]).unwrap()),
+            &[Value::teks("salah"), Value::Str(std::sync::Arc::new(sa.clone()))]).unwrap()),
             "sandi yang salah diterima");
         // Hash yang bentuknya rusak menjawab false, bukan panik atau true.
         for rusak in ["", "bukan-hash", "pbkdf2$sha256$x$y$z", "pbkdf2$sha256$1000$!!$!!"] {
             assert!(!benar_bool(&password_verify(
-                &[Value::Str("rahasia".into()), Value::Str(rusak.into())]).unwrap()),
+                &[Value::teks("rahasia"), Value::teks(rusak)]).unwrap()),
                 "hash rusak `{}` tidak menjawab false", rusak);
         }
     }
 
     #[test]
     fn sesi_menolak_muatan_yang_diubah() {
-        let d = obj(&[("user", Value::Str("budi".into()))]);
-        let rahasia = Value::Str("rahasia-yang-cukup-panjang".into());
+        let d = obj(&[("user", Value::teks("budi"))]);
+        let rahasia = Value::teks("rahasia-yang-cukup-panjang");
         let Value::Str(t) = session_encode(&[d.clone(), rahasia.clone()]).unwrap() else { panic!() };
         // Yang utuh terbaca kembali.
         let ok = session_decode(&[Value::Str(t.clone()), rahasia.clone()]).unwrap();
@@ -577,19 +771,19 @@ mod tes {
         // Muatan yang diubah ditolak, walau bentuknya masih sah.
         let (muatan, tanda) = t.rsplit_once('.').unwrap();
         let palsu = format!("{}.{}", b64url(br#"{"user":"admin"}"#), tanda);
-        let hasil = session_decode(&[Value::Str(palsu), rahasia.clone()]).unwrap();
+        let hasil = session_decode(&[Value::Str(std::sync::Arc::new(palsu)), rahasia.clone()]).unwrap();
         assert!(matches!(&hasil, Value::Enum { variant, .. } if variant == "Err"),
                 "muatan yang diubah diterima: {:?}", hasil);
         let _ = muatan;
         // Rahasia yang salah juga ditolak.
         let salah = session_decode(&[
-            Value::Str(t), Value::Str("rahasia-lain-yang-panjang".into())]).unwrap();
+            Value::Str(t), Value::teks("rahasia-lain-yang-panjang")]).unwrap();
         assert!(matches!(&salah, Value::Enum { variant, .. } if variant == "Err"), "{:?}", salah);
     }
 
     #[test]
     fn rahasia_pendek_ditolak() {
         let d = obj(&[]);
-        assert!(session_encode(&[d, Value::Str("pendek".into())]).is_err());
+        assert!(session_encode(&[d, Value::teks("pendek")]).is_err());
     }
 }

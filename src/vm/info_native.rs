@@ -75,7 +75,21 @@ fn indeks() -> &'static Indeks {
 }
 
 pub(crate) fn info(f: VmNativeFn) -> Option<&'static InfoNative> {
-    indeks().per_alamat.get(&(f as usize))
+    // Dibayar tiap panggilan native: 64 slot per thread menurut alamatnya (tabelnya tetap selama proses,
+    // jadi isinya tidak pernah basi; alamat 0 bukan fungsi, jadi slot kosong tidak pernah cocok).
+    use std::cell::Cell;
+    thread_local! {
+        static TEMBOLOK: [Cell<(usize, *const InfoNative)>; 64] = const { [const { Cell::new((0, std::ptr::null())) }; 64] };
+    }
+    let a = f as usize;
+    TEMBOLOK.with(|t| {
+        let slot = &t[(a >> 4) & 63];
+        let (k, p) = slot.get();
+        if k == a { return unsafe { p.as_ref() }; }
+        let r = indeks().per_alamat.get(&a);
+        slot.set((a, r.map_or(std::ptr::null(), |x| x as *const InfoNative)));
+        r
+    })
 }
 
 /// Seperti [`info`], lewat NAMA — untuk builtin stdlib VM yang interpreter capai

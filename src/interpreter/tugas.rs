@@ -16,7 +16,7 @@ pub const NAMA_TASK: &str = "Task";
 /// Bungkus sebuah channel jadi nilai `Future`/`Task`.
 pub fn nilai_gagal(pesan: String) -> Value {
     let mut f = std::collections::HashMap::new();
-    f.insert("pesan".to_string(), Value::Str(pesan));
+    f.insert("pesan".to_string(), Value::Str(std::sync::Arc::new(pesan)));
     Value::Struct { name: NAMA_GAGAL.to_string(), fields: f.into() }
 }
 
@@ -90,6 +90,11 @@ fn masih_boleh(serah: &Option<crate::interpreter::value::ChannelHandle>) -> bool
     }
 }
 
+/// `future::timeout` dengan batas yang bukan bilangan bulat tak negatif; satu kalimat di tiga mesin.
+pub fn pesan_timeout_ms(siapa: &str, tipe: &str) -> String {
+    format!("{}: argumen 2 harus int >= 0 (milidetik), dapat `{}`", siapa, tipe)
+}
+
 pub fn pesan_sudah_diserahkan(siapa: &str) -> String {
     format!(
         "{}: hasilnya sudah diambil sebelumnya — sebuah Future/Task menyerahkan \
@@ -145,7 +150,10 @@ impl Interpreter {
 
         let hasil = std::thread::Builder::new()
             .name("jrg-future".to_string())
+            // Stack sebesar utas utama: dengan bawaan 2 MB rekursi ±150 tingkat sudah mematikan proses.
+            .stack_size(super::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                super::catat_puncak_stack();
                 // Kegagalan IKUT dibawa, tidak ditelan.
                 let v = match interp.call_fn(f, sisa) {
                     Ok(v) => v,
@@ -259,13 +267,7 @@ impl Interpreter {
         };
         let ms = match args.get(1) {
             Some(Value::Int(n)) if *n >= 0 => *n,
-            lain => {
-                return Err(format!(
-                    "{}: argumen 2 harus int >= 0 (milidetik), dapat `{}`",
-                    siapa,
-                    lain.map(|x| x.type_name()).unwrap_or_else(|| "tidak ada".to_string())
-                ))
-            }
+            lain => return Err(pesan_timeout_ms(siapa, &lain.map(|x| x.type_name()).unwrap_or_else(|| "tidak ada".to_string()))),
         };
         // `None` harus berarti SATU hal: "belum siap".
         if !masih_boleh(&serah) {

@@ -31,8 +31,8 @@ impl Interpreter {
             LitKind::Float(f)  => Value::Float(*f),
             LitKind::Imag(f)   => Value::Float(*f),
             LitKind::Rune(c)   => Value::Rune(*c),
-            LitKind::Str(s)    => Value::Str(s.clone()),
-            LitKind::RawStr(s) => Value::Str(s.clone()),
+            LitKind::Str(s)    => Value::Str(std::sync::Arc::new(s.clone())),
+            LitKind::RawStr(s) => Value::Str(std::sync::Arc::new(s.clone())),
             LitKind::Bool(b)   => Value::Bool(*b),
             LitKind::Nil       => Value::Nil,
         }
@@ -112,14 +112,14 @@ impl Interpreter {
             (Value::Float(x), Value::Float(y)) => Ok(Value::Float(x + y)),
             (Value::Int(x),   Value::Float(y)) => Ok(Value::Float(x as f64 + y)),
             (Value::Float(x), Value::Int(y))   => Ok(Value::Float(x + y as f64)),
-            (Value::Str(x),   Value::Str(y))   => Ok(Value::Str(x + &y)),
+            (Value::Str(mut x), Value::Str(y)) => { std::sync::Arc::make_mut(&mut x).push_str(&y); Ok(Value::Str(x)) }
             // Menyambung ke `x` yang sudah dimiliki, bukan `format!` yang menyalinnya utuh.
             (Value::Str(mut x), r) => {
                 use std::fmt::Write;
-                write!(x, "{}", r).expect("Display Value tidak boleh gagal");
+                write!(std::sync::Arc::make_mut(&mut x), "{}", r).expect("Display Value tidak boleh gagal");
                 Ok(Value::Str(x))
             }
-            (l,               Value::Str(y))   => Ok(Value::Str(format!("{}{}", l, y))),
+            (l,               Value::Str(y))   => Ok(Value::teks(format!("{}{}", l, y))),
             // Gabung dua array jadi array baru — semantik yang SAMA dengan method
             // `.concat()` yang sudah ada, cuma lewat operator.
             (Value::Array(mut x), Value::Array(y)) => { x.extend(y); Ok(Value::Array(x)) }
@@ -158,7 +158,7 @@ impl Interpreter {
     /// dipakai bersama dengan VM supaya tidak menyimpang lagi.
     pub(crate) fn v_repeat_str(s: &str, n: i128) -> EvalResult {
         match crate::interpreter::ulang_string(s, n) {
-            Ok(hasil) => Ok(Value::Str(hasil)),
+            Ok(hasil) => Ok(Value::Str(std::sync::Arc::new(hasil))),
             Err(pesan) => runtime_err!("{}", pesan),
         }
     }
@@ -224,10 +224,10 @@ impl Interpreter {
         }
     }
 
-    /// `x ** y` untuk eksponen BULAT, hasil pecahan: `powi` selama eksponennya muat `i32`,
-    /// `powf` di luar itu — `y as i32` memotong, jadi `2 ** -4294967297` dulu menjawab `0.5`.
+    /// `x ** y` untuk eksponen BULAT, hasil pecahan: `powf` (libm, dibulatkan tepat). `powi` mengalikan berulang
+    /// dan meleset di digit akhir (`1.1 ** 10` → `2.593742460100002`, tepatnya `…0000023`), dan LLVM memakai `pow`.
     pub(crate) fn pangkat_bulat(x: f64, y: i128) -> f64 {
-        match i32::try_from(y) { Ok(e) => x.powi(e), Err(_) => x.powf(y as f64) }
+        x.powf(y as f64)
     }
 
     /// `x ** y` antar bilangan bulat, `y >= 0`; `None` kalau meluap 128 bit. Eksponen di atas
@@ -279,6 +279,9 @@ impl Interpreter {
     /// keduanya memang tidak bisa dibandingkan.
     pub(crate) fn cmp_values(a: &Value, b: &Value) -> Option<std::cmp::Ordering> {
         use std::cmp::Ordering;
+        if crate::interpreter::stack_menipis() == Some(true) {
+            return crate::interpreter::di_stack_lega(|| Self::cmp_values(a, b));
+        }
         match (a, b) {
             (Value::Int(x),   Value::Int(y))   => Some(x.cmp(y)),
             (Value::Str(x),   Value::Str(y))   => Some(x.cmp(y)),
@@ -589,6 +592,9 @@ impl Interpreter {
     /// Kesamaan dua nilai — bebas `self`, supaya VM bisa memanggil yang persis
     /// sama lewat jembatan nilai.
     pub fn nilai_sama(a: &Value, b: &Value) -> Result<bool, String> {
+        if crate::interpreter::stack_menipis() == Some(true) {
+            return crate::interpreter::di_stack_lega(|| Self::nilai_sama(a, b));
+        }
         if a.bisa_dipanggil() && b.bisa_dipanggil() {
             return Err(crate::interpreter::pesan_banding(&a.type_name(), &b.type_name()));
         }

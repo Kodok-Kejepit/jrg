@@ -1,0 +1,42 @@
+package main
+import "std/bungkus"
+
+fn test_dasar() {
+    assert_eq(bungkus::baris("satu dua tiga empat lima", 9), ["satu dua", "tiga", "empat", "lima"])
+    assert_eq(bungkus::baris("satu dua tiga", 100), ["satu dua tiga"])
+    assert_eq(bungkus::baris("a\n\nb", 5), ["a", "", "b"])
+    assert_eq(bungkus::baris("", 5), [""])
+    assert_eq(bungkus::baris("abcdefghij", 4), ["abcd", "efgh", "ij"])
+    assert_eq(bungkus::baris("x  y\r\nz\tw", 20), ["x y", "z w"])
+}
+
+fn test_lebar_layar_bukan_jumlah_karakter() {
+    assert_eq(bungkus::baris("日本語 テキスト", 6), ["日本語", "テキス", "ト"])
+    let e = "e\u0301"
+    assert_eq(bungkus::baris(e + e + e, 2), [e + e, e])
+    assert_eq(bungkus::potong("halo dunia", 6), "halo …")
+    assert_eq(bungkus::potong("日本語", 5), "日本…")
+    assert_eq(bungkus::potong("pendek", 10), "pendek")
+    assert_eq(bungkus::potong("abc", 1), "…")
+}
+
+fn test_tidak_ada_baris_kelebaran() {
+    var x = 11
+    let kata = ["a", "kata", "panjangsekalisekali", "日本", "e\u0301e\u0301", "😀😀", "x"]
+    for _, ulang in range(60) {
+        var t = ""
+        for _, i in range(25) {
+            x = (x * 1103515245 + 12345) % 2147483648
+            t = t + kata[x % len(kata)] + (x % 7 == 0 $ "\n" : " ")
+        }
+        let lebar = 4 + ulang % 20
+        let b = bungkus::baris(t, lebar)
+        for _, s in b { assert(term::lebar(s) <= lebar) }
+        let asli = arr::filter(str::split(str::replace(t, "\n", " "), " "), |w| w != "")
+        assert_eq(str::join(arr::filter(str::split(str::join(b, " "), " "), |w| w != ""), ""), str::join(asli, ""))
+    }
+}
+
+fn test_indentasi() {
+    assert_eq(bungkus::indentasi("a\n\nb", "> "), "> a\n\n> b")
+}

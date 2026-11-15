@@ -175,6 +175,82 @@ fn konformans_semantik_nilai_jalan_di_dua_backend() {
 
 /// Program yang WAJIB ditolak oleh KEDUA backend, dengan alasan yang sama.
 const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
+    // #1011: kanal tertutup ditolak di SEMUA lengan sebelum mencoba, walau lengan lain siap (urutan acak tak berpengaruh).
+    ("select: lengan kedua tertutup ditolak walau lengan pertama siap",
+     "let t = make_chan(int, 1)\nt.close()\nlet d = make_chan(int, 1)\nd <- 1\nwok(\"sebelum\")\nselect {\n    case x := <-d: { wok(\"tak boleh\", x) }\n    case y := <-t: { wok(\"tak boleh juga\", y) }\n}\n",
+     "channel sudah ditutup dan kosong: tidak akan ada nilai lagi", "channel sudah ditutup dan kosong: tidak akan ada nilai lagi"),
+    // Keputusan pemilik 2026-11-14: `let`/`const` LOKAL bernama varian telanjang milik berkas ditolak parser,
+    // seperti `fn`/`const`/`var` tingkat atas — dulu `let A = E::A` lolos tanpa mengikat, `const` mengikat.
+    ("let lokal bernama varian unit milik berkas", "enum E { A, B }\nlet A = E::A\nwok(\"ok\")\n",
+     "`A` sudah jadi nama varian `E::A` di berkas ini, sekarang sebagai `let`", "`A` sudah jadi nama varian `E::A` di berkas ini, sekarang sebagai `let`"),
+    ("const lokal bernama varian unit milik berkas", "package main\nenum W { Merah, Isi(int) }\npub fn main() { const Merah = 5; wok(Merah) }\n",
+     "`Merah` sudah jadi nama varian `W::Merah` di berkas ini, sekarang sebagai `const`", "`Merah` sudah jadi nama varian `W::Merah` di berkas ini, sekarang sebagai `const`"),
+    ("let dan const lokal bernama varian ber-payload, di closure dan fungsi bersarang", "package main\nenum W { Merah, Isi(int) }\nfn f() { fn g() { let Isi = 2; Isi }  g() }\npub fn main() { let h = || { const Isi = 1; Isi }\n wok(h(), f()) }\n",
+     "`Isi` sudah jadi nama varian `W::Isi` di berkas ini, sekarang sebagai `let`", "`Isi` sudah jadi nama varian `W::Isi` di berkas ini, sekarang sebagai `const`"),
+    ("var dan := lokal bernama varian milik berkas (keputusan 2026-11-15, satu aturan untuk semua deklarasi lokal)",
+     "package main\nenum E { A, B(int) }\npub fn main() { var A = 5\n B := 7\n wok(A, B) }\n",
+     "`A` sudah jadi nama varian `E::A` di berkas ini, sekarang sebagai `var`", "`B` sudah jadi nama varian `E::B` di berkas ini, sekarang sebagai `:=`"),
+    // `jalur = arr::push(jalur, x)` di jalur field tumbuh di tempat; yang bukan array tetap ditolak `arr::push` —
+    // method `push` milik struct pemakai di tempat itu TIDAK boleh tersambar oleh jalan lambatnya.
+    ("arr::push di jalur field atas struct ber-method push",
+     "package main\nstruct S { pub n: int }\nimpl S { fn push(self, x) { wok(\"DIPANGGIL\")\n return self } }\nstruct P { pub xs: S }\npub fn main() { var p = P { xs: S { n: 1 } }\n p.xs = arr::push(p.xs, 2)\n wok(p) }",
+     "arr::push: argumen ke-1 harus array, dapat `struct:S`", "arr::push: argumen ke-1 harus array, dapat `struct:S`"),
+    // Fase AMAN-8 (#871): sarang 300 kurung dulu SIGABRT di pengurai, tanpa pesan.
+    ("sarang terlalu dalam ditolak, bukan crash",
+     "package main\npub fn main() { wok(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) }",
+     "sarang terlalu dalam — lebih dari 256 tingkat", "sarang terlalu dalam — lebih dari 256 tingkat"),
+    // Fase AMAN-12 (#879): `pаypal` dengan `а` Kiril dan `admin` adalah dua nama yang tampak sama.
+    ("homoglyph: nama mencampur Latin dan Kiril",
+     "package main\npub fn main() { let admin = true\n let \u{0430}dmin = false\n wok(admin) }",
+     "mencampur aksara: Kiril (`\u{0430}` U+0430) dan Latin (`dmin`)", "mencampur aksara: Kiril (`\u{0430}` U+0430) dan Latin (`dmin`)"),
+    ("homoglyph: nama bukan NFC",
+     "package main\npub fn main() { let caf\u{00E9} = 1\n let cafe\u{0301} = 2\n wok(caf\u{00E9}) }",
+     "ditulis `\u{00E9}` (U+00E9) di NFC", "ditulis `\u{00E9}` (U+00E9) di NFC"),
+    // Fase AMAN-8 (#870): Trojan Source — `if akses` tampil sebagai komentar yang ditutup lebih awal.
+    ("trojan source: pengubah arah teks di komentar",
+     "package main\npub fn main() { let admin = false\n /* periksa \u{202E} } \u{2066}if admin\u{2069} \u{2066} begin */ wok(admin) }",
+     "karakter kendali arah teks U+202E", "karakter kendali arah teks U+202E"),
+    // Fase AMAN-3 (#844): `;` di nilai/opsi cookie dulu menyisipkan atribut (kelas CVE-2024-47764).
+    ("cookie: nilai ber-; tidak menyisipkan atribut",
+     r#"package main
+pub fn main() { wok(dok::cookie_set(dok::text("a"), "s", "x; Domain=evil")) }"#,
+     "memuat `;` yang tidak boleh ada di cookie", "memuat `;` yang tidak boleh ada di cookie"),
+    ("cookie: path ber-; ditolak",
+     r#"package main
+pub fn main() { wok(dok::cookie_set(dok::text("a"), "s", "x", {"path": "/; Domain=evil"})) }"#,
+     "opsi `path` memuat `;`", "opsi `path` memuat `;`"),
+    ("cookie: nama bukan token",
+     r#"package main
+pub fn main() { wok(dok::cookie_set(dok::text("a"), "s(1)", "x")) }"#,
+     "nama cookie `s(1)` tidak sah", "nama cookie `s(1)` tidak sah"),
+    ("cookie: SameSite=None tanpa Secure",
+     r#"package main
+pub fn main() { wok(dok::cookie_set(dok::text("a"), "s", "x", {"same_site": "None"})) }"#,
+     "butuh `secure: true`", "butuh `secure: true`"),
+    ("cookie: same_site tak dikenal",
+     r#"package main
+pub fn main() { wok(dok::cookie_set(dok::text("a"), "s", "x", {"same_site": "Lax; Domain=evil"})) }"#,
+     "`same_site` cuma", "`same_site` cuma"),
+    // Fase AMAN-9 (#873): pengurai regex rekursif per `(` dulu menghabiskan stack (kelas CVE-2022-24921).
+    ("regex: grup bersarang terlalu dalam",
+     "package main\npub fn main() { wok(re::test(str::repeat(\"(\", 1001) + \"a\" + str::repeat(\")\", 1001), \"a\")) }",
+     "grup di posisi 1000 bersarang lebih dari 1000 tingkat", "grup di posisi 1000 bersarang lebih dari 1000 tingkat"),
+    // Fase REGEX-LINEAR (#841): escape tak dikenal dulu dibaca sebagai hurufnya, `a**` dibaca `a*` lalu `*`.
+    ("regex: escape tak dikenal", "package main\npub fn main() { wok(re::test(\"\\\\q\", \"q\")) }",
+     "escape `\\q` tidak dikenal", "escape `\\q` tidak dikenal"),
+    ("regex: pengulangan bertumpuk", "package main\npub fn main() { wok(re::test(\"a**\", \"a\")) }",
+     "pengulangan bertumpuk di posisi 2", "pengulangan bertumpuk di posisi 2"),
+    // Fase POTONG: `--vm` dulu membaca `nil` yang DITULIS sebagai batas yang tidak ditulis.
+    ("potong: nil sebagai batas", "package main\npub fn main() { let a = [1, 2, 3]\n wok(a[nil:2]) }",
+     "batas awal potongan harus bilangan bulat, dapat `nil`", "batas awal potongan harus bilangan bulat, dapat `nil`"),
+    // Fase POTONG: wadahnya diperiksa sebelum batasnya, di dua mesin.
+    ("potong: wadah dulu, baru batas", "package main\npub fn main() { let x = 5\n wok(x[1.5:2]) }",
+     "tidak bisa slice `int` — yang bisa dipotong: array, string, tuple", "tidak bisa slice `int` — yang bisa dipotong: array, string, tuple"),
+    ("potong: jangkauan awal sebelum jenis akhir", "package main\npub fn main() { let a = [1, 2, 3]\n wok(a[9:\"x\"]) }",
+     "batas awal potongan [9] di luar jangkauan", "batas awal potongan [9] di luar jangkauan"),
+    // Fase BULAT-LLVM: acuan dulu menjawab `[]` untuk array kosong, `--vm` menolak.
+    ("arr::rotate atas array kosong dengan n pecahan", "package main\npub fn main() { wok(arr::rotate([], 2.5)) }",
+     "arr::rotate: butuh bilangan bulat, dapat pecahan `2.5`", "arr::rotate: butuh bilangan bulat, dapat pecahan `2.5`"),
     // Fase KALIMAT: acuan dulu menjawab kalimat jembatan ("nilai balik `channel` tidak punya padanan di VM").
     ("json::stringify atas channel", "package main\npub fn main() {\n let a = make_chan(int)\n wok(json::stringify(a))\n}",
      "`channel` tidak punya padanan di JSON, jadi ia tidak bisa disandikan", "`channel` tidak punya padanan di JSON, jadi ia tidak bisa disandikan"),
@@ -309,6 +385,19 @@ const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
     ("field privat: `self` palsu di dalam fungsi biasa tidak membuka akses",
      "struct Base { rahasia: int = 7 }\nfn curi(o) { let self = o\n return o.rahasia }\nwok(curi(Base {}))\n",
      "bersifat private", "bersifat private"),
+    // Fase KUNCI-LLVM (#826): `p["x"]` atas struct adalah `p.x` — dulu melewati privasi dan menambah field.
+    ("field privat: dibaca lewat indeks teks",
+     "struct P { pub x: int, y: int }\nlet p = P { x: 1, y: 2 }\nwok(p[\"x\"])\nwok(p[\"y\"])\n",
+     "field `y` di `P` bersifat private", "field `y` di `P` bersifat private"),
+    ("field privat: ditulis lewat indeks teks",
+     "struct P { pub x: int, y: int }\nvar p = P { x: 1, y: 2 }\np[\"y\"] = 7\nwok(p)\n",
+     "field `y` di `P` bersifat private", "field `y` di `P` bersifat private"),
+    ("field privat: dilewati untuk menulis ke dalamnya",
+     "struct Q { pub y: int }\nstruct P { q: Q }\nvar p = P { q: Q { y: 1 } }\np.q.y = 4\nwok(p)\n",
+     "field `q` di `P` bersifat private", "field `q` di `P` bersifat private"),
+    ("indeks teks atas struct: field yang tak dideklarasikan tidak ditambahkan",
+     "struct P { pub x: int }\nvar p = P { x: 1 }\np[\"zz\"] = 9\nwok(p)\n",
+     "struct `P` tidak punya field `zz`", "struct `P` tidak punya field `zz`"),
     // Varian ber-field menolak field yang tidak dideklarasikannya, dengan satu kalimat.
     ("varian ber-field: field liar ditolak",
      "enum E { V { a: int }, W }\nlet v = E::V { a: 1, zz: 2 }\nwok(v)\n",
@@ -1512,6 +1601,13 @@ const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
     ),
 
     // Ditutup di fase copy-on-write; sebelumnya entri `VM_LEBIH_PERMISIF`.
+    // `t.5` dibaca: `--vm` dulu berkalimat sendiri ("index tuple .5 …"), tidak terkunci tabel mana pun.
+    (
+        "tuple: .N di luar batas di jalur baca",
+        "package main\npub fn main() { let t = (1, 2)\n wok(\"mulai\")\n wok(t.5) }",
+        "index [5] di luar batas — tuple ini isinya 2 elemen",
+        "index [5] di luar batas — tuple ini isinya 2 elemen",
+    ),
     (
         "tuple: .N di luar batas di jalur tulis",
         "package main\npub fn main() { var t = ([1,2], 0); t.7[0] = 99; wok(t) }",
@@ -1926,6 +2022,28 @@ fn program_tak_sah_ditolak_dua_backend() {
         gagal.len(),
         gagal.join("\n")
     );
+}
+
+/// Jumlah argumen method bawaan yang salah gagal SESUDAH argumennya dievaluasi, di dua mesin, dan
+/// `defer` baru gagal saat ia jalan — dulu `--vm` gagal sebelum argumennya (Fase ARGUMEN-METODE).
+#[test]
+fn jumlah_arg_metode_salah_sesudah_argumennya() {
+    let kasus: &[(&str, &str, &str)] = &[
+        ("package main\nfn g() -> int { wok(\"g\"); return 1 }\npub fn main() { wok(\"mulai\")\n let s = \"a\"\n wok(s.upper(g())) }",
+         "mulai\ng", "method `upper` butuh 0 argumen, dapat 1"),
+        ("package main\nfn g() -> int { wok(\"g\"); return 1 }\npub fn main() {\n let s = \"a\"\n defer s.upper(g())\n wok(\"sesudah\") }",
+         "g\nsesudah", "method `upper` butuh 0 argumen, dapat 1"),
+        ("package main\nfn g() -> int { wok(\"g\"); return 2 }\npub fn main() { wok([1, 2, 3].chunks(g(), g())) }",
+         "g\ng", "method `chunks` butuh 1 argumen (ukuran), dapat 2"),
+    ];
+    for (src, keluar, pesan) in kasus {
+        for vm in [false, true] {
+            let h = jalankan(src, vm);
+            assert!(!h.sukses, "{}: harus gagal (vm={})", src, vm);
+            assert_eq!(h.keluaran, *keluar, "{}: keluaran sebelum gagal (vm={})", src, vm);
+            assert!(jalankan_keluaran_penuh(src, vm).contains(pesan), "{}: pesan (vm={})", src, vm);
+        }
+    }
 }
 
 #[test]
@@ -3107,6 +3225,8 @@ fn tidak_ada_builtin_yang_mematikan_proses() {
         "proses::",
         // Membunyikan speaker sungguhan.
         "suara::putar",
+        // Menulis berkas dan folder di jalur yang diberikan.
+        "zip::", "tar::",
     ];
     // Bentuk argumen yang salah.
     const BENTUK: &[&str] = &[
@@ -3178,6 +3298,8 @@ fn asimetri_terima_tolak_terpantau() {
         "proses::",
         // Membunyikan speaker sungguhan.
         "suara::putar",
+        // Menulis berkas dan folder di jalur yang diberikan.
+        "zip::",
     ];
     // Bentuk argumennya, dan tiga yang terakhir adalah KOREKSI.
     const BENTUK: &[&str] = &[
@@ -3642,6 +3764,11 @@ pub fn main() {
   wok(dok::db_query(db, "SELECT * FROM tidak_ada"))
   wok(dok::db_query(db, "SELECT ?", [{"a": 1}]))
   wok(dok::db_query(db, "SELECT count(*) AS c FROM t")?)
+  // Fase AMAN-14 (#883): pernyataan kedua dan parameter yang jumlahnya salah tidak lewat diam-diam.
+  wok(dok::db_exec(db, "DELETE FROM t WHERE id = 99; DROP TABLE t"))
+  wok(dok::db_exec(db, "INSERT INTO t(n, s) VALUES (?, ?)", ["x"]))
+  wok(dok::db_exec(db, "INSERT INTO t(n, s) VALUES (?, ?)", ["x", 1, 2]))
+  wok(dok::db_query(db, "SELECT count(*) AS c FROM t; -- komentar boleh")?)
   dok::db_close(db)
   wok(dok::db_query(db, "SELECT 1"))
 }
@@ -3656,6 +3783,9 @@ pub fn main() {
     assert!(i.contains("no such table"), "galat SQL tidak menyebut sebabnya:\n{}", i);
     assert!(i.contains("tidak punya padanan di sqlite"),
         "parameter bertipe asing tidak ditolak dengan sebabnya:\n{}", i);
+    assert!(i.contains("lebih dari satu pernyataan"), "pernyataan kedua dibuang diam-diam:\n{}", i);
+    assert!(i.contains("punya 2 tempat parameter, dapat 1 nilai") && i.contains("dapat 3 nilai"),
+        "jumlah parameter yang salah tidak dilaporkan:\n{}", i);
     assert!(i.contains("koneksi sudah ditutup"),
         "pemakaian sesudah tutup tidak dilaporkan:\n{}", i);
 
@@ -5014,6 +5144,8 @@ fn tidak_ada_pesan_builtin_yang_cuma_tanda_tangan() {
         .filter(|n| n != "http::unduh")
         // Membunyikan speaker sungguhan.
         .filter(|n| !n.starts_with("suara::putar"))
+        // Menulis arsip dan membongkarnya ke jalur yang diberikan.
+        .filter(|n| !n.starts_with("zip::"))
         .collect();
     assert!(nama.len() > 500, "daftar builtin sepertinya rusak: {}", nama.len());
 
@@ -5657,6 +5789,46 @@ fn tanda_tangan_dok_menyebut_tipe_yang_dijawab() {
         salah.len(), salah.join("\n"));
 }
 
+/// **Tempat bilangan bulat sebuah builtin punya SATU daftar** (Fase BULAT-LLVM): pecahan di
+/// sana ditolak dua mesin acuan dengan kalimat yang menyebut fungsinya, dan `SLOT_BULAT` milik
+/// backend LLVM — yang menurunkan kalimat yang sama saat jalan — harus berisi persis himpunan itu.
+#[test]
+fn tempat_bulat_builtin_sepakat_dengan_daftar_llvm() {
+    const LEWATI: &[&str] = &["proses::", "term::", "canvas::", "Canvas::", "suara::", "dok::serve", "zip::",
+        "time::sleep", "sleep", "exit", "tok", "input"];
+    let bulat = |a: &str| { let t = a.strip_prefix('-').unwrap_or(a); !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()) };
+    let mut kasus: Vec<(&str, usize, String)> = Vec::new();
+    // Bentuk berargumen opsional yang tidak dipakai contoh bersamanya.
+    const PANJANG: &[(&str, &str, &[&str])] = &[("range", "", &["1", "1", "1"]),
+        ("str::substr", "", &[r#""a,b""#, "1", "1"])];
+    for (n, pra, args) in CONTOH_ARGUMEN.iter().chain(PANJANG) {
+        if LEWATI.iter().any(|l| n.starts_with(l)) { continue; }
+        for (i, a) in args.iter().enumerate() {
+            if !bulat(a) { continue; }
+            let mut b: Vec<&str> = args.to_vec();
+            b[i] = "2.5";
+            kasus.push((n, i, format!("{}\n    let h = {}({})", pra, n, b.join(", "))));
+        }
+    }
+    let badan: Vec<String> = kasus.iter().map(|(_, _, b)| b.clone()).collect();
+    let (ri, rv) = (jalankan_uji_batch(&badan, false), jalankan_uji_batch(&badan, true));
+    let mut acuan = std::collections::BTreeSet::new();
+    for (k, (n, i, _)) in kasus.iter().enumerate() {
+        let kalimat = jrgc::llvm::codegen_bulat::kalimat_slot(n, *i, "2.5");
+        let kena = |r: &Option<String>| r.as_deref().map_or(false, |m| m.contains(&kalimat));
+        assert_eq!(kena(&ri[k]), kena(&rv[k]), "{} argumen ke-{}: beda antar-mesin\n{:?}\n{:?}", n, i, ri[k], rv[k]);
+        if kena(&ri[k]) { acuan.insert((n.to_string(), *i)); }
+    }
+    let llvm: std::collections::BTreeSet<(String, usize)> = jrgc::llvm::codegen_bulat::SLOT_BULAT.iter()
+        .flat_map(|(n, p)| p.iter().map(move |i| (n.to_string(), *i))).collect();
+    let kurang: Vec<_> = acuan.difference(&llvm).collect();
+    let lebih: Vec<_> = llvm.difference(&acuan).collect();
+    assert!(acuan.len() > 30, "cuma {} tempat bulat terdeteksi — sapuannya menyusut", acuan.len());
+    assert!(kurang.is_empty() && lebih.is_empty(),
+        "SLOT_BULAT tidak sama dengan acuan\n  belum di daftar: {:?}\n  di daftar tapi acuan tidak menolak begitu: {:?}",
+        kurang, lebih);
+}
+
 /// **Argumen KURANG ditolak di pintu native dua mesin, satu kalimat — dan tak ada builtin
 /// yang sempat mengarangnya** (dulu 31: `env::get()` → `nil`, `ptr::set(p)` mengisi `nil`).
 /// Contohnya diturunkan dengan menjalankan;
@@ -5754,11 +5926,11 @@ fn argumen_kurang_dijelaskan_di_tiap_pintu() {
 /// di akhir baris menelan baris berikutnya; tidak satu sapuan pun mengambil builtin sebagai nilai.
 #[test]
 fn tiap_builtin_dipanggil_lewat_nilainya_menjawab_sama() {
-    // Menulis ke terminal tanpa baris baru, atau menjalankan program lain; acak dua elemen bisa
-    // kebetulan sama di dua jalan; dan tiga `future::` menanyakan PENJADWAL (sudah selesaikah
+    // Terminal/program lain; acak (dua elemen, port `tcp_local_addr`) bisa kebetulan sama di dua jalan
+    // pembanding sehingga tidak terturunkan; tiga `future::` menanyakan PENJADWAL (sudah selesaikah
     // thread-nya?), yang dua jawabannya sama-sama benar — terukur beda antar-mesin di profil dev.
     const LEWATI: &[&str] = &["term::", "proses::", "arr::sample", "arr::shuffle", "rand::",
-                              "future::is_done", "future::timeout", "future::try_get"];
+                              "future::is_done", "future::timeout", "future::try_get", "dok::tcp_local_addr"];
     let kasus: Vec<_> = CONTOH_ARGUMEN.iter()
         .filter(|(n, _, _)| !LEWATI.iter().any(|l| n.starts_with(l))).collect();
     let langsung: Vec<String> = kasus.iter()
@@ -9479,6 +9651,10 @@ fn galat_saat_jalan_sama_di_dua_mesin_sesudah_keluaran_sebelumnya() {
          "package main\nfn g() { let a = [1]  wok(a[5]) }\n\
           pub fn main() { let c = make_chan(int)\n spawn { g() }\n spawn { c <- 1 }\n wok(<-c)\n time::sleep(0.2)\n wok(\"lanjut\") }",
          "goroutine error: index [5] di luar batas"),
+        // Fase TAMAT (#833): dulu menunggu goroutine yang terblokir, tanpa pesan.
+        ("main gagal tidak menunggu goroutine yang terblokir",
+         "package main\npub fn main() { let c = make_chan(int)\n spawn { c <- 1 }\n wok(\"sebelum\")\n let a = [1]\n wok(a[5]) }",
+         "error: index [5] di luar batas"),
     ];
     for (nama, src, harap) in kasus {
         let i = jalankan_keluaran_penuh(src, false);
@@ -9487,5 +9663,18 @@ fn galat_saat_jalan_sama_di_dua_mesin_sesudah_keluaran_sebelumnya() {
         assert_eq!(awal(&i), awal(&v), "{}: keluaran sebelum galat harus sama banyak:\n{}\n---\n{}", nama, i, v);
         assert!(i.contains(harap), "{}: interpreter harus memuat {:?}, dapat:\n{}", nama, harap, i);
         assert!(v.contains(harap), "{}: --vm harus memuat {:?}, dapat:\n{}", nama, harap, v);
+    }
+}
+
+/// **Nilai bersarang di atas ±1 juta tingkat ditampilkan, dibandingkan, diurutkan dan disandikan JSON di dua
+/// mesin** (Fase SARANG-LEGA): dulu SIGABRT tanpa kalimat JRG. Penjelajahnya berlanjut di thread ber-stack baru
+/// saat stack menipis (`interpreter::di_stack_lega`), termasuk jembatan nilai ke `json::` di interpreter.
+#[test]
+fn nilai_bersarang_sejuta_tingkat_tidak_mematikan_proses() {
+    let src = "package main\npub fn main() {\n var a = []\n var b = []\n for i in 0..1100000 { a = [a]\n b = [b] }\n \
+               wok(len(str(a)), a == b, a < b, len(json::stringify(a)))\n}\n";
+    for vm in [false, true] {
+        let j = jalankan_keluaran_penuh(src, vm);
+        assert!(j.contains("2200002 true false 2200002"), "{}: {}", if vm { "--vm" } else { "interpreter" }, j);
     }
 }

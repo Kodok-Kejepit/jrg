@@ -78,15 +78,25 @@ impl Vm {
     /// Jalankan semua `defer` milik bingkai teratas, LIFO. `galat` adalah galat yang sedang membawa
     /// bingkainya keluar, kalau ada. Defer yang gagal tidak menghentikan defer berikutnya: galatnya
     /// menggantikan hasil yang sukses, atau jadi catatan di galat yang sudah ada — seperti acuan.
+    #[inline]
     pub(crate) fn run_defers(
+        &mut self, sp: Option<crate::lexer::Span>, galat: Option<VmError>,
+    ) -> Option<VmError> {
+        // Bingkai tanpa `defer` (hampir semua) kembali tanpa mengambil dan melepas `Vec` kosong.
+        if self.frames.last().map_or(true, |f| f.defers.is_empty()) { return galat; }
+        self.run_defers_isi(sp, galat)
+    }
+
+    fn run_defers_isi(
         &mut self, sp: Option<crate::lexer::Span>, mut galat: Option<VmError>,
     ) -> Option<VmError> {
         let defers = match self.frames.last_mut() {
             Some(f) => std::mem::take(&mut f.defers),
             None => return galat,
         };
-        for (defer_fn, args) in defers.into_iter().rev() {
-            let Err(d) = self.call_value_immediate(defer_fn, args) else { continue };
+        for (defer_fn, args, gagal) in defers.into_iter().rev() {
+            let hasil = match gagal { Some(g) => Err(g), None => self.call_value_immediate(defer_fn, args) };
+            let Err(d) = hasil else { continue };
             galat = Some(match galat {
                 None => d.isi_span_bila_kosong(sp),
                 Some(mut asli) => {
@@ -231,7 +241,7 @@ impl Vm {
             };
             if let Some((boleh, sebutan)) = sasaran {
                 let peta = isi.lock().unwrap();
-                if let Some(f) = crate::interpreter::galat_index::field_sebar_liar(peta.keys(), &boleh) {
+                if let Some(f) = crate::interpreter::galat_index::field_sebar_liar(peta.keys().map(|k| &**k), &boleh) {
                     return Err(crate::interpreter::galat_index::sebar_field_liar(&sebutan, f));
                 }
             }
@@ -282,7 +292,7 @@ impl Vm {
 
         // Builtins
         self.def("len", |a| match a.get(0) {
-            Some(Str(s))   => Ok(Int(s.chars().count() as i128)),
+            Some(Str(s))   => Ok(Int(crate::vm::value::jumlah_karakter(s) as i128)),
             Some(Array(v)) => Ok(Int(v.lock().unwrap().len() as i128)),
             Some(Tuple(t)) => Ok(Int(crate::vm::value::isi_tuple(t).len() as i128)),
             Some(Channel(c)) => Ok(Int(c.len() as i128)),
@@ -313,13 +323,24 @@ impl Vm {
             if let Some((ty, varian, muatan)) = Vm::tagged_parts(v) {
                 if varian == "Err" || varian == "None" || varian == "Error" {
                     let isi = muatan.map(|p| format!(": {}", p)).unwrap_or_default();
-                    return Err(format!(
-                        "program berhenti karena `{}::{}` merambat keluar dari `main`{} \
-                         — tangani dengan `match` di dalam `main`, atau pakai \
-                         `.unwrap_or(...)`, kalau kegagalan ini memang boleh terjadi",
-                        ty, varian, isi
-                    ));
+                    return Err(crate::interpreter::pesan_main_gagal(&ty, &varian, &isi));
                 }
+            }
+            Ok(Nil)
+        });
+        // `main -> int` (dipilih compiler dari anotasinya): bulat = kode keluar dengan aturan `exit`.
+        self.def("__kode_main__", |a| {
+            let v = a.get(0).unwrap_or(&Nil);
+            if let Some((ty, varian, muatan)) = Vm::tagged_parts(v) {
+                if varian == "Err" || varian == "None" || varian == "Error" {
+                    let isi = muatan.map(|p| format!(": {}", p)).unwrap_or_default();
+                    return Err(crate::interpreter::pesan_main_gagal(&ty, &varian, &isi));
+                }
+            }
+            match v {
+                Int(n) => crate::host::pasang_kode_main(*n)?,
+                Unit | Nil => {}
+                lain => return Err(crate::host::pesan_main_bukan_kode(&lain.type_name_penuh())),
             }
             Ok(Nil)
         });
@@ -369,6 +390,8 @@ impl Vm {
             a, crate::dok::crypto::f_sha512));
         self.def("crypto::hmac_sha256", |a| crate::stdlib::sistem::lewat_hasil(
             a, crate::dok::crypto::f_hmac_sha256));
+        self.def("crypto::compare_digest", |a| crate::stdlib::sistem::lewat_hasil(
+            a, crate::dok::crypto::f_compare_digest));
         self.def("crypto::crc32", |a| crate::stdlib::sistem::lewat_hasil(
             a, crate::dok::crypto::f_crc32));
         self.def("crypto::aes_gen_key", |a| crate::stdlib::sistem::lewat_hasil(
@@ -540,17 +563,33 @@ impl Vm {
         )* } }
         // `abs`/`sqrt`/`floor`/`ceil`/`round` telanjang ada di tabel alias: ditulis di sini
         // keduanya jadi DUA closure, yang cuma beralamat sama kalau pengoptimal menggabungnya.
-        math_acuan!(
-            "math::abs" => MathAbs,         "math::sqrt" => MathSqrt,
-            "math::floor" => MathFloor,     "math::ceil" => MathCeil,
-            "math::round" => MathRound,
+        // Pecahan satu argumen atas angka: tabel `unary_f64` yang sama dengan acuan, tanpa jembatan nilai.
+        macro_rules! math_pecahan { ($($n:expr => $k:ident),* $(,)?) => { $(
+            self.def($n, |a| {
+                use crate::interpreter::builtin::NativeFnKind as K;
+                let op = crate::interpreter::Interpreter::unary_f64(&K::$k).expect("math_pecahan");
+                match a {
+                    [Float(f)] => Ok(Float(op(*f))),
+                    [Int(n)] => Ok(Float(op(*n as f64))),
+                    _ => crate::stdlib::sistem::lewat(a, |v|
+                        crate::interpreter::Interpreter::dispatch_math_lepas(&K::$k, v)),
+                }
+            });
+        )* } }
+        math_pecahan!(
+            "math::sqrt" => MathSqrt,       "math::floor" => MathFloor,
+            "math::ceil" => MathCeil,       "math::round" => MathRound,
             "math::trunc" => MathTrunc,     "math::sin" => MathSin,
             "math::cos" => MathCos,         "math::tan" => MathTan,
             "math::asin" => MathAsin,       "math::acos" => MathAcos,
-            "math::atan" => MathAtan,       "math::atan2" => MathAtan2,
-            "math::ln" => MathLn,           "math::log" => MathLog,
+            "math::atan" => MathAtan,       "math::ln" => MathLn,
             "math::log2" => MathLog2,       "math::log10" => MathLog10,
-            "math::exp" => MathExp,         "math::pow" => MathPow,
+            "math::exp" => MathExp,
+        );
+        math_acuan!(
+            "math::abs" => MathAbs,
+            "math::atan2" => MathAtan2,     "math::log" => MathLog,
+            "math::pow" => MathPow,
             "math::min" => MathMin,         "math::max" => MathMax,
             "math::clamp" => MathClamp,     "math::sign" => MathSign,
             "math::factorial" => MathFact,  "math::gcd" => MathGcd,
@@ -571,7 +610,7 @@ impl Vm {
         // ──────────
 
         // Ketiganya lewat `teks_vm`; dulu menjawab bentuk tanda tangannya.
-        self.def("str::len", |a| Ok(Int(teks_vm(a.get(0), "str::len")?.chars().count() as i128)));
+        self.def("str::len", |a| Ok(Int(crate::vm::value::jumlah_karakter(&teks_vm(a.get(0), "str::len")?) as i128)));
         self.def("str::to_uppercase",
             |a| Ok(Str(Arc::new(teks_vm(a.get(0), "str::to_uppercase")?.to_uppercase()))));
         self.def("str::to_lowercase",
@@ -606,7 +645,11 @@ impl Vm {
         // polos — dan array kosong bukan error, tapi `Option::None`.
         self.def("arr::pop",  |a| match a.get(0) {
             Some(Array(v)) => {
-                let mut isi = v.lock().unwrap().clone();
+                // Larik yang dipindahkan ke sini (`a = arr::pop(a)[0]`, `b, x = b.pop()`) cuma dipegang
+                // argumen ini: isinya diambil, bukan disalin utuh — itu yang membuat pop berulang kuadrat.
+                let mut isi = if Arc::strong_count(v) == 1 && Arc::weak_count(v) == 0 {
+                    std::mem::take(&mut *v.lock().unwrap())
+                } else { v.lock().unwrap().clone() };
                 let diambil = match isi.pop() {
                     Some(x) => vm_some(x),
                     None    => vm_none(),
@@ -622,10 +665,7 @@ impl Vm {
         // Pesannya menyebut apa yang KURANG, bukan cuma tanda tangannya.
         // Interpreter menolaknya dengan kalimat yang sama.
         self.def("arr::contains", |a| match (a.get(0), a.get(1)) {
-            (Some(Array(v)), Some(item)) => {
-                let isi = v.lock().unwrap().clone();
-                Ok(Bool(crate::vm::value::ada_vm_eq(isi.iter(), item)?))
-            }
+            (Some(Array(v)), Some(item)) => Ok(Bool(crate::vm::value::posisi_vm_eq_di(v, item)?.is_some())),
             // Kalimat bentuk NAMESPACE: `def` ini melayani dua pintu, dan
             // pintu method sudah dijawab lebih dulu oleh pemeriksaan di
             // `GetMethod` — yang tahu berapa argumen yang benar-benar DITULIS.

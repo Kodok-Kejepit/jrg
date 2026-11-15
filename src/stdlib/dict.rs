@@ -7,12 +7,11 @@ use crate::interpreter::{
 };
 use crate::vm::value::VmValue;
 use crate::vm::vm::Vm;
-use std::collections::HashMap;
 
 /// Isi dict dari argumen ke-`ke` (mulai 1). Struct dan enum juga `Map` di VM,
 /// jadi yang diterima cuma yang tipenya `dict` — tanpa itu
 /// `dict::keys(Option::Some(1))` menjawab kunci internalnya.
-fn isi(v: Option<&VmValue>, ke: usize, fname: &str) -> Result<HashMap<String, VmValue>, String> {
+fn isi(v: Option<&VmValue>, ke: usize, fname: &str) -> Result<crate::vm::value::IsiPeta, String> {
     let Some(d) = v else { return Err(pesan_dict_kurang(fname)) };
     // Tipe dibaca dari label, tanpa mengunci peta.
     let tipe = d.type_name_penuh();
@@ -24,7 +23,7 @@ fn isi(v: Option<&VmValue>, ke: usize, fname: &str) -> Result<HashMap<String, Vm
 
 /// Baca isi sebuah dict TANPA menyalinnya — `isi` menyalin seluruh peta, jadi `dict::has`
 /// dulu O(n) per panggilan.
-fn pinjam_isi<R>(v: Option<&VmValue>, ke: usize, fname: &str, baca: impl FnOnce(&HashMap<String, VmValue>) -> R) -> Result<R, String> {
+fn pinjam_isi<R>(v: Option<&VmValue>, ke: usize, fname: &str, baca: impl FnOnce(&crate::vm::value::IsiPeta) -> R) -> Result<R, String> {
     let Some(d) = v else { return Err(pesan_dict_kurang(fname)) };
     let tipe = d.type_name_penuh();
     match d {
@@ -42,23 +41,18 @@ fn milik_tunggal(v: Option<&VmValue>) -> Option<&std::sync::Arc<crate::vm::value
     }
 }
 
-fn kunci(v: Option<&VmValue>, fname: &str) -> Result<String, String> {
-    match v {
-        Some(VmValue::Str(s)) => Ok(s.to_string()),
-        // Kunci non-teks diterima dengan diformat, sama seperti interpreter
-        // memperlakukan `d[1]`.
-        Some(other) => Ok(format!("{}", other)),
-        None => Err(pesan_dict_kurang(fname)),
-    }
+/// Kunci non-teks diterima dengan diformat, sama seperti interpreter memperlakukan `d[1]`.
+fn kunci(v: Option<&VmValue>, fname: &str) -> Result<crate::vm::value::Kunci, String> {
+    v.map(crate::vm::value::Kunci::dari_nilai).ok_or_else(|| pesan_dict_kurang(fname))
 }
 
-fn jadi_dict(m: HashMap<String, VmValue>) -> VmValue {
-    VmValue::map(m)
+fn jadi_dict(m: crate::vm::value::IsiPeta) -> VmValue {
+    VmValue::Map(std::sync::Arc::new(crate::vm::value::Peta::dari_isi(crate::vm::value::Label::Dict, m)))
 }
 
 /// Kunci yang terurut — dipakai semua fungsi yang mengembalikan urutan.
-fn kunci_terurut(m: &HashMap<String, VmValue>) -> Vec<String> {
-    let mut k: Vec<String> = m.keys().cloned().collect();
+fn kunci_terurut(m: &crate::vm::value::IsiPeta) -> Vec<String> {
+    let mut k: Vec<String> = m.keys().map(|k| k.to_string()).collect();
     k.sort();
     k
 }
@@ -77,7 +71,7 @@ pub fn register(vm: &mut Vm) {
             VmValue::Array(arr) => arr.lock().unwrap_or_else(|p| p.into_inner()).clone(),
             lain => return Err(pesan_arg_harus_array("dict::from_pairs", 1, &lain.type_name_penuh())),
         };
-        let mut m = HashMap::new();
+        let mut m = crate::vm::value::Peta::isi_untuk(&crate::vm::value::Label::Dict, daftar.len());
         for (i, pasangan) in daftar.iter().enumerate() {
             let bagian: Vec<VmValue> = match pasangan {
                 VmValue::Array(p) => p.lock().unwrap_or_else(|q| q.into_inner()).clone(),
@@ -92,7 +86,7 @@ pub fn register(vm: &mut Vm) {
         Ok(jadi_dict(m))
     });
 
-    vm.def("dict::new", |_| Ok(jadi_dict(HashMap::new())));
+    vm.def("dict::new", |_| Ok(jadi_dict(crate::vm::value::Peta::isi_untuk(&crate::vm::value::Label::Dict, 0))));
 
     vm.def("dict::get", |a| {
         cek_dict_kurang("dict::get", a.len())?;

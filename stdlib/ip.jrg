@@ -1,0 +1,239 @@
+package std_ip
+
+// Alamat IPv4/IPv6 dan jaringan CIDR dengan satu ejaan per alamat: nol di depan (`010.0.0.1` dibaca oktal oleh
+// `inet_aton`, desimal oleh pengurai lain — kelas CVE-2021-29921), heksa, bentuk pendek `127.1`, zona `%eth0`,
+// spasi dan CIDR yang bit host-nya terisi ditolak. IPv4 di dalam IPv6 (`::ffff:a.b.c.d`) digolongkan menurut IPv4-nya.
+
+pub struct Alamat {
+    pub versi: int,
+    pub bagian: array,
+}
+
+pub struct Jaringan {
+    pub alamat: Alamat,
+    pub prefiks: int,
+}
+
+fn _kutip(s) {
+    for _, r in str::chars(s) {
+        let k = r as int
+        if k < 32 || k == 127 { return «(${len(s)} karakter, memuat karakter kendali)» }
+    }
+    return len(s) <= 45 $ «`${s}`» : «(${len(s)} karakter)»
+}
+
+fn _desimal(t) {
+    if t == "" || len(t) > 3 { return None }
+    var n = 0
+    for _, r in str::chars(t) {
+        let c = str(r)
+        if !(c >= "0" && c <= "9") { return None }
+        n = n * 10 + str::to_int(c)
+    }
+    if len(t) > 1 && t[0:1] == "0" { return None }
+    return Some(n)
+}
+
+fn _v4(s) {
+    let p = str::split(s, ".")
+    if len(p) != 4 { return Err("IPv4 harus tepat empat bagian bertitik (bentuk pendek seperti `127.1` ditolak)") }
+    var b = []
+    for i, t in p {
+        match _desimal(t) {
+            Some(n) => {
+                if n > 255 { return Err(«bagian ke-${i + 1} (${n}) di atas 255») }
+                b = arr::push(b, n)
+            }
+            None => {
+                if len(t) > 1 && t[0:1] == "0" && len(t) <= 3 { return Err(«bagian ke-${i + 1} berawalan nol — dibaca oktal oleh sebagian pengurai») }
+                return Err(«bagian ke-${i + 1} bukan bilangan desimal 0 sampai 255»)
+            }
+        }
+    }
+    return Ok(b)
+}
+
+fn _heks16(t) {
+    if t == "" || len(t) > 4 { return None }
+    var n = 0
+    for _, r in str::chars(t) {
+        let c = str::lower(str(r))
+        match str::index_of("0123456789abcdef", c) {
+            Some(d) => { n = n * 16 + d }
+            None => { return None }
+        }
+    }
+    return Some(n)
+}
+
+fn _kelompok(bagian) {
+    var g = []
+    for _, t in bagian {
+        if str::contains(t, ".") { return Err(«IPv4 di dalam IPv6 cuma boleh di bagian paling akhir») }
+        match _heks16(t) {
+            Some(n) => { g = arr::push(g, n) }
+            None => { return Err(«kelompok ${_kutip(t)} bukan 1 sampai 4 digit heksadesimal») }
+        }
+    }
+    return Ok(g)
+}
+
+fn _v6(s) {
+    if str::contains(s, "%") { return Err("zona (`%..`) tidak didukung — artinya bergantung pada mesin yang membaca") }
+    if str::starts_with(s, "[") { return Err("tulis alamat tanpa `[ ]` (kurung siku cuma untuk URL)") }
+    var badan = s
+    var ekor = []
+    let terakhir = str::split(s, ":")
+    let akhir = terakhir[len(terakhir) - 1]
+    if str::contains(akhir, ".") {
+        let v4 = _v4(akhir)?
+        ekor = [v4[0] * 256 + v4[1], v4[2] * 256 + v4[3]]
+        badan = s[0:len(s) - len(akhir)]
+        if str::ends_with(badan, ":") && !str::ends_with(badan, "::") { badan = badan[0:len(badan) - 1] }
+    }
+    let lebar = 8 - len(ekor)
+    let dua = str::split(badan, "::")
+    if len(dua) > 2 { return Err("`::` cuma boleh sekali") }
+    if len(dua) == 2 {
+        let kiri = dua[0] == "" $ [] : str::split(dua[0], ":")
+        let kanan = dua[1] == "" $ [] : str::split(dua[1], ":")
+        let gk = _kelompok(kiri)?
+        let gn = _kelompok(kanan)?
+        if len(gk) + len(gn) >= lebar { return Err("`::` harus mewakili paling sedikit satu kelompok nol") }
+        return Ok(arr::concat(arr::concat(gk, arr::fill(0, lebar - len(gk) - len(gn))), arr::concat(gn, ekor)))
+    }
+    if badan == "" { return Err("IPv6 kosong") }
+    let g = _kelompok(str::split(badan, ":"))?
+    if len(g) != lebar { return Err(«IPv6 butuh 8 kelompok, dapat ${len(g) + len(ekor)}») }
+    return Ok(arr::concat(g, ekor))
+}
+
+/// `Ok(Alamat)` dari teks IPv4 (`192.0.2.1`) atau IPv6 (`2001:db8::1`, `::ffff:192.0.2.1`); `Err` kalau tidak kanonik.
+pub fn parse(s) {
+    if len(s) > 45 || s == "" { return Err(«alamat IP ${_kutip(s)} tidak sah (panjang ${len(s)})») }
+    if str::contains(s, ":") {
+        let g = _v6(s).map_err(|e| «alamat IP ${_kutip(s)}: ${e}»)?
+        return Ok(Alamat { versi: 6, bagian: g })
+    }
+    let b = _v4(s).map_err(|e| «alamat IP ${_kutip(s)}: ${e}»)?
+    return Ok(Alamat { versi: 4, bagian: b })
+}
+
+fn _heks(n) {
+    let d = "0123456789abcdef"
+    if n == 0 { return "0" }
+    var s = ""
+    var x = n
+    while x > 0 {
+        s = d[x % 16:x % 16 + 1] + s
+        x = x / 16
+    }
+    return s
+}
+
+/// Bentuk kanonik: IPv4 desimal, IPv6 RFC 5952 (huruf kecil, deret nol terpanjang ≥ 2 diringkas `::`).
+pub fn format(a) {
+    if a.versi == 4 { return str::join(arr::map(a.bagian, |x| str(x)), ".") }
+    // RFC 5952 §5: IPv4 di dalam IPv6 ditulis dengan bagian IPv4 bertitik.
+    match petakan_v4(a) {
+        Some(v4) => { return "::ffff:" + format(v4) }
+        None => {}
+    }
+    let g = a.bagian
+    var mulai = -1
+    var panjang = 0
+    var i = 0
+    while i < 8 {
+        if g[i] == 0 {
+            var j = i
+            while j < 8 && g[j] == 0 { j += 1 }
+            if j - i > panjang && j - i >= 2 {
+                mulai = i
+                panjang = j - i
+            }
+            i = j
+        } else {
+            i += 1
+        }
+    }
+    let teks = arr::map(g, |x| _heks(x))
+    if mulai < 0 { return str::join(teks, ":") }
+    return str::join(teks[0:mulai], ":") + "::" + str::join(teks[mulai + panjang:], ":")
+}
+
+// Bit ke-k dari kiri (0-based) sebuah alamat.
+fn _bit(a, k) {
+    let lebar = a.versi == 4 $ 8 : 16
+    let v = a.bagian[k / lebar]
+    return (v >> (lebar - 1 - k % lebar)) & 1
+}
+
+/// `Ok(Jaringan)` dari `alamat/prefiks`; bit host yang terisi (`10.0.0.1/8`) ditolak — tulis `10.0.0.0/8`.
+pub fn cidr(s) {
+    let p = str::split(s, "/")
+    if len(p) != 2 { return Err(«jaringan ${_kutip(s)} harus berbentuk alamat/prefiks») }
+    let a = parse(p[0])?
+    let maks = a.versi == 4 $ 32 : 128
+    let Some(n) = _desimal(p[1]) else { return Err(«prefiks ${_kutip(p[1])} bukan bilangan desimal tanpa nol di depan») }
+    if n > maks { return Err(«prefiks /${n} di atas ${maks} untuk IPv${a.versi}») }
+    for _, k in range(n, maks) {
+        if _bit(a, k) != 0 { return Err(«jaringan ${_kutip(s)} punya bit host yang terisi — maksudnya ${format(_jaringan(a, n))}/${n}?») }
+    }
+    return Ok(Jaringan { alamat: a, prefiks: n })
+}
+
+fn _jaringan(a, n) {
+    let lebar = a.versi == 4 $ 8 : 16
+    var b = a.bagian
+    for i, v in b {
+        let awal = i * lebar
+        if awal >= n {
+            b[i] = 0
+        } else if awal + lebar > n {
+            let simpan = n - awal
+            b[i] = (v >> (lebar - simpan)) << (lebar - simpan)
+        }
+    }
+    return Alamat { versi: a.versi, bagian: b }
+}
+
+/// Apakah alamat `a` di dalam jaringan `j`. Versi yang berbeda selalu `false` (pakai `petakan_v4` dulu).
+pub fn berisi(j, a) {
+    if j.alamat.versi != a.versi { return false }
+    for _, k in range(j.prefiks) {
+        if _bit(j.alamat, k) != _bit(a, k) { return false }
+    }
+    return true
+}
+
+/// IPv4 di dalam IPv6 (`::ffff:a.b.c.d`) jadi `Some(alamat IPv4)`, selain itu `None`.
+pub fn petakan_v4(a) {
+    if a.versi != 6 { return None }
+    let g = a.bagian
+    if g[0] != 0 || g[1] != 0 || g[2] != 0 || g[3] != 0 || g[4] != 0 || g[5] != 65535 { return None }
+    return Some(Alamat { versi: 4, bagian: [g[6] / 256, g[6] % 256, g[7] / 256, g[7] % 256] })
+}
+
+const _GOLONGAN4 = [["0.0.0.0/8", "tak-ditentukan"], ["127.0.0.0/8", "loopback"], ["10.0.0.0/8", "privat"],
+    ["172.16.0.0/12", "privat"], ["192.168.0.0/16", "privat"], ["169.254.0.0/16", "link-local"],
+    ["100.64.0.0/10", "cgnat"], ["224.0.0.0/4", "multicast"], ["240.0.0.0/4", "cadangan"]]
+const _GOLONGAN6 = [["::/128", "tak-ditentukan"], ["::1/128", "loopback"], ["fc00::/7", "privat"],
+    ["fe80::/10", "link-local"], ["ff00::/8", "multicast"]]
+
+/// Golongan alamat: `loopback`, `privat`, `link-local`, `cgnat`, `multicast`, `tak-ditentukan`, `cadangan`, `siaran`,
+/// atau `publik`. IPv4 di dalam IPv6 digolongkan menurut IPv4-nya (`::ffff:127.0.0.1` adalah `loopback`).
+pub fn golongan(a) {
+    match petakan_v4(a) {
+        Some(v4) => { return golongan(v4) }
+        None => {}
+    }
+    if a.versi == 4 && a.bagian == [255, 255, 255, 255] { return "siaran" }
+    let daftar = a.versi == 4 $ _GOLONGAN4 : _GOLONGAN6
+    for _, g in daftar {
+        if berisi(cidr(g[0]).unwrap(), a) { return g[1] }
+    }
+    return "publik"
+}
+
+/// `true` kalau alamatnya publik (bukan loopback, privat, link-local, CGNAT, multicast, cadangan atau tak-ditentukan).
+pub fn publik(a) { return golongan(a) == "publik" }

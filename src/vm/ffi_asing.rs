@@ -18,6 +18,17 @@ pub enum Asing {
     Php(crate::ffi::php::PhpRef),
     /// `h.nama` di posisi panggilan: method milik worker, belum dipanggil.
     Metode(Arc<str>),
+    /// Fungsi milik program yang hidup di luar mesin VM (biner `--emit-llvm`, lewat jembatan).
+    Fungsi(Arc<FungsiLuar>),
+}
+
+/// Badan fungsi di luar mesin: menerima argumen VM, menjawab nilai VM.
+pub struct FungsiLuar {
+    pub panggil: Box<dyn Fn(&[VmValue]) -> Result<VmValue, String> + Send + Sync>,
+}
+
+impl std::fmt::Debug for FungsiLuar {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "<fn>") }
 }
 
 impl Asing {
@@ -35,7 +46,7 @@ impl Asing {
             Asing::Py(h) => Value::PyObj(h.clone()),
             Asing::Js(h) => Value::JsObj(h.clone()),
             Asing::Php(h) => Value::PhpObj(h.clone()),
-            Asing::Metode(_) => return None,
+            Asing::Metode(_) | Asing::Fungsi(_) => return None,
         })
     }
 
@@ -215,6 +226,7 @@ impl Vm {
         }
     }
 }
+
 
 #[cfg(test)]
 mod tes {

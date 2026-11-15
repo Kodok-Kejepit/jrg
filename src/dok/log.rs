@@ -101,7 +101,7 @@ pub fn log_with(args: &[Value]) -> Result<Value, String> {
         Some(Value::Str(s)) => parse_level(s)?,
         _ => return Err("dok::log_with(level, msg, fields): argumen 1 harus string level".to_string()),
     };
-    let msg = match args.get(1) { Some(Value::Str(s)) => s.clone(), Some(o) => format!("{}", o), None => String::new() };
+    let msg = match args.get(1) { Some(Value::Str(s)) => String::clone(s), Some(o) => format!("{}", o), None => String::new() };
     let fields_arr = match args.get(2) { Some(Value::Array(a)) => a.clone(), _ => Vec::new().into() };
 
     if level < LOG_LEVEL.load(Ordering::Relaxed) as usize { return Ok(Value::Unit); }
@@ -129,7 +129,7 @@ pub fn log_set_level(args: &[Value]) -> Result<Value, String> {
 }
 
 pub fn log_to_file(args: &[Value]) -> Result<Value, String> {
-    let path = match args.get(0) { Some(Value::Str(s)) => s.clone(), _ => return Err("dok::log_to_file(path)".to_string()) };
+    let path = match args.get(0) { Some(Value::Str(s)) => String::clone(s), _ => return Err("dok::log_to_file(path)".to_string()) };
     match std::fs::OpenOptions::new().create(true).append(true).open(&path) {
         Ok(f) => {
             *log_file().lock().unwrap_or_else(|p| p.into_inner()) = Some(f);
@@ -141,7 +141,7 @@ pub fn log_to_file(args: &[Value]) -> Result<Value, String> {
 
 pub fn log_set_name(args: &[Value]) -> Result<Value, String> {
     let name = match args.get(0) { Some(Value::Str(s)) => s.clone(), _ => return Err("dok::log_set_name(name)".to_string()) };
-    *log_name().lock().unwrap_or_else(|p| p.into_inner()) = Some(name);
+    *log_name().lock().unwrap_or_else(|p| p.into_inner()) = Some(String::clone(&name));
     Ok(Value::Unit)
 }
 

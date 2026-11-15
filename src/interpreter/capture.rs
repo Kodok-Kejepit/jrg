@@ -6,6 +6,35 @@ use crate::parser::{
     Block, Expr, ForStmt, FnBody, IfStmt, MatchBody, SelectCase, Stmt, TemplatePart,
 };
 
+/// `a` di `let r = arr::pop(a)` / `a.pop()` yang LANGSUNG diikuti `a = e` (`e` tidak menyebut `a`):
+/// `a` tidak dibaca lagi sebelum ditimpa, jadi dua mesin boleh memindahkannya ke `pop` alih-alih menyalin.
+pub fn pindah_sebelum_ditimpa(kini: &Stmt, berikut: Option<&Stmt>) -> Option<String> {
+    let Stmt::Let(l) = kini else { return None };
+    let crate::parser::Pattern::Ident { name: r, .. } = &l.pattern else { return None };
+    let a = nama_pop(&l.init)?;
+    if *r == a { return None; }
+    let Some(Stmt::Assign(t)) = berikut else { return None };
+    let tepat = t.targets.len() == 1 && t.values.len() == 1 && matches!(t.op, crate::parser::AssignOp::Eq)
+        && matches!(&t.targets[0], Expr::Ident(n, _) if *n == a)
+        && !names_mentioned(&t.values[0]).contains(&a);
+    tepat.then_some(a)
+}
+
+/// Lokal yang lariknya diambil `pop`: `arr::pop(a)` atau `a.pop()`.
+pub fn nama_pop(e: &Expr) -> Option<String> {
+    match e {
+        Expr::Method { obj, method, args, .. } if method == "pop" && args.is_empty() => match &**obj {
+            Expr::Ident(n, _) => Some(n.clone()),
+            _ => None,
+        },
+        Expr::Call { func, args, .. } if args.len() == 1 => match (&**func, &args[0]) {
+            (Expr::PathExpr { segments, .. }, Expr::Ident(n, _)) if segments == &["arr", "pop"] => Some(n.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
 /// Semua nama yang disebut di dalam sebuah ekspresi (over-approximation —
 /// lihat catatan modul).
 pub fn names_mentioned(e: &Expr) -> HashSet<String> {
@@ -95,6 +124,33 @@ pub fn blok_kembali_tuple_self(b: &Block) -> bool {
     b.tail.is_none() && matches!(b.stmts.last(), Some(Stmt::Return(r)) if kembali_tuple_diri(r))
 }
 
+/// Awalan penanda "`return` ini mengembalikan nama X" (telanjang atau elemen pertama tuple; kosong = lain).
+const PENANDA_KEMBALI_OLEH: &str = "\u{0}kembali-oleh:";
+
+fn nama_kembali(r: &crate::parser::ReturnStmt) -> Option<&str> {
+    let pertama = match r.values.as_slice() {
+        [Expr::Tuple { elems, .. }] => elems.first()?,
+        vs => vs.first()?,
+    };
+    match pertama { Expr::Ident(n, _) => Some(n), _ => None }
+}
+
+/// Badan fungsi yang cuma pernah mengembalikan `nama` (atau `(nama, ..)`), tanpa closure: hasilnya
+/// tidak bisa berbagi isi dengan argumen lain, karena tiap penugasan ke `nama` di badan sudah menyalin.
+pub fn blok_hanya_kembali(b: &Block, nama: &str) -> bool {
+    let mut out = HashSet::new();
+    walk_block(b, &mut out);
+    if out.contains(PENANDA_CLOSURE) { return false; }
+    let mut oleh = out.iter().filter_map(|n| n.strip_prefix(PENANDA_KEMBALI_OLEH));
+    if !oleh.all(|n| n == nama) { return false; }
+    match b.tail.as_deref() {
+        None => true,
+        Some(Expr::Ident(n, _)) => n == nama,
+        Some(Expr::Tuple { elems, .. }) => matches!(elems.first(), Some(Expr::Ident(n, _)) if n == nama),
+        Some(_) => false,
+    }
+}
+
 /// Awalan penanda "nama ini disebut di dalam closure atau `spawn`".
 const PENANDA_TANGKAP: &str = "\u{0}tangkap:";
 
@@ -103,6 +159,20 @@ fn tandai_tertangkap(dalam: HashSet<String>, out: &mut HashSet<String>) {
         if !n.starts_with('\u{0}') { out.insert(format!("{}{}", PENANDA_TANGKAP, n)); }
         out.insert(n);
     }
+}
+
+/// Nama yang disebut DI DALAM closure (atau `spawn`) di blok/ekspresi ini — hanya merekalah yang bisa
+/// ditulis sebuah panggilan lewat closure; perkiraan "semua nama di fungsi yang punya closure" terlalu lebar.
+pub fn ditangkap_closure_blok(b: &Block) -> HashSet<String> {
+    let mut out = HashSet::new();
+    walk_block(b, &mut out);
+    out.iter().filter_map(|n| n.strip_prefix(PENANDA_TANGKAP).map(str::to_string)).collect()
+}
+
+pub fn ditangkap_closure_ekspr(e: &Expr) -> HashSet<String> {
+    let mut out = HashSet::new();
+    walk_expr(e, &mut out);
+    out.iter().filter_map(|n| n.strip_prefix(PENANDA_TANGKAP).map(str::to_string)).collect()
 }
 
 /// Per nama: apakah badan ini cuma MEMBACANYA — tidak menulisinya, dan tidak menyebutnya di
@@ -278,6 +348,7 @@ fn walk_stmt(s: &Stmt, out: &mut HashSet<String>) {
             }
         }
         Stmt::Return(r) => {
+            out.insert(format!("{}{}", PENANDA_KEMBALI_OLEH, nama_kembali(r).unwrap_or("")));
             let diri = matches!(r.values.as_slice(), [Expr::Ident(n, _)] if n == "self");
             out.insert(if diri { PENANDA_KEMBALI_DIRI } else if kembali_tuple_diri(r) { PENANDA_KEMBALI_TUPEL }
                        else { PENANDA_KEMBALI_LAIN }.to_string());

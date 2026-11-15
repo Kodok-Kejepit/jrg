@@ -1,0 +1,44 @@
+package main
+import "std/markdown"
+
+fn h(s) { return markdown::ke_html(s) }
+
+fn test_bentuk_dasar() {
+    assert_eq(h("# Judul\n\nIsi **tebal** dan *miring*.\nlanjut"), "<h1>Judul</h1>\n<p>Isi <strong>tebal</strong> dan <em>miring</em>. lanjut</p>")
+    assert_eq(h("- a\n- b\n\n1. x\n2. y"), "<ul>\n<li>a</li>\n<li>b</li>\n</ul>\n<ol>\n<li>x</li>\n<li>y</li>\n</ol>")
+    assert_eq(h("> kutip\n---"), "<blockquote>kutip</blockquote>\n<hr>")
+    assert_eq(h("pakai `a < b` di sini"), "<p>pakai <code>a &lt; b</code> di sini</p>")
+    assert_eq(h("```jrg\nlet x = <b>\n```"), "<pre><code class=\"bahasa-jrg\">let x = &lt;b&gt;</code></pre>")
+    assert_eq(h("[JRG](https://jawarustgoplusplus.web.id/a?b=1&c=2)"), "<p><a href=\"https://jawarustgoplusplus.web.id/a?b=1&amp;c=2\">JRG</a></p>")
+    assert_eq(h("![logo](/img/a.png)"), "<p><img src=\"/img/a.png\" alt=\"logo\"></p>")
+    assert_eq(h("satu ` saja"), "<p>satu ` saja</p>")
+    assert_eq(h("#tagar bukan judul"), "<p>#tagar bukan judul</p>")
+}
+
+fn test_xss_tidak_lolos() {
+    let jahat = ["<script>alert(1)</script>", "<img src=x onerror=alert(1)>", "[x](javascript:alert(1))",
+        "[x](JaVaScRiPt:alert(1))", "[x](java\tscript:alert(1))", "[x]( javascript:alert(1))",
+        "[x](javas&#99;ript:alert(1))", "![x](data:text/html;base64,PHNjcmlwdD4=)", "[x](vbscript:msgbox)",
+        "[x\" onmouseover=\"alert(1)](https://a)", "[x](https://a\" onmouseover=\"alert(1))", "```\"><script>\nx\n```",
+        "**<svg onload=alert(1)>**", "`<script>`"]
+    for _, s in jahat {
+        let o = h(s)
+        assert(!str::contains(o, "<script"), o)
+        assert(!str::contains(str::lower(o), "javascript:"), o)
+        assert(!str::contains(str::lower(o), "vbscript:"), o)
+        assert(!str::contains(o, "data:text"), o)
+        assert(!str::contains(o, "\" on"), o)
+        assert(!str::contains(o, "<img src=x"), o)
+        assert(!str::contains(o, "<svg"), o)
+    }
+    assert_eq(h("[x](javascript:alert(1))"), "<p>x</p>")
+}
+
+fn test_masukan_jahat_tetap_linear() {
+    for _, pola in ["[", "[a](", "(((", "![x](", "[a](((((("] {
+        let t0 = time::now_ms()
+        assert(len(h(str::repeat(pola, 4000))) > 0)
+        assert(time::now_ms() - t0 < 30000)
+    }
+    assert_eq(h("[a*b*c](https://x/*y*)"), "<p><a href=\"https://x/%2Ay%2A\">a<em>b</em>c</a></p>")
+}

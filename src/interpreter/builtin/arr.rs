@@ -545,12 +545,8 @@ impl Interpreter {
             ArrRotate => {
                 if args.len() < 2 { return runtime_err!("{}", crate::interpreter::pesan_rotate_kurang()); }
                 let mut arr = match args[0].clone() { Value::Array(a) => a, o => return runtime_err!("{}", crate::interpreter::pesan_arg_harus_array("arr::rotate", 1, &o.type_name())) };
+                let n = bulat_untuk("arr::rotate", &args[1])?;
                 if arr.is_empty() { return Ok(Value::Array(arr)); }
-                let n = match &args[1] {
-                    Value::Int(n) => *n,
-                    o => return runtime_err!("{}",
-                        crate::interpreter::pesan_rotate_n(&o.type_name())),
-                };
                 let len = arr.len() as i128;
                 let shift = ((n % len) + len) % len;
                 arr.rotate_left(shift as usize);

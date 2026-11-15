@@ -189,10 +189,10 @@ fn angka(s: &str, b: &[u8], pos: &mut usize) -> Result<Json, String> {
     let digit_mulai = *pos;
     while *pos < b.len() && b[*pos].is_ascii_digit() { *pos += 1; }
     let digit = *pos - digit_mulai;
-    let tak_lengkap = |pos: usize| format!("angka tidak lengkap: `{}`", s.get(mulai..pos).unwrap_or(""));
+    let tak_lengkap = |pos: usize| format!("angka tidak lengkap: `{}`", crate::kutip_inti::kutip(s.get(mulai..pos).unwrap_or("")));
     if digit == 0 { return Err(tak_lengkap(*pos)); }
     if digit > 1 && b[digit_mulai] == b'0' {
-        return Err(format!("angka JSON tidak boleh berawalan nol: `{}`", s.get(mulai..*pos).unwrap_or("")));
+        return Err(format!("angka JSON tidak boleh berawalan nol: `{}`", crate::kutip_inti::kutip(s.get(mulai..*pos).unwrap_or(""))));
     }
     if b.get(*pos) == Some(&b'.') {
         pecahan = true;
@@ -213,12 +213,12 @@ fn angka(s: &str, b: &[u8], pos: &mut usize) -> Result<Json, String> {
     if pecahan {
         match t.parse::<f64>() {
             Ok(f) if f.is_finite() => Ok(Json::Float(f)),
-            Ok(_) => Err(format!("pecahan `{}` di luar jangkauan 64 bit", t)),
-            Err(_) => Err(format!("`{}` bukan angka", t)),
+            Ok(_) => Err(format!("pecahan `{}` di luar jangkauan 64 bit", crate::kutip_inti::kutip(t))),
+            Err(_) => Err(format!("`{}` bukan angka", crate::kutip_inti::kutip(t))),
         }
     } else {
         t.parse::<i128>().map(Json::Int)
-            .map_err(|_| format!("bilangan bulat `{}` di luar jangkauan 128 bit", t))
+            .map_err(|_| format!("bilangan bulat `{}` di luar jangkauan 128 bit", crate::kutip_inti::kutip(t)))
     }
 }
 

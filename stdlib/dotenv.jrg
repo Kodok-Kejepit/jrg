@@ -1,0 +1,94 @@
+package std_dotenv
+
+// Berkas `.env`: `KUNCI=nilai`, `export KUNCI=nilai`, komentar `#`. `'..'` apa adanya, `".."` dengan `\n` `\t`
+// `\"` `\\`, tanpa kutip dipangkas dan ` #` memulai komentar. `${X}` TIDAK diekspansi, kunci kembar `Err`,
+// dan `muat` tidak menimpa variabel yang sudah ada di lingkungan.
+
+fn _kunci_sah(k) {
+    if k == "" { return false }
+    for i, r in str::chars(k) {
+        let c = str(r)
+        let huruf = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+        if !(huruf || (i > 0 && c >= "0" && c <= "9")) { return false }
+    }
+    return true
+}
+
+fn _nilai(no, v) {
+    if v == "" { return Ok("") }
+    let q = v[0:1]
+    if q == "'" || q == "\"" {
+        let cs = arr::map(str::chars(v), |r| str(r))
+        var isi = ""
+        var i = 1
+        var tutup = false
+        while i < len(cs) {
+            let c = cs[i]
+            if c == q {
+                tutup = true
+                break
+            }
+            if q == "\"" && c == "\\" && i + 1 < len(cs) {
+                let e = cs[i + 1]
+                if e == "n" { isi = isi + "\n" } else if e == "t" { isi = isi + "\t" } else if e == "\"" || e == "\\" { isi = isi + e } else {
+                    return Err(«baris ${no}: escape `\\${e}` tidak dikenal (yang ada: \\n \\t \\\" \\\\)»)
+                }
+                i += 2
+                continue
+            }
+            isi = isi + c
+            i += 1
+        }
+        if !tutup { return Err(«baris ${no}: kutip tidak ditutup (nilai banyak baris tidak didukung, tulis \\n)») }
+        let ekor = str::trim(str::join(cs[i + 1:], ""))
+        if ekor != "" && !str::starts_with(ekor, "#") { return Err(«baris ${no}: ada teks sesudah kutip penutup») }
+        return Ok(isi)
+    }
+    var t = v
+    match str::index_of(t, " #") { Some(k) => { t = t[0:k] } None => {} }
+    match str::index_of(t, "\t#") { Some(k) => { t = t[0:k] } None => {} }
+    return Ok(str::trim(t))
+}
+
+/// Urai teks `.env` jadi `dict` kunci → teks.
+pub fn parse(teks) {
+    var hasil = dict::new()
+    for n, baris0 in str::split(teks, "\n") {
+        let no = n + 1
+        var baris = baris0
+        if str::ends_with(baris, "\r") { baris = baris[0:len(baris) - 1] }
+        for _, r in str::chars(baris) {
+            let k = r as int
+            if (k < 32 && k != 9) || k == 127 { return Err(«baris ${no}: memuat karakter kendali») }
+        }
+        var t = str::trim(baris)
+        if t == "" || str::starts_with(t, "#") { continue }
+        if str::starts_with(t, "export ") { t = str::trim_start(t[7:]) }
+        let Some(k) = str::index_of(t, "=") else { return Err(«baris ${no}: harusnya `KUNCI=nilai`») }
+        let kunci = str::trim(t[0:k])
+        if !_kunci_sah(kunci) {
+            let s = len(kunci) <= 40 $ «`${kunci}`» : «(${len(kunci)} karakter)»
+            return Err(«baris ${no}: kunci ${s} tidak sah — huruf ASCII, angka dan `_`, tidak diawali angka»)
+        }
+        if dict::has(hasil, kunci) { return Err(«baris ${no}: kunci `${kunci}` ditulis dua kali») }
+        hasil[kunci] = _nilai(no, str::trim(t[k + 1:]))?
+    }
+    return Ok(hasil)
+}
+
+/// Baca berkas `.env` dan pasang kunci yang BELUM ada di lingkungan; jawabannya kunci yang dipasang.
+pub fn muat(jalur) {
+    let teks = fs::try_read(jalur).map_err(|e| «${jalur}: ${e}»)?
+    let d = parse(teks).map_err(|e| «${jalur}: ${e}»)?
+    var dipasang = []
+    for k, v in d {
+        match env::get(k) {
+            Some(_) => {}
+            None => {
+                env::set(k, v)
+                dipasang = arr::push(dipasang, k)
+            }
+        }
+    }
+    return Ok(dipasang)
+}

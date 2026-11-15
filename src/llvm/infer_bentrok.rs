@@ -101,7 +101,7 @@ pub fn skalar_global_bentrok(cg: &Codegen, nama: &str, awal: &JrgType) -> bool {
 
 /// Lokal skalar yang tipenya BERGANTI di dalam satu badan fungsi.
 pub fn lokal_skalar_bentrok(
-    cg: &Codegen, b: &crate::parser::Block, subst: &TypeSubst,
+    cg: &Codegen, b: &crate::parser::Block, subst: &TypeSubst, awal: &Lokal,
 ) -> std::collections::HashSet<String> {
     let mut tipe: HashMap<String, Vec<JrgType>> = HashMap::new();
     let mut lahir: Vec<String> = Vec::new();
@@ -118,17 +118,47 @@ pub fn lokal_skalar_bentrok(
             let e = tipe.entry(n.to_string()).or_default();
             if !e.contains(&t) { e.push(t); }
         }
+        fn tipe_di_lokal(
+            cg: &Codegen, e: &Expr, lokal: &Lokal, subst: &TypeSubst, harapan: Option<&JrgType>,
+        ) -> Option<JrgType> {
+            if let Some(t) = cg.tipe_ekspresi(e, lokal, subst, "") { return Some(t); }
+            let Expr::Call { func, args, .. } = e else { return None };
+            if args.len() != 1 { return None; }
+            let ctor = match &**func {
+                Expr::Ident(n, _) => n.as_str(),
+                Expr::PathExpr { segments, .. } if segments.len() == 2
+                    && matches!(segments[0].as_str(), "Result" | "Option") => segments[1].as_str(),
+                _ => return None,
+            };
+            if !matches!(ctor, "Ok" | "Err" | "Some") { return None; }
+            let isi = tipe_di_lokal(cg, &args[0], lokal, subst, None)?;
+            // `Err(..)` ke `Result<T, any>` (dan `Ok(..)` ke `Result<any, E>`) muat tanpa bentrok.
+            if let Some(JrgType::Enum(h)) = harapan {
+                if (ctor == "Ok" && h.starts_with("Result$any$"))
+                    || (ctor == "Err" && h.starts_with("Result$") && h.ends_with("$any"))
+                {
+                    return Some(JrgType::Enum(h.clone()));
+                }
+            }
+            let m = match ctor {
+                "Some" => super::mangle::mangle_option(&isi),
+                "Ok" => super::mangle::mangle_result(&isi, &JrgType::Any),
+                _ => super::mangle::mangle_result(&JrgType::Any, &isi),
+            };
+            Some(JrgType::Enum(m))
+        }
         for st in &b.stmts {
             match st {
                 Stmt::Var(v) if v.ty.is_none() => {
                     if let Some(init) = &v.init {
-                        let t = cg.tipe_ekspresi(init, lokal, subst, "");
-                        // Hanya skalar. Koleksi punya jalurnya sendiri
-                        // (`lokal_yang_tumbuh`), dan mencampur keduanya di
-                        // sini berarti dua aturan di satu tempat.
+                        let t = tipe_di_lokal(cg, init, lokal, subst, None);
+                        // Koleksi ikut hanya kalau ia berganti GOLONGAN (array jadi dict); tumbuhnya
+                        // tetap urusan `lokal_yang_tumbuh`, supaya satu persoalan punya satu aturan.
                         if matches!(t, Some(JrgType::Bool) | Some(JrgType::Str)
-                            | Some(JrgType::Rune) | Some(JrgType::Nil))
+                            | Some(JrgType::Rune) | Some(JrgType::Nil) | Some(JrgType::Array(..))
+                            | Some(JrgType::Slice(_)) | Some(JrgType::Dict(_)) | Some(JrgType::DictCampur(_)))
                             || matches!(&t, Some(x) if x.is_numeric())
+                            || matches!(&t, Some(JrgType::Enum(n)) if n.contains('$'))
                         {
                             lahir.push(v.name.clone());
                             catat(tipe, &v.name, t.clone());
@@ -144,7 +174,7 @@ pub fn lokal_skalar_bentrok(
                 Stmt::Let(l) => {
                     if let Some(n) = pola_nama(&l.pattern) {
                         if let Some(t) = l.ty.as_ref().and_then(|te| cg.tipe_dari_anotasi(te, subst))
-                            .or_else(|| cg.tipe_ekspresi(&l.init, lokal, subst, ""))
+                            .or_else(|| tipe_di_lokal(cg, &l.init, lokal, subst, None))
                         {
                             lokal.insert(n, t);
                         }
@@ -154,7 +184,8 @@ pub fn lokal_skalar_bentrok(
                     for (t, val) in a.targets.iter().zip(a.values.iter()) {
                         let Expr::Ident(n, _) = t else { continue };
                         if !lahir.contains(n) { continue; }
-                        catat(tipe, n, cg.tipe_ekspresi(val, lokal, subst, ""));
+                        let harapan = lokal.get(n);
+                        catat(tipe, n, tipe_di_lokal(cg, val, lokal, subst, harapan));
                     }
                 }
                 Stmt::Block(bb) => jelajah(cg, bb, lokal, subst, lahir, tipe),
@@ -166,8 +197,11 @@ pub fn lokal_skalar_bentrok(
                 Stmt::While(w) => jelajah(cg, &w.body, lokal, subst, lahir, tipe),
                 Stmt::Loop(l) => jelajah(cg, &l.body, lokal, subst, lahir, tipe),
                 Stmt::For(f) => match f {
-                    ForStmt::Classic { body, .. } | ForStmt::Range { body, .. } =>
-                        jelajah(cg, body, lokal, subst, lahir, tipe),
+                    ForStmt::Classic { body, .. } => jelajah(cg, body, lokal, subst, lahir, tipe),
+                    ForStmt::Range { vars, iter, body, .. } => {
+                        cg.ikat_var_loop(vars, iter, lokal, subst, "");
+                        jelajah(cg, body, lokal, subst, lahir, tipe)
+                    }
                 },
                 // `if` di posisi pernyataan diurai jadi `Stmt::Expr(Expr::If)`, BUKAN
                 // `Stmt::If` — yang terakhir dipakai bentuk lain.
@@ -175,6 +209,8 @@ pub fn lokal_skalar_bentrok(
                 _ => {}
             }
         }
+        // `if .. else ..` di ujung blok diurai jadi EKOR blok, bukan pernyataan.
+        if let Some(t) = &b.tail { di_ekspr(cg, t, lokal, subst, lahir, tipe); }
     }
     pub(crate) fn di_ekspr(
         cg: &Codegen, e: &crate::parser::Expr, lokal: &mut Lokal, subst: &TypeSubst,
@@ -200,13 +236,130 @@ pub fn lokal_skalar_bentrok(
         }
     }
 
-    let mut lokal = Lokal::new();
+    // Parameter ikut dikenal: `var v = data` (parameter) lalu `v = v[k]` juga pergantian jenis.
+    let mut lokal = awal.clone();
     jelajah(cg, b, &mut lokal, subst, &mut lahir, &mut tipe);
 
+    let skalar = |t: &JrgType| !matches!(t, JrgType::Array(..) | JrgType::Slice(_)
+        | JrgType::Dict(_) | JrgType::DictCampur(_));
+    // Separuh `Option`/`Result` (`None`, `Err(e)` tanpa sisi lain) bukan jenis tersendiri: ia
+    // mengikuti instans yang lengkap. Dua instans lengkap yang berbeda (`Some(1)` lalu `Some(o)`) bentrok.
+    let separuh = |t: &JrgType| matches!(t, JrgType::Enum(n) if n.contains('$') && t.mangle_frag().contains("never"));
+    for v in tipe.values_mut() {
+        if v.iter().any(|t| !separuh(t)) { v.retain(|t| !separuh(t)); }
+    }
     tipe.into_iter()
-        .filter(|(_, v)| v.len() > 1)
+        .filter(|(_, v)| v.len() > 1 && (v.iter().all(skalar)
+            || v.iter().fold(JrgType::Never, |a, t| super::codegen_any::satukan_jenis(&a, t)) == JrgType::Any))
         .map(|(k, _)| k)
         .collect()
+}
+
+/// Lokal yang lahir sebagai dict atau array bertipe lalu ditulis nilai berjenis lain (`d["b"] = "x"` atas
+/// `{"a": 1}`, `a[1] = "q"` atas `[1, 2]`): slotnya bernilai bertag sejak awal, seperti dua mesin acuan.
+pub fn dict_ditulis_jenis_lain(cg: &Codegen, b: &crate::parser::Block, subst: &TypeSubst) -> Vec<(String, JrgType)> {
+    let (mut lahir, mut tulis) = (Vec::new(), Vec::new());
+    tulisan_dict(b, &mut lahir, &mut tulis);
+    let lokal = Lokal::new();
+    let mut hasil: Vec<(String, JrgType)> = Vec::new();
+    for (n, init) in &lahir {
+        if hasil.iter().any(|(h, _)| h == n) { continue; }
+        let Some(awal @ (JrgType::Dict(_) | JrgType::Array(..) | JrgType::Slice(_)))
+            = cg.tipe_ekspresi(init, &lokal, subst, "") else { continue };
+        let akhir = tulis.iter().filter(|(t, _, _)| t == n).fold(awal.clone(), |ty, (_, d, v)|
+            cg.tipe_ekspresi(v, &lokal, subst, "").and_then(|vt| isi_berganti(&ty, *d, &vt)).unwrap_or(ty));
+        if akhir != awal { hasil.push((n.clone(), akhir)); }
+    }
+    hasil
+}
+
+/// `var` modul bertipe dict atau array yang ditulisi nilai berjenis lain dari fungsi mana pun.
+pub fn dict_global_ditulis(cg: &Codegen, nama: &str, awal: &JrgType) -> Option<JrgType> {
+    if !matches!(awal, JrgType::Dict(_) | JrgType::Array(..) | JrgType::Slice(_)) { return None; }
+    let mut fs: Vec<_> = cg.tables.functions.values().cloned().collect();
+    for m in cg.tables.impls.values() { fs.extend(m.values().cloned()); }
+    fs.sort_by(|a, b| a.name.cmp(&b.name));
+    let (subst, lokal) = (TypeSubst::new(), Lokal::new());
+    let mut ty = awal.clone();
+    for f in &fs {
+        let FnBody::Block(b) = &*f.body else { continue };
+        let (mut lahir, mut tulis) = (Vec::new(), Vec::new());
+        tulisan_dict(b, &mut lahir, &mut tulis);
+        // Lokal bernama sama membayangi `var` modulnya.
+        if lahir.iter().any(|(n, _)| n == nama) { continue; }
+        for (_, d, v) in tulis.iter().filter(|(t, _, _)| t == nama) {
+            if let Some(t) = cg.tipe_ekspresi(v, &lokal, &subst, "").and_then(|vt| isi_berganti(&ty, *d, &vt)) { ty = t; }
+        }
+    }
+    (ty != *awal).then_some(ty)
+}
+
+/// Tipe dict/array `t` sesudah isi di kedalaman `d` ditulisi nilai bertipe `v`, kalau jenisnya berganti.
+fn isi_berganti(t: &JrgType, d: usize, v: &JrgType) -> Option<JrgType> {
+    let (isi, bungkus): (&JrgType, fn(JrgType, &JrgType) -> JrgType) = match t {
+        JrgType::Dict(i) => (i, |x, _| JrgType::Dict(Box::new(x))),
+        // Array jadi slice: `var` bisa tumbuh sesudahnya (`e = arr::push(e, x)`).
+        JrgType::Array(i, _) | JrgType::Slice(i) => (i, |x, _| JrgType::Slice(Box::new(x))),
+        _ => return None,
+    };
+    if d <= 1 { return super::codegen_any::ganti_jenis_isi(isi, v).then(|| bungkus(JrgType::Any, t)); }
+    isi_berganti(isi, d - 1, v).map(|x| bungkus(x, t))
+}
+
+/// Lokal yang lahir tanpa anotasi beserta nilai awalnya, dan tulisan `akar[..]..[..] = v`/`akar.f = v`
+/// dengan kedalaman jalurnya.
+fn tulisan_dict(b: &crate::parser::Block, lahir: &mut Vec<(String, crate::parser::Expr)>,
+                tulis: &mut Vec<(String, usize, crate::parser::Expr)>) {
+    use crate::parser::{Expr, MatchBody, Stmt};
+    fn akar(e: &Expr, d: usize) -> Option<(String, usize)> {
+        match e {
+            Expr::Ident(n, _) if d > 0 => Some((n.clone(), d)),
+            Expr::Index { obj, .. } | Expr::Field { obj, .. } => akar(obj, d + 1),
+            _ => None,
+        }
+    }
+    for s in &b.stmts {
+        match s {
+            Stmt::Let(l) => if let Some(n) = super::codegen::pattern_simple_name(&l.pattern) {
+                if l.ty.is_none() { lahir.push((n, (*l.init).clone())); }
+            },
+            Stmt::Var(v) => if let (Some(init), None) = (&v.init, &v.ty) { lahir.push((v.name.clone(), (**init).clone())); },
+            Stmt::Assign(a) => for (t, val) in a.targets.iter().zip(a.values.iter()) {
+                if let Some((n, d)) = akar(t, 0) { tulis.push((n, d, val.clone())); }
+                // `d = dict::set(d, k, v)` menulis `v` ke isi `d`, sama dengan `d[k] = v`.
+                if let (Expr::Ident(n, _), Expr::Call { func, args, .. }) = (t, val) {
+                    let set = matches!(&**func, Expr::PathExpr { segments, .. }
+                        if segments.len() == 2 && segments[0] == "dict" && segments[1] == "set");
+                    if set && args.len() == 3 && matches!(&args[0], Expr::Ident(m, _) if m == n) {
+                        tulis.push((n.clone(), 1, args[2].clone()));
+                    }
+                }
+            },
+            Stmt::Block(bb) => tulisan_dict(bb, lahir, tulis),
+            Stmt::While(w) => tulisan_dict(&w.body, lahir, tulis),
+            Stmt::Loop(l) => tulisan_dict(&l.body, lahir, tulis),
+            Stmt::For(crate::parser::ForStmt::Classic { body, .. })
+            | Stmt::For(crate::parser::ForStmt::Range { body, .. }) => tulisan_dict(body, lahir, tulis),
+            Stmt::If(i) => {
+                tulisan_dict(&i.then, lahir, tulis);
+                for (_, _, bb) in &i.else_ifs { tulisan_dict(bb, lahir, tulis); }
+                if let Some(bb) = &i.else_ { tulisan_dict(bb, lahir, tulis); }
+            }
+            Stmt::Expr(e) => match &**e {
+                Expr::If(i) => {
+                    tulisan_dict(&i.then, lahir, tulis);
+                    for (_, _, bb) in &i.else_ifs { tulisan_dict(bb, lahir, tulis); }
+                    if let Some(x) = &i.else_ { tulisan_dict(x, lahir, tulis); }
+                }
+                Expr::Block(bb) => tulisan_dict(bb, lahir, tulis),
+                Expr::Match { arms, .. } => for a in arms {
+                    if let MatchBody::Block(bb) = &a.body { tulisan_dict(bb, lahir, tulis); }
+                },
+                _ => {}
+            },
+            _ => {}
+        }
+    }
 }
 
 /// Lokal yang lahir sebagai `dict::new()` lalu diisi lewat `d[k] = v`.
@@ -215,36 +368,61 @@ pub fn dict_kosong_yang_diisi(
 ) -> HashMap<String, JrgType> {
     use crate::parser::Expr;
     let mut lahir: Vec<String> = Vec::new();
-    let mut tulis: Vec<(String, Expr)> = Vec::new();
+    // Tipe tiap tulisan, dibaca dengan lokal yang terlihat di titik itu; `None` = tak terbaca.
+    let mut tulis: Vec<(String, Option<JrgType>)> = Vec::new();
+    let mut lokal = Lokal::new();
 
-    pub(crate) fn jelajah(b: &crate::parser::Block, lahir: &mut Vec<String>, tulis: &mut Vec<(String, Expr)>) {
-        use crate::parser::{Expr, Stmt};
-        fn dict_new(e: &Expr) -> bool {
-            matches!(e, Expr::PathExpr { segments, .. }
-                if segments.len() == 2 && segments[0] == "dict" && segments[1] == "new")
-                || matches!(e, Expr::Call { func, args, .. } if args.is_empty()
-                    && matches!(&**func, Expr::PathExpr { segments, .. }
-                        if segments.len() == 2 && segments[0] == "dict" && segments[1] == "new"))
+    fn dict_new(e: &Expr) -> bool {
+        matches!(e, Expr::PathExpr { segments, .. }
+            if segments.len() == 2 && segments[0] == "dict" && segments[1] == "new")
+            || matches!(e, Expr::Call { func, args, .. } if args.is_empty()
+                && matches!(&**func, Expr::PathExpr { segments, .. }
+                    if segments.len() == 2 && segments[0] == "dict" && segments[1] == "new"))
+    }
+    fn tipe_tulis(cg: &Codegen, v: &Expr, lokal: &Lokal, subst: &TypeSubst) -> Option<JrgType> {
+        match v {
+            Expr::Array { elems, .. } if elems.is_empty() => Some(JrgType::Slice(Box::new(JrgType::Any))),
+            _ => cg.tipe_ekspresi(v, lokal, subst, ""),
         }
+    }
+    pub(crate) fn jelajah(cg: &Codegen, b: &crate::parser::Block, subst: &TypeSubst, lokal: &mut Lokal,
+                          lahir: &mut Vec<String>, tulis: &mut Vec<(String, Option<JrgType>)>) {
+        // Lokal yang lahir dari `d[..]` atas dict yang sedang dihitung: menulisnya balik ke `d` tidak membawa
+        // jenis baru (`var isi = h[b]; isi[k] = v; h[b] = isi`). Dicatat sebagai lokal bertanda `\u{0}dari:d`.
+        fn asal(lokal: &Lokal, x: &Expr) -> Option<String> {
+            let Expr::Ident(n, _) = x else { return None };
+            match lokal.get(&format!("\u{0}dari:{}", n)) { Some(JrgType::Struct(d)) => Some(d.clone()), _ => None }
+        }
+        use crate::parser::{Expr, Stmt};
         for s in &b.stmts {
             match s {
                 Stmt::Let(l) => {
-                    if dict_new(&l.init) {
-                        if let Some(n) = super::codegen::pattern_simple_name(&l.pattern) {
-                            lahir.push(n);
-                        }
+                    let n = super::codegen::pattern_simple_name(&l.pattern);
+                    if dict_new(&l.init) { if let Some(n) = &n { lahir.push(n.clone()); } }
+                    if let (Some(n), Expr::Index { obj, .. }) = (&n, &*l.init) {
+                        if let Expr::Ident(d, _) = &**obj { if lahir.contains(d) {
+                            lokal.insert(format!("\u{0}dari:{}", n), JrgType::Struct(d.clone()));
+                        } }
                     }
+                    if let (Some(n), Some(t)) = (n, cg.tipe_ekspresi(&l.init, lokal, subst, "")) { lokal.insert(n, t); }
                 }
                 Stmt::Var(v) => {
                     if let Some(init) = &v.init {
                         if dict_new(init) { lahir.push(v.name.clone()); }
+                        if let Expr::Index { obj, .. } = &**init {
+                            if let Expr::Ident(d, _) = &**obj { if lahir.contains(d) {
+                                lokal.insert(format!("\u{0}dari:{}", v.name), JrgType::Struct(d.clone()));
+                            } }
+                        }
+                        if let Some(t) = cg.tipe_ekspresi(init, lokal, subst, "") { lokal.insert(v.name.clone(), t); }
                     }
                 }
                 Stmt::Assign(a) => {
                     for (t, val) in a.targets.iter().zip(a.values.iter()) {
                         if let Expr::Index { obj, .. } = t {
                             if let Expr::Ident(n, _) = &**obj {
-                                tulis.push((n.clone(), val.clone()));
+                                if asal(lokal, val).as_deref() == Some(n.as_str()) { continue; }
+                                tulis.push((n.clone(), tipe_tulis(cg, val, lokal, subst)));
                             }
                         }
                         // `d = dict::set(d, k, v)` menulis `v` ke `d`.
@@ -252,32 +430,48 @@ pub fn dict_kosong_yang_diisi(
                             let set = matches!(&**func, Expr::PathExpr { segments, .. }
                                 if matches!(tanpa_awalan_bawaan(segments), [x, y] if x == "dict" && y == "set"));
                             if set && args.len() == 3 && matches!(&args[0], Expr::Ident(m, _) if m == n) {
-                                tulis.push((n.clone(), args[2].clone()));
+                                tulis.push((n.clone(), tipe_tulis(cg, &args[2], lokal, subst)));
                             }
                         }
                     }
                 }
-                Stmt::Block(bb) => jelajah(bb, lahir, tulis),
-                Stmt::While(w) => jelajah(&w.body, lahir, tulis),
-                Stmt::Loop(l) => jelajah(&l.body, lahir, tulis),
+                Stmt::Block(bb) => jelajah(cg, bb, subst, lokal, lahir, tulis),
+                Stmt::While(w) => jelajah(cg, &w.body, subst, lokal, lahir, tulis),
+                Stmt::Loop(l) => jelajah(cg, &l.body, subst, lokal, lahir, tulis),
                 Stmt::For(crate::parser::ForStmt::Classic { body, .. })
-                | Stmt::For(crate::parser::ForStmt::Range { body, .. }) => jelajah(body, lahir, tulis),
+                | Stmt::For(crate::parser::ForStmt::Range { body, .. }) => jelajah(cg, body, subst, lokal, lahir, tulis),
+                // Tulisan di cabang `if` (pernyataan `if` diurai jadi `Stmt::Expr(Expr::If)`).
+                Stmt::If(i) => if_cabang(cg, i, subst, lokal, lahir, tulis),
+                Stmt::Expr(e) => if let Expr::If(i) = &**e { if_cabang(cg, i, subst, lokal, lahir, tulis) },
                 _ => {}
             }
         }
+        // `if .. else ..` di ujung blok diurai jadi EKOR blok, bukan pernyataan.
+        if let Some(Expr::If(i)) = b.tail.as_deref() { if_cabang(cg, i, subst, lokal, lahir, tulis) }
     }
-    jelajah(b, &mut lahir, &mut tulis);
+    fn if_cabang(cg: &Codegen, i: &crate::parser::IfStmt, subst: &TypeSubst, lokal: &mut Lokal,
+                 lahir: &mut Vec<String>, tulis: &mut Vec<(String, Option<JrgType>)>) {
+        jelajah(cg, &i.then, subst, lokal, lahir, tulis);
+        for (_, _, bb) in &i.else_ifs { jelajah(cg, bb, subst, lokal, lahir, tulis); }
+        if let Some(e) = &i.else_ { jelajah(cg, e, subst, lokal, lahir, tulis); }
+    }
+    jelajah(cg, b, subst, &mut lokal, &mut lahir, &mut tulis);
 
-    let lokal = Lokal::new();
+    // Semua tulisan disatukan (`h["a"] = false` lalu `h["b"] = []`: bernilai bertag). Satu tulisan yang
+    // tipenya tak terbaca membuat dict-nya tetap bernilai bertag — tipenya tidak ditebak dari tulisan lain.
     let mut hasil = HashMap::new();
     for n in lahir {
-        for (t, val) in &tulis {
+        let mut isi: Option<JrgType> = None;
+        let mut buta = false;
+        for (t, v) in &tulis {
             if *t != n { continue; }
-            if let Some(v) = cg.tipe_ekspresi(val, &lokal, subst, "") {
-                hasil.insert(n.clone(), JrgType::Dict(Box::new(v)));
-                break;
+            match v {
+                None => buta = true,
+                Some(v) => isi = Some(match isi { None => v.clone(), Some(lama) => super::codegen_any::satukan_jenis(&lama, v) }),
             }
         }
+        if buta { continue; }
+        if let Some(v) = isi { hasil.insert(n.clone(), JrgType::Dict(Box::new(v))); }
     }
     hasil
 }
@@ -633,6 +827,12 @@ impl Codegen {
                     _ => None,
                 };
                 if let Some(x) = elem {
+                    if !semua.contains(&x) { semua.push(x); }
+                }
+            }
+            for d in super::infer_tumbuh::elemen_didorong(e, nama) {
+                if let Some(tx) = self.tipe_ekspresi(d, &lokal, &subst, "") {
+                    let x = super::codegen_any::luruh(&tx);
                     if !semua.contains(&x) { semua.push(x); }
                 }
             }

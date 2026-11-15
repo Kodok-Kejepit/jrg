@@ -533,7 +533,7 @@ pub fn num_to_base(args: &[Value]) -> Result<Value, String> {
     let n = as_i128(arg(args, 0)).map_err(|e| format!("dok::num_to_base: {}", e))?;
     let base = as_i128(arg(args, 1)).map_err(|e| format!("dok::num_to_base: {}", e))?;
     if !(2..=36).contains(&base) { return Err("dok::num_to_base: base harus 2..36".to_string()); }
-    if n == 0 { return Ok(Value::Str("0".to_string())); }
+    if n == 0 { return Ok(Value::Str(std::sync::Arc::new("0".to_string()))); }
     let neg = n < 0;
     // `-MIN` tidak muat di i128: besarnya dihitung tanpa tanda.
     let (mut n, base) = (n.unsigned_abs(), base as u128);
@@ -541,7 +541,7 @@ pub fn num_to_base(args: &[Value]) -> Result<Value, String> {
     while n > 0 { out.push(DIGITS[(n % base) as usize]); n /= base; }
     if neg { out.push(b'-'); }
     out.reverse();
-    Ok(Value::Str(String::from_utf8(out).unwrap()))
+    Ok(Value::Str(std::sync::Arc::new(String::from_utf8(out).unwrap())))
 }
 
 pub fn num_from_base(args: &[Value]) -> Result<Value, String> {

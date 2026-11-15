@@ -179,14 +179,14 @@ pub fn tcp_recv(args: &[Value]) -> Result<Value, String> {
         }
     };
     reader.consume(pakai);
-    if kurang == 0 { return Ok(ok_value(Value::Str(teks))); }
+    if kurang == 0 { return Ok(ok_value(Value::Str(std::sync::Arc::new(teks)))); }
     let mut satu = vec![0u8; kurang];
     match reader.read_exact(&mut satu) {
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof =>
             Ok(err_value(format!("{}: koneksi ditutup di tengah sebuah karakter", NAMA))),
         Err(e) => Ok(err_value(format!("{}: {}", NAMA, crate::host::galat_io(&e)))),
         Ok(()) => Ok(match String::from_utf8(satu) {
-            Ok(t) => ok_value(Value::Str(t)),
+            Ok(t) => ok_value(Value::Str(std::sync::Arc::new(t))),
             Err(_) => bukan_teks(NAMA, "dok::tcp_recv_bytes"),
         }),
     }
@@ -229,7 +229,7 @@ pub fn tcp_recv_line(args: &[Value]) -> Result<Value, String> {
                 Ok(0) => Ok(err_value("dok::tcp_recv_line: EOF (koneksi ditutup peer)".to_string())),
                 Ok(_) => {
                     while line.ends_with('\n') || line.ends_with('\r') { line.pop(); }
-                    Ok(ok_value(Value::Str(line)))
+                    Ok(ok_value(Value::Str(std::sync::Arc::new(line))))
                 }
                 Err(e) => Ok(err_value(format!("dok::tcp_recv_line: {}", crate::host::galat_io(&e)))),
             }
@@ -247,7 +247,7 @@ pub fn tcp_recv_all(args: &[Value]) -> Result<Value, String> {
             let mut buf = Vec::new();
             match reader.read_to_end(&mut buf) {
                 Ok(_) => Ok(match String::from_utf8(buf) {
-                    Ok(t) => ok_value(Value::Str(t)),
+                    Ok(t) => ok_value(Value::Str(std::sync::Arc::new(t))),
                     Err(_) => bukan_teks("dok::tcp_recv_all", "dok::tcp_recv_bytes"),
                 }),
                 Err(e) => Ok(err_value(format!("dok::tcp_recv_all: {}", crate::host::galat_io(&e)))),
@@ -291,7 +291,7 @@ pub fn tcp_local_addr(args: &[Value]) -> Result<Value, String> {
         let id = handle_id(v, F, "TcpListener")?;
         let guard = tcp_listeners().lock().unwrap_or_else(|p| p.into_inner());
         let l = guard.get(&id).ok_or_else(|| format!("{}: listener ini sudah ditutup", F))?;
-        return l.local_addr().map(|a| Value::Str(a.to_string())).map_err(|e| format!("{}: {}", F, crate::host::galat_io(&e)));
+        return l.local_addr().map(|a| Value::Str(std::sync::Arc::new(a.to_string()))).map_err(|e| format!("{}: {}", F, crate::host::galat_io(&e)));
     }
     alamat(v, F, |s| s.local_addr())
 }
@@ -301,7 +301,7 @@ pub fn udp_local_addr(args: &[Value]) -> Result<Value, String> {
     const F: &str = "dok::udp_local_addr";
     let id = handle_id(args.get(0).unwrap_or(&Value::Nil), F, "UdpSock")?;
     let sock = get_udp(id).ok_or_else(|| format!("{}: socket ini sudah ditutup", F))?;
-    sock.local_addr().map(|a| Value::Str(a.to_string())).map_err(|e| format!("{}: {}", F, crate::host::galat_io(&e)))
+    sock.local_addr().map(|a| Value::Str(std::sync::Arc::new(a.to_string()))).map_err(|e| format!("{}: {}", F, crate::host::galat_io(&e)))
 }
 
 pub fn tcp_peer_addr(args: &[Value]) -> Result<Value, String> {
@@ -314,7 +314,7 @@ fn alamat(v: &Value, f: &str, ambil: impl Fn(&TcpStream) -> std::io::Result<std:
     let id = handle_id(v, f, "TcpConn")?;
     let cell = get_stream(id).ok_or_else(|| format!("{}: koneksi ini sudah ditutup", f))?;
     let reader = cell.lock().unwrap_or_else(|p| p.into_inner());
-    ambil(reader.get_ref()).map(|a| Value::Str(a.to_string())).map_err(|e| format!("{}: {}", f, crate::host::galat_io(&e)))
+    ambil(reader.get_ref()).map(|a| Value::Str(std::sync::Arc::new(a.to_string()))).map_err(|e| format!("{}: {}", f, crate::host::galat_io(&e)))
 }
 
 // ─── TCP: server-side primitives (dipakai juga oleh dok::http server) ───
@@ -427,11 +427,11 @@ fn udp_terima(args: &[Value], nama: &str, byte: bool) -> Result<Value, String> {
     match sock.recv_from(&mut buf) {
         Ok((n, from)) => {
             let data = if byte { super::crypto::byte_ke_array(buf[..n].to_vec()) } else {
-                match teks(&buf[..n]) { Some(t) => Value::Str(t), None => return Ok(bukan_teks(nama, "dok::udp_recv_bytes_from")) }
+                match teks(&buf[..n]) { Some(t) => Value::Str(std::sync::Arc::new(t)), None => return Ok(bukan_teks(nama, "dok::udp_recv_bytes_from")) }
             };
             let mut fields = HashMap::new();
             fields.insert("data".to_string(), data);
-            fields.insert("host".to_string(), Value::Str(from.ip().to_string()));
+            fields.insert("host".to_string(), Value::Str(std::sync::Arc::new(from.ip().to_string())));
             fields.insert("port".to_string(), Value::Int(from.port() as i128));
             Ok(ok_value(Value::Struct { name: "UdpPacket".to_string(), fields: fields.into() }))
         }
@@ -453,7 +453,7 @@ pub fn resolve(args: &[Value]) -> Result<Value, String> {
     // hanya peduli alamat IP-nya.
     match (host, 0u16).to_socket_addrs() {
         Ok(mut addrs) => match addrs.next() {
-            Some(a) => Ok(ok_value(Value::Str(a.ip().to_string()))),
+            Some(a) => Ok(ok_value(Value::Str(std::sync::Arc::new(a.ip().to_string())))),
             None => Ok(err_value(format!("dok::resolve '{}': tidak ada alamat", host))),
         },
         Err(e) => Ok(err_value(format!("dok::resolve '{}': {}", host, crate::host::galat_io(&e)))),

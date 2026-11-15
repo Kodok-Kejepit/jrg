@@ -64,6 +64,10 @@ pub struct Tunda {
 /// Fungsi tambahan yang harus dipancarkan, di luar monomorfisasi biasa.
 #[derive(Clone)]
 pub enum KerjaFn {
+    /// Adaptor jembatan untuk nilai fungsi bertipe `ty` yang diserahkan ke builtin `jrgc`.
+    Jembatan { nama: String, ty: JrgType },
+    /// Mode `--uji`: badan tugas `@<badan>.badan(ptr)` yang memanggil fungsi tes `tes` (`llvm::uji`).
+    Uji { badan: String, tes: String, span: crate::lexer::Span },
     /// Pembungkus supaya fungsi bernama bisa dipakai sebagai NILAI.
     Bungkus {
         pembungkus: String,
@@ -73,6 +77,8 @@ pub enum KerjaFn {
     },
     /// `@jrg_tampil_kotak`: tampilan array/dict yang tersimpan di kotak bertag.
     TampilKotak,
+    /// `@jrg_sama_daun`: `==` dua kotak yang bukan array/dict, untuk penjelajah `jrg_sama_lukis`.
+    SamaDaun,
     /// Adaptor nilai fungsi `dari` -> `ke`: argumen dan hasilnya dikoersi (masuk/keluar kotak).
     Adaptor { nama: String, dari: JrgType, ke: JrgType },
     /// Pembanding tiga-arah untuk mengurutkan elemen bertipe `ty`.
@@ -95,7 +101,12 @@ pub enum KerjaFn {
         /// tingkat per elemen.
         rantai_hasil: Vec<Vec<JrgType>>,
     },
+    /// Tampil, `==` atau salin-dalam satu tipe berulang, sebagai fungsi yang memanggil dirinya.
+    BantuTipe { jenis: BantuTipe, ty: JrgType },
 }
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum BantuTipe { Tampil, Sama, Salin }
 
 #[derive(Clone)]
 pub(crate) struct MonoFn {
@@ -149,6 +160,10 @@ pub struct Codegen {
     pub(crate) ret_ditebak: bool,
     pub(crate) cur_fn_generics: TypeSubst,
     pub(crate) is_main_fn: bool,
+    /// Closure badan `spawn` (hasilnya dibuang): `?` yang gagal di dalamnya mengakhiri goroutine-nya.
+    pub(crate) spawn_berikut: bool,
+    pub(crate) closure_spawn: std::collections::HashSet<String>,
+    pub(crate) badan_spawn: bool,
 
     /// Nama struct yang sedang jadi `self`, kalau fungsi ini sebuah method.
     pub(crate) cur_self_ty: Option<String>,
@@ -213,7 +228,16 @@ pub struct Codegen {
     pub(crate) unit_berkas: Vec<u32>,
     /// Nomor unit lapis ketiga (`lapis.jrg`), tempat `ns::nama` tanpa penurun asli dicari.
     pub(crate) unit_lapis: Option<usize>,
+    /// Situs panik bernomor (`lo`, `hi`, berkas), urut nomornya mulai 1; lokasinya dirender `isi_situs`.
+    pub(crate) situs: Vec<(u32, u32, u32)>,
+    situs_nomor: HashMap<(u32, u32, u32), usize>,
+    /// Benar: panik yang dipancarkan sekarang tidak berlokasi, karena acuannya juga tidak (badan `defer`, `?` di `main`).
+    pub(crate) tanpa_situs: bool,
+    /// Benar: pembantu yang memakai situs pemanggilnya (`md.*`) — tidak memasang apa pun, juga tidak nol.
+    pub(crate) warisi_situs: bool,
     pub(crate) penerima_lapis: u64,
+    /// Span panggilan terakhir yang diturunkan `slot_bulat_pecahan` jadi kegagalan pasti.
+    pub(crate) slot_bulat_gagal: Option<crate::lexer::Span>,
     pub(crate) hasil_closure_luruh: bool,
     /// Nama tampil untuk closure berikutnya yang diturunkan (`T::m` sebagai nilai).
     pub(crate) closure_bernama: Option<String>,
@@ -229,6 +253,10 @@ pub struct Codegen {
     pub(crate) jemb_terpancar: usize,
     /// Adaptor nilai fungsi yang sudah dibuat, per pasangan tipe.
     pub(crate) adaptor_ada: HashMap<String, String>,
+    /// Fungsi bantu per tipe berulang (`tampil.tipe.T`, …) yang sudah diantre.
+    pub(crate) bantu_tipe_ada: std::collections::HashSet<String>,
+    /// Tipe yang badan fungsi bantunya sedang dibangun: tingkat pertamanya diturunkan sebaris.
+    pub(crate) sebaris_sekali: Option<String>,
     pub(crate) pakai_jemb_buram: bool,
     pub(crate) pakai_sama_buram: bool,
 
@@ -244,6 +272,10 @@ pub struct Codegen {
     /// menurunkan satu badan fungsi untuk membaca tipe nilai yang dikembalikannya.
     /// Instans struct generik yang sudah punya tata letak: nama instans -> (nama dasar, argumen).
     pub(crate) struct_instans: HashMap<String, (String, Vec<JrgType>)>,
+    /// Instans enum generik milik program (`Pilih$i64` → (`Pilih`, [int])).
+    pub(crate) enum_instans: HashMap<String, (String, Vec<JrgType>)>,
+    /// Tipe yang diharapkan dari konstruktor enum yang sedang diturunkan (diambil sekali).
+    pub(crate) harapan_ktor: Option<JrgType>,
     /// Lokal yang disemai ke fungsi berikutnya yang diturunkan PENDUGA: tangkapan sebuah closure.
     pub(crate) benih_lokal: Vec<(String, JrgType)>,
     /// `self` method yang sedang diturunkan adalah PENUNJUK ke milik pemanggil (bukan salinan).
@@ -257,11 +289,37 @@ pub struct Codegen {
     pub(crate) milik_berikutnya: bool,
     /// Nama lokal yang sebagai argumen PERTAMA panggilan berikutnya dipindahkan, bukan disalin.
     pub(crate) arg_pindah: Option<String>,
+    /// Mode `--uji`: tabel baris situs ikut dipancarkan, dan nomor badan tes berikutnya.
+    pub(crate) pakai_uji: bool,
+    /// Fungsi yang diturunkan kini pernah memancarkan `ret`; instans yang tidak pernah (selalu panik)
+    /// dicatat penduga di `fn_tak_kembali`, dan pemanggilnya mengakhiri bloknya sesudah panggilan.
+    pub(crate) pernah_kembali: bool,
+    pub(crate) fn_tak_kembali: std::collections::HashSet<String>,
+    pub(crate) uji_ke: usize,
+    /// Hasil panggilan terakhir yang argumen pertamanya dipindahkan dan hanya dikembalikan lagi.
+    pub(crate) hasil_pindah_milik: bool,
+    /// `x = [.., x, ..]`: elemen `x` di literal array berikutnya dipindahkan; `lit_milik` mencatat
+    /// bahwa literal itu sudah menyalin elemen lainnya sendiri, jadi penugasannya tidak menyalin lagi.
+    pub(crate) elemen_pindah: Option<String>,
+    /// Nama yang disebut di dalam closure fungsi ini (bagian `tangkapan` yang bisa ditulis lewat panggilan).
+    pub(crate) ditangkap_closure: std::collections::HashSet<String>,
+    pub(crate) lit_milik: bool,
+    /// `banding_ke` sedang menurunkan pembanding pengurutan (kalimat galat `arr::sort`), bukan operator `<`.
+    pub(crate) urut_untuk_sort: Option<String>,
     /// Penduga tipe lengan `match`: kedalaman match yang sedang diturunkan, kedalaman yang
     /// direkam, dan tipe nilai lengan pertama yang terlihat di sana.
     pub(crate) kedalaman_match: u32,
     pub(crate) rekam_lengan: Option<u32>,
     pub(crate) lengan_terlihat: Option<JrgType>,
+    /// Kedalaman penduga jenis cabang `if`/ternary (`jenis_cabang`), supaya sarangnya berbatas.
+    pub(crate) kedalaman_cabang: u32,
+    /// Method yang dipanggil atas nilai bertag (`nama`, jumlah argumen) dan berapa tipe buram yang
+    /// sudah dipancarkan badannya; pemilihnya ditulis di akhir modul (`codegen_polimorf`).
+    pub(crate) metode_dinamis: Vec<super::codegen_polimorf::MetodeDinamis>,
+    /// Keluarga enum generik yang dicocokkan polanya atas nilai bertag (`codegen_keluarga`).
+    pub(crate) keluarga_bertag: Vec<super::codegen_keluarga::Keluarga>,
+    /// `d.k` atas dict: kalimat acuan (depan, belakang) per span, dipakai `dict_baca` kalau kuncinya hilang.
+    pub(crate) pesan_field_dict: HashMap<(u32, u32), (String, String)>,
     /// Pembungkus nilai-fungsi bernama dan nama yang ditampilkannya (`<fn nama>`).
     pub(crate) nama_fnval: Vec<(String, String)>,
     /// Tipe isi kotak yang tak terlukis, bernomor urut daftar (`kata_kotak`).
@@ -327,6 +385,9 @@ impl Codegen {
             ret_ditebak: false,
             cur_fn_generics: TypeSubst::new(),
             is_main_fn: false,
+            spawn_berikut: false,
+            closure_spawn: std::collections::HashSet::new(),
+            badan_spawn: false,
             cur_self_ty: None,
             ruang_simbol: HashMap::new(),
             lokal_tumbuh: std::collections::HashMap::new(),
@@ -337,7 +398,12 @@ impl Codegen {
             unit_simbol: HashMap::new(),
             unit_berkas: Vec::new(),
             unit_lapis: None,
+            situs: Vec::new(),
+            situs_nomor: HashMap::new(),
+            tanpa_situs: false,
+            warisi_situs: false,
             penerima_lapis: 0,
+            slot_bulat_gagal: None,
             hasil_closure_luruh: false,
             closure_bernama: None,
             berkonkurensi: false,
@@ -347,20 +413,37 @@ impl Codegen {
             sama_terpancar: 0,
             jemb_terpancar: 0,
             adaptor_ada: HashMap::new(),
+            bantu_tipe_ada: std::collections::HashSet::new(),
+            sebaris_sekali: None,
             pakai_jemb_buram: false,
             pakai_sama_buram: false,
             kap_tumbuh: HashMap::new(),
             opsi_tertunda: Default::default(),
             struct_instans: HashMap::new(),
+            enum_instans: HashMap::new(),
+            harapan_ktor: None,
             benih_lokal: Vec::new(),
             self_dipinjam: false,
             pinjaman: std::collections::HashSet::new(),
             tangkap_masuk: std::collections::HashSet::new(),
             milik_berikutnya: false,
             arg_pindah: None,
+            pakai_uji: false,
+            pernah_kembali: false,
+            fn_tak_kembali: Default::default(),
+            uji_ke: 0,
+            hasil_pindah_milik: false,
+            elemen_pindah: None,
+            ditangkap_closure: std::collections::HashSet::new(),
+            lit_milik: false,
+            urut_untuk_sort: None,
             kedalaman_match: 0,
             rekam_lengan: None,
             lengan_terlihat: None,
+            kedalaman_cabang: 0,
+            metode_dinamis: Vec::new(),
+            keluarga_bertag: Vec::new(),
+            pesan_field_dict: HashMap::new(),
             nama_fnval: Vec::new(),
             jenis_buram: Vec::new(),
             pakai_nama_fn: false,
@@ -457,7 +540,46 @@ impl Codegen {
 
     pub fn emit(&mut self, line: impl Into<String>) {
         if self.terminated { return; }
-        self.cur_lines.push(format!("  {}", line.into()));
+        let line = line.into();
+        // Panggilan panik (selalu di blok dingin) didahului nomor situsnya, supaya galatnya berlokasi.
+        // Panik tanpa situs (lapis, `defer`, `?` di `main`) menolkan situsnya: tidak mewarisi panggilan lama.
+        if self.warisi_situs { self.cur_lines.push(format!("  {}", line)); return; }
+        if line.starts_with("call void @jrg_panic") || line.starts_with("call void @jrg_tunda_jalankan") {
+            let n = if line.contains("@jrg_panic") { self.nomor_situs().unwrap_or(0) } else { 0 };
+            if n > 0 || Some(self.unit_kini) != self.unit_lapis {
+                self.cur_lines.push(format!("  store i32 {}, ptr @jrg_situs", n));
+            }
+            self.cur_lines.push(format!("  {}", line));
+            return;
+        }
+        // Panggilan ke runtime atau lapis memasang situsnya: galat yang lahir di dalamnya memakai situs ini.
+        // Tiap panggilan semacam itu memasang yang baru, jadi yang tersisa sesudahnya tidak pernah terbaca.
+        if Some(self.unit_kini) != self.unit_lapis && self.sasaran_bawaan(&line) {
+            let n = self.nomor_situs().unwrap_or(0);
+            if n > 0 || !self.tanpa_situs { self.cur_lines.push(format!("  store i32 {}, ptr @jrg_situs", n)); }
+        }
+        self.cur_lines.push(format!("  {}", line));
+    }
+
+    /// Apakah `line` memanggil runtime (`@jrg_*`) atau fungsi lapis — bukan fungsi pemakai, bukan intrinsik.
+    fn sasaran_bawaan(&self, line: &str) -> bool {
+        let Some(i) = line.find("call ") else { return false };
+        let Some(j) = line[i..].find('@') else { return false };
+        let nama: String = line[i + j + 1..].chars().take_while(|c| *c != '(').collect();
+        let nama = nama.trim_matches('"');
+        if nama.starts_with("jrg_situs") || nama.starts_with("jrg_tunda") || nama.starts_with("llvm.") { return false; }
+        nama.starts_with("jrg_") || nama.starts_with("md.") || (self.unit_lapis.is_some() && Some(self.unit_simbol_dari(nama)) == self.unit_lapis)
+    }
+
+    /// Nomor situs untuk `span_kini`; `None` di lapis (lokasinya bukan milik pemakai) dan tanpa span.
+    fn nomor_situs(&mut self) -> Option<usize> {
+        let sp = self.span_kini?;
+        if self.tanpa_situs || Some(self.unit_kini) == self.unit_lapis || (sp.lo.0 == 0 && sp.hi.0 == 0) || sp.hi.0 < sp.lo.0 { return None; }
+        let kunci = (sp.lo.0, sp.hi.0, self.unit_berkas.get(self.unit_kini).copied().unwrap_or(0));
+        if let Some(n) = self.situs_nomor.get(&kunci) { return Some(*n); }
+        self.situs.push(kunci);
+        self.situs_nomor.insert(kunci, self.situs.len());
+        Some(self.situs.len())
     }
 
     pub fn terminate(&mut self, line: impl Into<String>) {
@@ -684,19 +806,9 @@ impl Codegen {
         structs.sort_by(|a, b| a.name.cmp(&b.name));
         for s in &structs {
             if !s.generics.params.is_empty() { continue; } // rejected lazily at first use
-            // Leluhur yang tidak bisa diratakan ditolak DI SINI, bukan dilewati:
-            // layout tanpa field induknya tetap terkompilasi, dan yang keluar
-            // bukan galat melainkan angka yang kelihatan masuk akal.
-            if let Some((leluhur, sebab)) = self.tables.leluhur_bermasalah(&s.name) {
-                let pesan = format!(
-                    "struct `{}` mewarisi `{}`, tapi `{}` {} — jadi field warisannya \
-                     tidak bisa diratakan\nbantuan: jalankan tanpa `--emit-llvm` \
-                     (interpreter) atau dengan `--vm`",
-                    s.name, leluhur, leluhur, sebab);
-                self.errors.push(crate::llvm::galat::beri_span_bila_kosong(pesan, s.span));
-                continue;
-            }
-            let subst = TypeSubst::new();
+            // Leluhur generik (dulu ditolak di sini): parameternya tidak disebut, jadi field
+            // warisannya bertag — tipe yang sama dengan isi apa pun yang dua mesin lain terima.
+            let subst: TypeSubst = self.tables.param_leluhur(&s.name).into_iter().map(|p| (p, JrgType::Any)).collect();
             // Field warisan diratakan di SATU pintu ini, jadi ketiga situs yang
             // mencari field menurut nama (`field_index`) tidak perlu tahu apa-apa
             // tentang warisan.
@@ -785,6 +897,15 @@ impl Codegen {
         // A concrete Option/Result can be discovered while lowering a struct that
         // refers to a type declared later in the source.
         self.recompute_enum_layouts();
+
+        // Tipe yang memuat dirinya sendiri tidak punya ukuran sebaris (dulu terpotong, lalu
+        // ditolak): field yang menutup siklusnya disimpan sebagai `Kotak` di heap.
+        let mut semua: Vec<String> = self.types.structs.keys().chain(self.types.enums.keys()).cloned().collect();
+        // Urutan tetap (IR yang sama tiap jalan); tipe tertulis dulu, instans generik sesudahnya.
+        semua.sort_by_key(|n| (n.contains('$'), n.clone()));
+        let mut berubah = false;
+        for nama in semua { berubah |= self.types.kotakkan_siklus(&nama); }
+        if berubah { self.recompute_enum_layouts(); }
     }
 
     pub(crate) fn recompute_enum_layouts(&mut self) {
@@ -857,6 +978,7 @@ impl Codegen {
         self.tunda = None;
         self.lokal_tumbuh = HashMap::new();
         self.tangkapan = std::collections::HashSet::new();
+        self.ditangkap_closure = std::collections::HashSet::new();
         self.pinjaman.clear();
         self.self_dipinjam = false;
     }
@@ -917,6 +1039,12 @@ impl Codegen {
                     let no = self.jemb_terpancar;
                     self.jemb_terpancar += 1;
                     if let Err(e) = self.pancarkan_buram_jembatan(no) { self.errors.push(e); }
+                }
+                None if self.ada_keluarga_tertunda() => {
+                    if let Err(e) = self.pancarkan_keluarga() { self.errors.push(e); }
+                }
+                None if self.ada_metode_dinamis_tertunda() => {
+                    if let Err(e) = self.pancarkan_metode_dinamis() { self.errors.push(e); }
                 }
                 None if self.pakai_sama_buram && self.sama_terpancar < self.tipe_buram.len() => {
                     let no = self.sama_terpancar;
@@ -990,8 +1118,9 @@ impl Codegen {
             out.push('\n');
         }
         out.push('\n');
+        let lapis = self.unit_lapis.map(|n| format!("m{}$", n));
         for def in &self.fn_defs {
-            out.push_str(def);
+            out.push_str(&super::situs::nolkan_panik_tanpa_situs(def, lapis.as_deref()));
             out.push('\n');
         }
         if self.pakai_nama_fn {
@@ -1006,6 +1135,10 @@ impl Codegen {
         if self.pakai_jemb_buram {
             out.push_str(&self.definisi_buram_jembatan());
         }
+        out.push_str(&self.definisi_metode_dinamis());
+        out.push_str(&self.definisi_keluarga());
+        out.push_str(&super::situs::definisi(&self.situs));
+        if self.pakai_uji { out.push_str(&super::situs::definisi_baris(self.situs.len())); }
         out.push_str("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
         out.push_str("!1 = !{!\"branch_weights\", i32 2000, i32 1}\n");
         out

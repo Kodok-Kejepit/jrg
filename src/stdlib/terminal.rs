@@ -74,8 +74,8 @@ fn b_interaktif(_: &[Value]) -> Result<Value, String> {
 /// dengan `"atas"` tidak.
 fn b_tombol(_: &[Value]) -> Result<Value, String> {
     match term::baca_tombol_terminal() {
-        None => Ok(Value::Str("eof".to_string())),
-        Some(t) => Ok(Value::Str(nama_tombol(&t))),
+        None => Ok(Value::Str(std::sync::Arc::new("eof".to_string()))),
+        Some(t) => Ok(Value::Str(std::sync::Arc::new(nama_tombol(&t)))),
     }
 }
 
@@ -96,8 +96,8 @@ fn b_tombol_tunggu(a: &[Value]) -> Result<Value, String> {
         None => return Err("term::tombol_tunggu: lama tunggu (milidetik) belum diisi".to_string()),
     };
     Ok(match term::baca_tombol_tunggu(ms) {
-        Bacaan::Tombol(t) => crate::interpreter::some_value(Value::Str(nama_tombol(&t))),
-        Bacaan::Habis => crate::interpreter::some_value(Value::Str("eof".to_string())),
+        Bacaan::Tombol(t) => crate::interpreter::some_value(Value::Str(std::sync::Arc::new(nama_tombol(&t)))),
+        Bacaan::Habis => crate::interpreter::some_value(Value::Str(std::sync::Arc::new("eof".to_string()))),
         Bacaan::Kosong => crate::interpreter::none_value(),
     })
 }
@@ -247,14 +247,14 @@ mod tes {
     #[test]
     fn argumen_salah_ditolak_dengan_sebabnya() {
         let g = |r: Result<Value, String>| r.unwrap_err();
-        assert!(g(b_mode(&[Value::Str("layr".into()), Value::Bool(true)])).contains("maksudnya `layar`?"));
+        assert!(g(b_mode(&[Value::teks("layr"), Value::Bool(true)])).contains("maksudnya `layar`?"));
         assert!(g(b_mode(&[Value::Int(1), Value::Bool(true)])).contains("harus teks"));
-        assert!(g(b_mode(&[Value::Str("layar".into()), Value::Int(1)])).contains("`true` atau `false`"));
+        assert!(g(b_mode(&[Value::teks("layar"), Value::Int(1)])).contains("`true` atau `false`"));
         assert!(g(b_tombol_tunggu(&[Value::Int(-1)])).contains("0 sampai"));
         assert!(g(b_tombol_tunggu(&[Value::Float(1.5)])).contains("bilangan bulat"));
         assert!(g(b_tombol_tunggu(&[Value::Int(MAKS_TUNGGU_MS + 1)])).contains("sehari"));
         assert!(g(b_lebar(&[Value::Int(5)])).contains("harus teks"));
-        assert_eq!(b_lebar(&[Value::Str("日本".into())]).unwrap().to_string(), "4");
-        assert_eq!(b_lebar_tiap(&[Value::Str("a日\t".into())]).unwrap().to_string(), "[1, 2, 0]");
+        assert_eq!(b_lebar(&[Value::teks("日本")]).unwrap().to_string(), "4");
+        assert_eq!(b_lebar_tiap(&[Value::teks("a日\t")]).unwrap().to_string(), "[1, 2, 0]");
     }
 }

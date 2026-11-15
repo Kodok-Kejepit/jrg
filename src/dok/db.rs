@@ -37,6 +37,7 @@ type FnBindBlob = unsafe extern "C" fn(*mut c_void, c_int, *const c_void, c_int,
 type FnBindInt64 = unsafe extern "C" fn(*mut c_void, c_int, i64) -> c_int;
 type FnBindDouble = unsafe extern "C" fn(*mut c_void, c_int, f64) -> c_int;
 type FnBindNull = unsafe extern "C" fn(*mut c_void, c_int) -> c_int;
+type FnParamCount = unsafe extern "C" fn(*mut c_void) -> c_int;
 type FnChanges = unsafe extern "C" fn(*mut c_void) -> c_int;
 type FnLastId = unsafe extern "C" fn(*mut c_void) -> i64;
 
@@ -47,7 +48,7 @@ struct Api {
     col_text: FnColText, col_bytes: FnColBytes, col_int64: FnColInt64,
     col_double: FnColDouble,
     bind_text: FnBindText, bind_blob: FnBindBlob, bind_int64: FnBindInt64, bind_double: FnBindDouble,
-    bind_null: FnBindNull, changes: FnChanges, last_id: FnLastId,
+    bind_null: FnBindNull, changes: FnChanges, last_id: FnLastId, param_count: FnParamCount,
 }
 
 /// Nama pustaka yang dicoba, urut.
@@ -108,6 +109,7 @@ fn muat_api() -> Result<Api, String> {
         bind_text: sym!("sqlite3_bind_text", FnBindText),
         bind_blob: sym!("sqlite3_bind_blob", FnBindBlob),
         bind_int64: sym!("sqlite3_bind_int64", FnBindInt64),
+        param_count: sym!("sqlite3_bind_parameter_count", FnParamCount),
         bind_double: sym!("sqlite3_bind_double", FnBindDouble),
         bind_null: sym!("sqlite3_bind_null", FnBindNull),
         changes:   sym!("sqlite3_changes", FnChanges),
@@ -164,7 +166,7 @@ pub fn db_open(args: &[Value]) -> Result<Value, String> {
         None => return Err("dok::db_open: butuh path-nya (\":memory:\" untuk di memori)".to_string()),
     };
     let a = match api() { Ok(a) => a, Err(e) => return Ok(err_value(e)) };
-    let c = match CString::new(path.clone()) {
+    let c = match CString::new(String::clone(&path)) {
         Ok(c) => c,
         Err(_) => return Ok(err_value("dok::db_open: path memuat byte NUL")),
     };
@@ -208,6 +210,26 @@ unsafe fn siapkan(
     let rc = (a.prepare)(db, c.as_ptr(), -1, &mut stmt, &mut ekor);
     if rc != SQLITE_OK || stmt.is_null() {
         return Err(pesan_galat(a, db));
+    }
+    // Sisa teks sesudah pernyataan pertama: komentar dan spasi boleh, pernyataan lain tidak dibuang diam-diam.
+    if !ekor.is_null() {
+        let mut lagi: *mut c_void = std::ptr::null_mut();
+        let mut ekor2: *const c_char = std::ptr::null();
+        let rc2 = (a.prepare)(db, ekor, -1, &mut lagi, &mut ekor2);
+        if !lagi.is_null() { (a.finalize)(lagi); }
+        if rc2 != SQLITE_OK || !lagi.is_null() {
+            (a.finalize)(stmt);
+            return Err("SQL ini berisi lebih dari satu pernyataan, dan cuma yang pertama yang akan jalan\n  \
+                        bantuan: panggil sekali per pernyataan; nilai dari luar diikat lewat `?`, \
+                        jangan disambung ke teks SQL".to_string());
+        }
+    }
+    let butuh = (a.param_count)(stmt) as usize;
+    if params.len() != butuh {
+        (a.finalize)(stmt);
+        let akibat = if params.len() < butuh { "yang kurang tidak diisi NULL diam-diam" } else { "yang lebih tidak dibuang diam-diam" };
+        return Err(format!("SQL ini punya {} tempat parameter, dapat {} nilai — {}\n  \
+                            bantuan: satu nilai per `?`, urut", butuh, params.len(), akibat));
     }
     for (i, p) in params.iter().enumerate() {
         let idx = (i + 1) as c_int;   // parameter sqlite dihitung dari 1
@@ -369,7 +391,7 @@ unsafe fn nilai_kolom(a: &Api, stmt: *mut c_void, i: c_int) -> Result<Value, ()>
             let n = (a.col_bytes)(stmt, i).max(0) as usize;
             let b = if p.is_null() { Vec::new() } else { std::slice::from_raw_parts(p, n).to_vec() };
             if jenis == 4 { super::crypto::byte_ke_array(b) }
-            else { Value::Str(String::from_utf8(b).map_err(|_| ())?) }
+            else { Value::Str(std::sync::Arc::new(String::from_utf8(b).map_err(|_| ())?)) }
         }
     })
 }

@@ -26,7 +26,8 @@ impl Codegen {
         match stmt {
             Stmt::Let(l) => self.codegen_let(l),
             Stmt::Var(v) => self.codegen_var(v),
-            Stmt::Const(_) => Ok(()), // module-level consts folded at use; local consts: treat as let
+            // `const` lokal sudah jadi `let` di `modul::muat` (`Ruang::const_lokal_jadi_let`).
+            Stmt::Const(c) => Err(super::galat::tandai(c.span, "bug di jrgc: `const` lokal tidak ditulis ulang jadi `let`")),
             // An `if` in statement position keeps the original statement lowering: no
             // result slot and no cross-branch type unification, so `if c { 1 } else { …
             Stmt::Expr(e) => self.codegen_expr_discarding(e),
@@ -34,6 +35,9 @@ impl Codegen {
                 let hasil = self.codegen_assign(a);
                 // Penanda pemindahan argumen tidak boleh bertahan melewati pernyataannya.
                 self.arg_pindah = None;
+                self.elemen_pindah = None;
+                self.lit_milik = false;
+                self.hasil_pindah_milik = false;
                 hasil
             }
             Stmt::ShortDecl(s) => self.codegen_short_decl(s),
@@ -46,7 +50,7 @@ impl Codegen {
             Stmt::Break(b) => self.codegen_break(b),
             Stmt::Continue(c) => self.codegen_continue(c),
             Stmt::Block(b) => { self.push_scope(); self.codegen_stmt_block(b)?; self.pop_scope(); Ok(()) }
-            // Fungsi bersarang bernama: didukung interpreter, belum di backend LLVM.
+            // Fungsi bersarang bernama sudah diangkat `hoist_fn_bersarang` di awal bloknya.
             Stmt::Fn(_) => Ok(()),
             Stmt::Spawn(s) => self.codegen_spawn(s),
             Stmt::Select(s) => self.codegen_select(s),
@@ -58,13 +62,17 @@ impl Codegen {
     pub fn codegen_stmt_block(&mut self, block: &Block) -> Result<(), String> {
         self.hoist_fn_bersarang(block);
         let r = (|cg: &mut Self| {
-            for s in &block.stmts {
+            let mut lepas = Vec::new();
+            for (i, s) in block.stmts.iter().enumerate() {
+                let calon = super::codegen_lepas::calon_lepas(s, &block.stmts[i + 1..], block.tail.as_deref());
                 cg.codegen_stmt(s)?;
                 if cg.terminated { return Ok(()); }
+                cg.catat_lepas(calon, &mut lepas);
             }
             if let Some(tail) = &block.tail {
                 cg.codegen_expr_discarding(tail)?;
             }
+            cg.lepas_titipan(&lepas);
             Ok(())
         })(self);
         self.fn_bersarang.pop();
@@ -230,6 +238,9 @@ impl Codegen {
                 }
                 Ok(())
             }
+            // Tuple yang memuat pola yang bisa gagal (`let (a, 5) = ..`) diuji UTUH: kalimat acuan
+            // menyebut tipe nilai seluruhnya, bukan elemen yang gagal.
+            Pattern::Tuple { elems, .. } if elems.iter().any(Self::pola_bisa_gagal) => self.ikat_lewat_pencocok(pat, v, ty),
             Pattern::Tuple { elems, .. } => {
                 let field_tys: Vec<JrgType> = match ty {
                     JrgType::Tuple(ts) => ts.clone(),
@@ -248,9 +259,19 @@ impl Codegen {
             Pattern::Wildcard(_) => Ok(()),
             Pattern::Ref { inner, .. } => self.bind_pattern(inner, v, ty),
 
-            Pattern::Array { .. } | Pattern::Enum { .. } => self.ikat_lewat_pencocok(pat, v, ty),
+            // Array, enum, literal, struct, rentang, `@`: lewat pencocok `match` (dulu sebagian ditolak).
+            _ => self.ikat_lewat_pencocok(pat, v, ty),
+        }
+    }
 
-            _ => Err("let: bentuk pola ini belum didukung backend LLVM (gunakan identifier atau tuple)".into()),
+    /// Apakah pola ini bisa TIDAK cocok (bukan cuma mengikat nama)?
+    fn pola_bisa_gagal(p: &Pattern) -> bool {
+        match p {
+            Pattern::Ident { name, .. } => name.starts_with(char::is_uppercase),
+            Pattern::Wildcard(_) => false,
+            Pattern::Tuple { elems, .. } => elems.iter().any(Self::pola_bisa_gagal),
+            Pattern::Ref { inner, .. } => Self::pola_bisa_gagal(inner),
+            _ => true,
         }
     }
 
@@ -270,7 +291,11 @@ impl Codegen {
         let teks = match pat {
             Pattern::Array { .. } =>
                 "destructure array: nilainya tidak cocok dengan pola di sisi kiri `let`".to_string(),
-            _ => crate::interpreter::pesan_let_tak_cocok(0, &ty.display_name()),
+            _ => crate::interpreter::pesan_let_tak_cocok(0, &match ty {
+                JrgType::Tuple(_) => "tuple".to_string(),
+                JrgType::Struct(n) => super::modul::tampil(super::generik::dasar(n)).to_string(),
+                t => t.display_name(),
+            }),
         };
         let pesan = self.intern_string(&teks);
         let (mp, ml) = self.split_str(&pesan);
@@ -333,6 +358,9 @@ impl Codegen {
 
     /// Tipe tempat sasaran `a[i]`/`p.x`/`d[k]`, tanpa memancarkan apa pun.
     fn tipe_tempat(&self, e: &Expr) -> Option<JrgType> {
+        if let Expr::Field { obj, .. } | Expr::Index { obj, .. } = e {
+            if self.tipe_jalur(obj).is_some_and(|t| Self::nama_handle_pustaka(&t).is_some()) { return None; }
+        }
         if let Expr::Index { obj, .. } = e {
             if let Some(JrgType::Dict(v)) = self.tipe_jalur(obj) { return Some(*v); }
         }
@@ -350,10 +378,27 @@ impl Codegen {
         if a.targets.len() > 1 && a.values.len() == 1 && matches!(a.op, AssignOp::Eq) {
             return self.codegen_bongkar(a);
         }
+        if let ([Expr::Field { obj, field, span }], [nilai], AssignOp::Eq) = (a.targets.as_slice(), a.values.as_slice(), &a.op) {
+            if matches!(**obj, Expr::Ident(..)) && self.peek_expr_type(obj) == Some(JrgType::Any) {
+                return self.tulis_field_titipan(obj, field, nilai, *span);
+            }
+        }
+        if let ([Expr::Index { obj, idx: index, span }], [nilai], AssignOp::Eq) = (a.targets.as_slice(), a.values.as_slice(), &a.op) {
+            if let Expr::Ident(nama, _) = &**obj {
+                if self.lookup_local(nama).is_some_and(|(_, t)| t == JrgType::Any) && !self.tangkapan.contains(nama) {
+                    return self.tulis_indeks_bertag(obj, index, nilai, *span);
+                }
+            } else if matches!(**obj, Expr::Index { .. } | Expr::Field { .. })
+                && self.akar_lokal_polos(obj) && self.tempat_bertag(obj) {
+                return self.tulis_indeks_bertag(obj, index, nilai, *span);
+            }
+        }
         if self.coba_tumbuh_di_tempat(a)? { return Ok(()); }
+        if self.coba_pop_di_tempat(a)? { return Ok(()); }
         if self.coba_tumbuh_jalur(a)? { return Ok(()); }
         if self.coba_panggil_milik(a)? { return Ok(()); }
         self.arg_pindah = self.argumen_dipindahkan(a);
+        self.elemen_pindah = self.elemen_dipindahkan(a);
         // `d = dict::set(d, k, v)` adalah `d[k] = v`: disisipkan di tempat, tanpa menyalin dict.
         if let Some(langsung) = Self::pasang_di_tempat(a) { return self.codegen_assign(&langsung); }
         // Semua sisi kanan dulu, baru ditulis (`a, b = b, a`). Sasaran tunggal `a[i]`/`p.x` juga
@@ -362,11 +407,20 @@ impl Codegen {
             ([t @ (Expr::Index { .. } | Expr::Field { .. })], 1) => self.tipe_tempat(t),
             _ => None,
         };
+        // Sasaran `.f` atas nilai tanpa field, dan `[...]` atas yang tak bisa ditulis, juga dicari
+        // sesudah sisi kanan: gagalnya saat jalan.
+        let tunda_ya = tunda.is_some() || matches!((a.targets.as_slice(), a.values.len()),
+            ([Expr::Field { obj, .. } | Expr::Index { obj, .. }], 1)
+                if self.tipe_jalur(obj).is_some_and(|t| Self::nama_handle_pustaka(&t).is_some()))
+            || matches!((a.targets.as_slice(), a.values.len()),
+            ([Expr::Field { obj, .. }], 1) if self.tipe_jalur(obj).is_some_and(|t| Self::bukan_pemilik_field(&t)))
+            || matches!((a.targets.as_slice(), a.values.len()),
+            ([Expr::Index { obj, .. }], 1) if self.tipe_jalur(obj).is_some_and(|t| !Self::bisa_ditulis_index(&t)));
         let mut place_ptrs: Vec<Option<(String, JrgType)>> = Vec::with_capacity(a.targets.len());
         for t in &a.targets {
             // `_` membuang nilainya: tidak ada tempat untuk ditulis (membacanya ditolak parser).
             let buang = matches!(t, Expr::Ident(n, _) if n == "_");
-            place_ptrs.push(if buang || tunda.is_some() { None } else { Some(self.get_place(t)?) });
+            place_ptrs.push(if buang || tunda_ya { None } else { Some(self.tempat_tulis(t)?) });
         }
         let mut new_vals = Vec::with_capacity(a.values.len());
         for (i, val_expr) in a.values.iter().enumerate() {
@@ -394,10 +448,11 @@ impl Codegen {
             self.catatan_koersi = catatan_lama;
             self.nama_diikat = nama_lama;
             let v = v?;
-            let v = self.ambil_milik(val_expr, v)?;
+            let milik = std::mem::take(&mut self.lit_milik) | std::mem::take(&mut self.hasil_pindah_milik);
+            let v = if milik { v } else { self.ambil_milik(val_expr, v)? };
             new_vals.push(v);
         }
-        if tunda.is_some() { place_ptrs[0] = Some(self.get_place(&a.targets[0])?); }
+        if tunda_ya { place_ptrs[0] = Some(self.tempat_tulis(&a.targets[0])?); }
         for (i, (tempat, rhs)) in place_ptrs.into_iter().zip(new_vals.into_iter()).enumerate() {
             let Some((ptr, ty)) = tempat else { continue };
             let rhs_final = if matches!(a.op, AssignOp::Eq) {
@@ -438,6 +493,10 @@ impl Codegen {
         if *ty == JrgType::Unit {
             return Val::unit();
         }
+        if let JrgType::Kotak(t) = ty {
+            let p = self.isi_kotak(ptr);
+            return self.load_place(&p, t);
+        }
         let reg = self.fresh("ld.");
         self.emit(format!("{} = load {}, ptr {}", reg, ty.llvm_ty(), ptr));
         Val { text: reg, ty: ty.clone() }
@@ -447,6 +506,19 @@ impl Codegen {
         self.push_scope();
         if let Some(init) = &ifs.init { self.codegen_stmt(init)?; }
         let merge = self.fresh_label("if.end.");
+        // Cabang yang pasti diambil dan menyimpang: sisa blok tidak terjangkau dan tidak diturunkan.
+        if self.kondisi_statis_kini(&ifs.cond) == Some(true) {
+            self.push_scope();
+            self.codegen_stmt_block(&ifs.then)?;
+            self.pop_scope();
+            // `panik` meninggalkan blok mati yang masih terbuka: diakhiri di sini, sisa blok tidak tercapai.
+            if super::codegen_statis::blok_menyimpang(&ifs.then) { self.terminate("unreachable".to_string()); }
+            if self.terminated { self.pop_scope(); return Ok(()); }
+            self.terminate(format!("br label %{}", merge));
+            self.start_block(merge);
+            self.pop_scope();
+            return Ok(());
+        }
         self.codegen_if_chain(&ifs.cond, &ifs.then, &ifs.else_ifs, 0, &ifs.else_, &merge)?;
         if !self.finished_blocks.iter().any(|_| false) { /* no-op, keeps borrow checker calm about unused merge in some paths */ }
         self.start_block(merge);
@@ -470,6 +542,17 @@ impl Codegen {
             self.codegen_stmt(init)?;
         }
         let merge = self.fresh_label("ifx.end.");
+        // Cabang yang jenisnya berbeda (`if c { 1 } else { "a" }`) berbagi satu slot bertag.
+        let campur = match expected {
+            None => {
+                let mut cs = vec![super::codegen_any::Cabang::Blok(&s.then)];
+                cs.extend(s.else_ifs.iter().map(|(_, _, b)| super::codegen_any::Cabang::Blok(b)));
+                cs.extend(s.else_.iter().map(super::codegen_any::Cabang::Blok));
+                self.jenis_cabang(&cs)
+            }
+            Some(_) => None,
+        };
+        let expected = campur.as_ref().or(expected);
         let mut acc = IfExprValue {
             slot: expected
                 .filter(|t| **t != JrgType::Unit)
@@ -506,6 +589,26 @@ impl Codegen {
         merge: &str,
         acc: &mut IfExprValue,
     ) -> Result<(), String> {
+        if let Some(b) = self.kondisi_statis_kini(cond) {
+            let blk = if b { Some(then_blk) } else if idx < else_ifs.len() { None } else { final_else.as_ref() };
+            if !b && idx < else_ifs.len() {
+                let (init, econd, eblk) = &else_ifs[idx];
+                self.push_scope();
+                if let Some(i) = init { self.codegen_stmt(i)?; }
+                self.codegen_if_expr_chain(econd, eblk, else_ifs, idx + 1, final_else, merge, acc)?;
+                self.pop_scope();
+            } else if let Some(blk) = blk {
+                self.push_scope();
+                let want = acc.slot.as_ref().map(|(_, t)| t.clone());
+                let v = self.codegen_block_expr(blk, want.as_ref())?;
+                self.pop_scope();
+                self.store_branch_value(v, acc);
+                if !self.terminated { self.terminate(format!("br label %{}", merge)); }
+            } else if !self.terminated {
+                self.terminate(format!("br label %{}", merge));
+            }
+            return Ok(());
+        }
         let cv = self.codegen_expr(cond, Some(&JrgType::Bool))?;
         let cond_i1 = self.to_i1(&cv);
         let then_lbl = self.fresh_label("ifx.then.");
@@ -576,6 +679,28 @@ impl Codegen {
         final_else: &Option<Block>,
         merge: &str,
     ) -> Result<(), String> {
+        if let Some(b) = self.kondisi_statis_kini(cond) {
+            if b {
+                self.push_scope();
+                self.codegen_stmt_block(then_blk)?;
+                self.pop_scope();
+                if !self.terminated { self.terminate(format!("br label %{}", merge)); }
+            } else if idx < else_ifs.len() {
+                let (init, econd, eblk) = &else_ifs[idx];
+                self.push_scope();
+                if let Some(i) = init { self.codegen_stmt(i)?; }
+                self.codegen_if_chain(econd, eblk, else_ifs, idx + 1, final_else, merge)?;
+                self.pop_scope();
+            } else if let Some(eb) = final_else {
+                self.push_scope();
+                self.codegen_stmt_block(eb)?;
+                self.pop_scope();
+                if !self.terminated { self.terminate(format!("br label %{}", merge)); }
+            } else if !self.terminated {
+                self.terminate(format!("br label %{}", merge));
+            }
+            return Ok(());
+        }
         let cv = self.codegen_expr(cond, Some(&JrgType::Bool))?;
         let cond_i1 = self.to_i1(&cv);
         let then_lbl = self.fresh_label("if.then.");

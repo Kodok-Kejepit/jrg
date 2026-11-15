@@ -6,6 +6,307 @@ mungkin terjadi; semuanya dicatat di bagian **Memutus**.
 
 ## [Belum dirilis]
 
+## [0.3.0] — 2026-11-15
+
+### Memutus
+
+- **`dok::serve` mendengar di `127.0.0.1` kalau alamatnya tidak ditulis** (dulu `0.0.0.0`). Server di belakang
+  proxy di mesin yang sama tetap jalan; untuk membukanya ke jaringan tulis `dok::serve(r, port, "0.0.0.0")`.
+- **WebSocket dari peramban ditolak 403 kalau host `Origin`-nya lain dari `Host`** (port boleh beda), supaya halaman
+  dari situs lain tidak bisa membuka koneksi atas nama pengunjung. Klien tanpa `Origin` tetap diterima.
+- **`select` dengan beberapa lengan yang siap sekaligus memilih secara acak** di semua mesin (dulu `--vm` dan
+  `--emit-llvm` selalu memilih yang pertama).
+- **`let`/`const` lokal yang bernama sama dengan varian enum milik berkasnya ditolak**, dengan kalimat yang sama
+  seperti di tingkat atas — nama telanjangnya selalu berarti varian.
+
+- **Klien HTTP (`http::`, `dok::http_request`) menolak kepala `Content-Length`, `Transfer-Encoding` dan
+  `Connection` dari pemakai**, dan `Host` yang ditulis dua kali — keduanya dulu terkirim di samping milik klien
+  sendiri, sehingga server dan proxy bisa membaca batas permintaan berbeda. `Host` yang ditulis sekali sekarang
+  menggantikan yang otomatis.
+- **`jrgm` tidak lagi menyerahkan nama berkas yang diawali `-` ke kompilator sebagai opsi**: jalurnya diberi `./`.
+- **`main -> int` sekarang kode keluar program** di interpreter, `--vm`, `jrgm run` dan `--emit-llvm`:
+  `pub fn main() -> int { 3 }` keluar dengan 3 (dulu 0 di interpreter dan `--vm`). Aturannya sama dengan `exit(n)`:
+  di luar 0–255 jadi galat. `main` beranotasi tipe lain (`-> string`) ditolak sebelum jalan. `main` tanpa anotasi
+  tidak berubah: nilai baris terakhirnya dibuang — dan di `--emit-llvm` tidak lagi jadi kode keluar.
+- **Rekursi tidak lagi dibatasi 10 000 tingkat.** Interpreter dan `--vm` sekarang menolak rekursi saat stack-nya
+  benar-benar hampir habis (interpreter ±20 ribu tingkat, `--vm` sampai 1 juta), dan pesannya tidak lagi menyebut
+  angka 10000.
+
+- **`dok::serve` menjawab 400 untuk jalur yang punya lebih dari satu ejaan:** segmen kosong (`//`), segmen `.` atau
+  `..`, `\`, dan garis miring yang di-encode (`%2F`, `%5C`). Router dan middleware dulu membaca jalur seperti itu
+  berbeda, sehingga penjaga izin di middleware bisa dilewati tanpa sesi.
+
+- **`crypto::base64_decode` dan semua pintu base64 menerima SATU ejaan per isi.** `=` di tengah data (`aGk=aGk=`
+  dulu terbaca `hihi`), bit sisa yang bukan nol (`aGl=` dulu sama dengan `aGk=`), dan spasi atau tab di tengah data
+  sekarang jadi `Err` yang menyebut posisinya. Ganti baris di tengah (base64 MIME) dan spasi di ujung tetap boleh.
+
+- **Versi dependensi git dan versi paket yang diterbitkan harus SemVer 2.0.0 persis.** `version = "v0.1.0"`, `"^1"`
+  dan `"0.01.0"` sekarang galat yang menyebut alasannya; `"^1"` dulu jadi tag `v^1` yang tidak pernah ada.
+  `jrgm publish` menerima versi pra-rilis (`1.0.0-rc.1`).
+- **`jrgm.toml` dan `jrgm.lock` dibaca sebagai TOML 1.0 yang ketat** (pengurai yang sama dengan `toml::parse`).
+  Kunci atau tabel kembar, teks tanpa kutip (`name = x`), dan nilai berjenis salah (`version = 1.0`,
+  `abi = ["a", 1]`) sekarang galat yang menyebut baris dan kuncinya; dulu kutipnya dibuang begitu saja dan isi tabel
+  sebaris dipecah di tiap koma, jadi `path = "../a,b"` terbaca salah. Dependensi berkunci asing (`pth`), atau yang
+  menulis `path` dan `git` sekaligus, ditolak. `[dependencies.nama]` sekarang terbaca. `jrgm remove name` tidak lagi
+  membuang `name` milik `[package]`, dan `jrgm add` meloloskan `"`/`\` di jalur dan URL.
+- **`dok::serve` membaca baris permintaan dan kepala dengan ketat.** Baris permintaan harus tepat `METODE /jalur
+  HTTP/1.x` dipisah satu spasi; tab, spasi ganda, bagian keempat, target bentuk absolut (`GET http://…`) dan `*`
+  dijawab 400, versi selain HTTP/1.0 dan HTTP/1.1 dijawab 505. Baris yang diakhiri LF tanpa CR, CR atau NUL di tengah
+  baris, karakter kendali di nilai kepala, `Host` kembar, dan `Host` yang bukan `host[:port]` sah dijawab 400.
+- **`dok::redirect` cuma menerima kode 301, 302, 303, 307, 308**, dan URL tujuan berkarakter kendali jadi galat.
+  Query `dok::serve` berisi lebih dari 10 000 pasangan dijawab 400.
+- **`dok::db_exec`/`dok::db_query` menjalankan tepat satu pernyataan.** Teks SQL berisi pernyataan kedua
+  (`"DELETE …; DROP TABLE t"`) sekarang `Err`; dulu yang kedua dibuang tanpa kabar. Komentar sesudahnya tetap boleh.
+- **Jumlah nilai parameter harus sama dengan jumlah `?`.** Dulu yang kurang diisi `nil` diam-diam.
+- **`dok::render` menempatkan nilai menurut konteks HTML.** `{{ x }}` di dalam `<script>`/`<style>`, di atribut
+  `on*`/`style`/`srcdoc`, di atribut tanpa tanda kutip, atau di tempat nama tag/atribut sekarang `Err` — meloloskan
+  HTML tidak melindungi tempat-tempat itu. Nilai di atribut URL (`href`, `src`, `action`, …) yang berskema selain
+  `http`/`https`/`mailto`/`tel` (mis. `javascript:`) diganti `#jrg-url-ditolak`. `{{{ x }}}` tetap mentah.
+- **`http::unduh` tidak lagi mengikuti pengalihan dari `https://` ke `http://`.** Isi unduhan dan jalurnya dulu
+  berpindah ke sambungan tanpa enkripsi tanpa kabar; sekarang `Err`.
+
+### Baru
+
+- **`jrgc file.jrg --jit`**: mesin eksekusi keempat. Fungsi yang hanya menghitung bilangan bulat (seperti `fib`,
+  faktorial, `gcd`) dikompilasi jadi kode mesin saat program berjalan — `fib(25)` ±13x lebih sedikit instruksi
+  daripada `--vm`; sisanya berjalan di VM sambil dicatat profilnya. Hasilnya, termasuk luapan ke 128 bit dan
+  kalimat galat beserta lokasinya, sama persis dengan dua mesin lain. Kode mesin yang menemui kasus di luar
+  tebakannya (luapan 64 bit, `% 0`, rekursi sangat dalam) diserahkan ke VM tepat di instruksi itu, tidak diulang
+  dari awal. Fungsi yang juga memegang teks, larik atau nilai lain tetap dikompilasi sampai instruksi pertama yang
+  menyentuh nilai itu, dan loop panas di `main` naik ke kode mesin di tengah jalan — `for i in 0..n` dan `while`
+  atas bilangan bulat ±30x lebih sedikit instruksi daripada `--vm`. `JRG_JIT_LOG=ringkas` melaporkan fungsi panas,
+  yang dikompilasi, yang ditolak beserta alasannya, dan jumlah deopt.
+
+- `JRGC_BATAS_MEMORI=<MiB>` membatasi memori biner yang dijalankan `jrgc --emit-llvm`; yang melewatinya berhenti
+  dengan "memori habis" alih-alih menghabiskan memori mesin.
+
+- **Dua puluh tiga modul `std/` baru, ditulis dalam JRG**, masing-masing menolak bentuk yang dibaca lain oleh pustaka bahasa
+  lain:
+  - `std/cli`: argumen baris perintah. Tanpa singkatan opsi, opsi yang ditulis dua kali jadi `Err`, `--` menutup
+    opsi, dan nilai berawalan `-` wajib ditulis `--opsi=-x`.
+  - `std/tanggal`: tanggal dan waktu tahun 1 sampai 9999 dengan offset tetap. RFC 3339 ketat: waktu tanpa zona,
+    detik 60 dan digit non-ASCII ditolak. `tambah_bulan` menjawab `Err` kalau tanggal tujuannya tidak ada.
+  - `std/glob`: pola berkas dengan waktu linear (tanpa ReDoS). `[` yang tak ditutup jadi `Err`, dan berkas
+    tersembunyi tidak ikut kecuali polanya menulis titik.
+  - `std/diff`: selisih Myers terpendek dan format unified yang dibaca `patch`.
+  - `std/shlex`: memecah dan mengutip perintah shell menurut aturan POSIX.
+  - `std/uuid`: v4 dan v7 dari sumber acak OS. Pengurainya cuma menerima bentuk kanonik.
+  - `std/ini`: kunci atau bagian kembar dan baris sambungan jadi `Err`. Nilai diambil apa adanya.
+  - `std/dotenv`: `${X}` tidak diekspansi, kunci kembar jadi `Err`, dan `muat` tidak menimpa lingkungan.
+  - `std/log`: log terstruktur (logfmt atau JSON per baris). Satu panggilan selalu satu baris karena `\n` dan
+    karakter kendali di-escape. Pesan tidak pernah ditafsirkan (tanpa `%s` dan `${..}`).
+  - `std/graf`: BFS, jalur terpendek Dijkstra, urutan topologi yang menyebut siklusnya, dan komponen terhubung.
+    Bobot negatif ditolak.
+  - `std/base32`: RFC 4648 ketat. Huruf kecil, padding salah dan bit sisa bukan nol jadi `Err`.
+  - `std/ip`: alamat IPv4/IPv6 dan CIDR. Nol di depan (`010.0.0.1`), heksa, bentuk pendek `127.1`, zona `%eth0` dan
+    CIDR yang bit host-nya terisi ditolak. `::ffff:127.0.0.1` digolongkan `loopback` (penangkal bypass SSRF).
+  - `std/mirip`: jarak Levenshtein per karakter, rasio kemiripan dan saran ejaan. Teks di atas 2000 karakter jadi
+    `Err` alih-alih dihitung berjam-jam.
+  - `std/lru`: cache berkapasitas tetap yang membuang entri paling lama tidak dipakai, O(1) per operasi. Kuncinya
+    wajib teks, karena `1` dan `"1"` akan jadi satu kunci.
+  - `std/os`: nama OS, arsitektur, folder rumah dan sementara, CPU, pengguna, deteksi Termux. `os::path()` membuang
+    entri `PATH` yang kosong atau relatif (jalan membajak program), dan `os::path_berbahaya()` menyebutnya.
+  - `std/templat`: templat teks `{{ jalur | filter }}` tanpa ekspresi, pemanggilan atau perulangan, jadi templat dari
+    luar tidak bisa menjalankan apa pun (kelas SSTI). Kunci yang hilang jadi `Err` yang menyebut barisnya.
+  - `std/bungkus`: membungkus dan memotong teks menurut lebar kolom layar, sehingga huruf Asia Timur dihitung dua
+    kolom dan tanda gabung tidak terpisah dari hurufnya.
+  - `std/cron`: ekspresi jadwal lima kolom dan waktu berikutnya. Langkah `/0`, rentang terbalik dan angka di luar
+    batas jadi `Err`; jadwal yang tidak pernah cocok (31 Februari) dijawab `Err`, tidak memutar tanpa akhir.
+  - `std/sandi`: pemeriksa kata sandi menurut NIST SP 800-63B, yang menilai panjang dan menolak sandi pasaran,
+    deret, pengulangan dan nama pengguna. Aturan "wajib huruf besar/simbol" sengaja tidak ada.
+  - `std/markdown`: Markdown ke HTML yang aman untuk masukan dari luar. HTML mentah selalu di-escape, dan tautan
+    cuma `http`/`https`/`mailto`/relatif (`JaVaScRiPt:` dan `java\tscript:` ikut ditolak). Biayanya linear, juga
+    untuk masukan jahat.
+  - `std/batas`: pembatas laju token bucket per kunci (penangkal tebak sandi dan banjir permintaan); jumlah kunci
+    yang diingat berbatas, jadi kunci palsu tanpa ujung tidak menghabiskan memori.
+  - `std/hitung`: kalkulator rumus dari luar, pengganti `eval()`; cuma aritmetika, variabel dan fungsi dari daftar
+    tetap, berbatas panjang dan kedalaman.
+  - `std/izin`: kontrol akses berbasis peran yang menolak secara bawaan; peran atau aksi yang tidak dikenal tidak
+    pernah diizinkan, dan `produk.*` tidak mencakup `produkx`.
+- **`crypto::base64url_encode`, `crypto::base64url_decode` dan `crypto::base64url_decode_bytes`** di tiga mesin:
+  base64 untuk URL, cookie dan token, tanpa padding dan dengan satu ejaan per isi. `jwt::` dan sesi `dok::` memakai
+  aturan yang sama.
+- **`env::os()` dan `env::arch()`** di tiga mesin: nama sistem operasi (`linux`, `android`, `macos`, `windows`,
+  `freebsd`) dan arsitektur (`x86_64`, `aarch64`, `arm`, `x86`, `riscv64`) dari biner itu sendiri. Yang tidak
+  dikenali dijawab `tak-dikenal`, tidak pernah ditebak.
+
+- **Pesan galat tidak lagi mengutip masukan utuh.** Teks dari luar yang disebut pesan galat `str::to_int`/`int()`/
+  `float()`, `json::parse`, `toml::parse`, `url::parse` dan `re::compile` dipotong kalau lebih dari 64 karakter
+  (dengan panjang aslinya), dan karakter kendali serta pengubah arah ditulis sebagai `\u{..}`. Dulu angka 2 juta digit
+  jadi pesan 2 MB, dan `"12\nPALSU"` menyisipkan baris palsu ke log.
+- `fs::safe_join(dasar, relatif)`: jalur di bawah sebuah folder yang tidak bisa keluar darinya. `..`, jalur absolut
+  (yang di `fs::join` menimpa dasarnya), `\`, huruf drive, bagian kosong dan karakter kendali jadi `Err`, juga
+  tautan simbolik yang menunjuk ke luar folder dasar atau ke tempat yang tidak ada. Aturan namanya sama dengan
+  penjaga `zip::`/`tar::`.
+- `semver::parse`, `semver::compare`, `semver::satisfies`: SemVer 2.0.0 dan rentangnya (`^1.2, <1.5 || =2.0.0`).
+  Bentuk yang dibaca lain oleh pengurai lain jadi `Err`: awalan `v`/`=`, nol di depan, angka di luar 64 bit, versi
+  tanpa operator di rentang, spasi atau tanda hubung sebagai pemisah, wildcard `1.x`. Versi pra-rilis cuma cocok
+  dengan rentang yang menulis pra-rilis berinti sama. Pengurainya linear, tanpa regex.
+- `toml::parse`, `toml::stringify`: TOML 1.0. Bentuk yang dibaca lain oleh pengurai lain jadi `Err`: kunci atau
+  tabel kembar, tabel diperluas lewat kunci bertitik atau header, tabel sebaris diperluas, bilangan di luar 64 bit,
+  nol di depan, escape di luar TOML 1.0, CR telanjang, tanggal mustahil; sarang paling dalam 256.
+- `dok::host_check(req, izin)`: kepala `Host` dicocokkan dengan daftar izin (`contoh.id`, `.contoh.id` beserta
+  subdomainnya, `host:port`) — penangkal DNS rebinding dan tautan reset sandi yang memakai `Host` palsu.
+- `dok::form`, `dok::multipart`: badan formulir dan unggahan diurai ketat — bentuk yang dibaca lain oleh pengurai
+  lain (kepala atau parameter kembar, `filename*`, `\"`, baris tanpa CR) jadi `Err`, paling banyak 1 000 bagian.
+- `dok::berkas_aman(nama)`: nama berkas unggahan yang aman disimpan (tanpa folder, `..`, titik depan, nama perangkat).
+- `dok::safe_redirect(tujuan, cadangan)`: pengalihan ke `tujuan` hanya kalau jalur lokal, penangkal pengalihan terbuka.
+- `url::parse`, `url::build`, `url::join`, `url::query_parse`, `url::query_build`: satu pengurai URL yang juga
+  dipakai klien `http::`. URL yang dibaca lain oleh pengurai lain jadi `Err`: spasi dan karakter kendali, `\`,
+  `@` ganda, IPv4 oktal/heksa/bulat, host ber-`%XX`, `http:` tanpa `//`. `..` diselesaikan saat mengurai, kunci
+  query kembar tetap dua pasangan, `;` bukan pemisah. Klien `http::` menolak kredensial di URL dan menyelesaikan
+  pengalihan relatif menurut RFC 3986.
+- `tar::list`, `tar::read`, `tar::read_text`, `tar::extract`, `tar::create`: arsip tar dan `.tar.gz` tanpa
+  dependensi. Nama yang keluar folder tujuan, tautan simbolik dan keras, entri berukuran ganda, sparse, nama ganda
+  dan data sesudah penanda akhir ditolak; `extract` memeriksa seluruh arsip sebelum menulis dan tidak pernah menimpa.
+- `gzip::compress`, `gzip::decompress`, `gzip::decompress_text`: format gzip tanpa dependensi. Hasil bongkaran di atas
+  256 MiB ditolak sebagai bom, CRC32 dan ukuran tiap anggota diperiksa sebelum isinya diserahkan, kepala yang
+  terpotong atau ber-bit cadangan dan byte sisa sesudah anggota terakhir jadi `Err`.
+- `http::hanya_publik(true)`: sesudahnya klien `http::` dan `dok::http_*` menolak alamat loopback, privat,
+  link-local, CGNAT, multicast dan metadata awan (`169.254.169.254`), juga yang dibungkus IPv6. Yang diperiksa alamat
+  hasil DNS yang benar-benar disambungi, di tiap pengalihan — pakai saat URL datang dari pemakai (SSRF).
+- `dok::csrf_token`, `dok::csrf_verify`: token CSRF yang terikat ke sesi dan bercap waktu (bawaan 12 jam), dibandingkan
+  dalam waktu tetap; token sesi lain, token kedaluwarsa, dan token yang diubah ditolak.
+- `jwt::sign`, `jwt::verify`: JSON Web Token HS256. Algoritmanya dipatok (token `alg: none` atau algoritma lain ditolak),
+  rahasia minimal 32 byte, `exp`/`nbf` diperiksa, dan token dengan kunci JSON kembar ditolak.
+- `xml::parse`, `xml::stringify`, `xml::escape`: XML tanpa dependensi. DTD ditolak utuh, jadi entitas eksternal (XXE)
+  dan ledakan entitas tidak mungkin; sarang dibatasi, atribut ganda ditolak, dan penulisnya menolak nama elemen atau
+  atribut yang bisa menyisipkan markup.
+- `zip::list`, `zip::read`, `zip::read_text`, `zip::extract`, `zip::create`: membaca, membongkar dan membuat arsip
+  ZIP. Arsip yang mencoba keluar dari folder tujuan (`../`, jalur absolut), berisi tautan simbolik, nama ganda,
+  bom zip, atau isi yang tidak cocok dengan CRC-nya ditolak sebelum satu berkas pun ditulis, dan berkas yang sudah
+  ada tidak pernah ditimpa.
+- `crypto::compare_digest(a, b)`: membandingkan tanda tangan atau token (teks atau array byte) dalam waktu tetap,
+  padanan `hmac.compare_digest` di Python. Pakai ini, bukan `==`, saat memeriksa HMAC webhook atau token rahasia.
+
+### Kinerja
+
+- **`--jit` sekarang juga mengompilasi kode yang memegang struct, enum, larik dan teks**, bukan cuma bilangan
+  bulat: field dibaca lewat tembolok bentuk, `match` atas enum diputuskan sekali per rantai lengan, fungsi kecil
+  dipanggil tanpa bingkai VM, dan `len`/`str::char_at` atas teks lokal tanpa salinan. `string_ops` penuh
+  `--vm` 9,3 s, `--jit` 0,70 s.
+- **`let r = arr::pop(a)` lalu `a = r[0]`, dan `a, x = a.pop()`, sekarang linear** di interpreter dan `--vm`
+  (dulu menyalin seluruh larik tiap langkah: 16 000 pop 2,2 s → 38 ms).
+- `xml::parse` linear dalam jumlah atribut (160 ribu atribut 34 s → 0,24 s).
+
+- **`--vm` 2–28% lebih cepat** di kernel acuan: membaca dan menulis `a[i]` atas larik yang dimiliki satu variabel
+  tidak lagi mengunci, `x + 1`/`i % k`/`a * b` atas bilangan bulat dan langkah maju `for` dikerjakan sebagai satu
+  instruksi, dan memanggil fungsi tanpa `defer` tidak lagi membayar pemeriksaannya.
+
+- Biner `--emit-llvm`: `str(x % n)` dan `str(rekaman.field)` di tengah sambungan teks tidak lagi membuat teks
+  sementara.
+- Biner `--emit-llvm`: rantai `a + b + c` atas teks disambung dalam satu alokasi, `len(s)` dan `s[i]` atas teks
+  ASCII tidak memanggil runtime, `str::reverse`/`str::replace` lebih cepat — `string_ops` 282 → 156 ms.
+
+### Diperbaiki
+
+- `wasm::muat`/`wasm::panggil` atas modul yang menyebut jumlah parameter, lokal atau cabang `br_table` raksasa
+  menjawab `Err`; dulu berkas 17 byte mematikan proses (alokasi 4 GB). Batasnya sama dengan Wasmtime.
+- Biner `--emit-llvm`: `json::merge` atas struct ditolak di baris panggilannya dengan jalan keluarnya
+  (`dict { ...p }`); dulu kalimatnya salah alamat.
+- Biner `--emit-llvm`: `const` lokal dan `fn` di dalam blok polos tidak lagi dibuang atau salah dibaca.
+- Pesan galat klien HTTP dan `url::parse` tidak lagi memuat sandi dari URL (`user:sandi@host` jadi `***@host`).
+
+- `struct Ptr`, `struct Task`, `struct DokRouter` (dan nama handle pustaka lain) yang dideklarasikan program sendiri
+  tidak lagi bisa memalsukan handle pustaka atau membuka tulis `.id` pada handle asli; `Task::spawn` dan `Future::new`
+  tetap bisa dipanggil dari berkas yang mendeklarasikan struct bernama sama.
+- Biner `--emit-llvm`: `var` modul array yang didorong elemen berjenis lain (`A = A.push(ubah())`), variabel `Result`
+  yang berganti jenis muatan (`r = Ok(1)` lalu `r = Ok("s")` atau `r = Ok(r)`), dan kunci dict bertipe `nil`, `array`,
+  `tuple`, `struct`, `enum`, atau `dict` sekarang berjalan sama dengan interpreter dan `--vm`; penerima method array
+  dan dict (`f().push(x)`, `A.push(ubah())`) dievaluasi tepat sekali di atas salinan yang aman dari mutasi argumen.
+- Keamanan jaringan dan pelayan HTTP: `dok::router_static` menolak tautan simbolik yang keluar dari folder dasar
+  (`fs::safe_join`, 403); `http::unduh` membatasi panjang dan jumlah baris kepala jawaban serta memeriksa penutup CRLF
+  tiap potongan `Transfer-Encoding: chunked`; `dok::ws_recv` menolak frame klien tanpa mask dan urutan fragmen yang
+  melanggar RFC 6455 (kode 1002).
+- `--vm`: `f.floor` atas bilangan (tanpa `()`) menjawab nilainya seperti interpreter, dulu `<native fn>`; method
+  yang tidak ada (`x.uper(f())`) ditolak SESUDAH argumennya dievaluasi; memanggil field yang bukan fungsi
+  (`p.x(2)`) menyebut field yang ada, dulu "`int` bukan fungsi".
+- Biner `--emit-llvm` menerima sebar di literal varian ber-field (`E::V { a: 5, ...x }`), dari struct atau dari
+  varian enum yang sama; dulu ditolak saat kompilasi.
+- Biner `--emit-llvm`: method `Option`/`Result` (`x.is_some()`, `x.unwrap_or(0)`) atas variabel yang bisa berisi
+  jenis apa pun berhenti dengan pesan bahwa method itu "ditulis tanpa `()`" — sekarang dijawab seperti di
+  interpreter.
+- Biner `--emit-llvm` menerima variabel `Option` yang diisi ulang dengan isi berjenis lain (`o = Some(o)`, atau
+  `None` lalu `Some("t")`); dulu ditolak saat kompilasi.
+- Biner `--emit-llvm`: fungsi yang menumbuhkan array dari array lain yang juga sedang tumbuh (`std/csv::from_dicts`
+  atas hasil `csv::to_dicts`) bisa dikompilasi dengan tipe kembalian yang berbeda antara pemanggil dan fungsinya,
+  tergantung urutan acak di dalam kompilator — sebagian kompilasi berhenti dengan "tag nilai tidak dikenal" atau
+  "memori habis". Sumber yang sama sekarang selalu menghasilkan biner yang sama.
+- `x ** n` dengan `x` pecahan dan `n` bulat dibulatkan tepat di interpreter dan `--vm` — dulu digit terakhirnya
+  bisa beda dari `--emit-llvm` (`1.1 ** 10` menjawab `2.593742460100002`, yang tepat `2.5937424601000023`).
+- Biner `--emit-llvm`: `**` atas nilai yang jenisnya baru diketahui saat jalan (`n[0] **= 2` atas `[1, 2.5]`).
+- Biner `--emit-llvm`: `+` yang mengubah lokal jadi teks (`c = c + "z"` atas array, `n = n + "x"` atas bulat),
+  `+` atas dua nilai bertag berisi array, dan `d = dict::set(d, k, v)` dengan `v` berjenis lain jalan — dulu
+  ditolak.
+- Biner `--emit-llvm`: elemen array `var` yang ditulis berjenis lain (`a[1] = "q"` atas `[1, 2]`) dan literal yang
+  mencampur array dengan teks atau dict (`[[1, 2], "z"]` yang elemennya ditulis) jalan — dulu ditolak saat
+  kompilasi.
+- Biner `--emit-llvm`: handle `py::`/`js::`/`php::`/`lua::` yang cuma dipakai di dalam satu blok (badan loop,
+  fungsi) dilepas di ujung blok itu — dulu worker bahasa lain menyimpan tiap objek sampai program selesai.
+- Biner `--emit-llvm`: literal array berisi array yang panjangnya berbeda (`[[t], [t, t]]` atas tuple, `Option`
+  atau variabel) jalan — dulu ditolak saat kompilasi.
+- Nilai bersarang sangat dalam (jutaan tingkat) bisa ditampilkan, dibandingkan, diurutkan dan disandikan JSON di
+  interpreter dan `--vm` — dulu prosesnya mati tanpa pesan di atas ±1 juta tingkat. `str()` dan `json::stringify`
+  atas nilai bersarang tidak lagi melambat kuadratik di `--vm` (500 ribu tingkat: 29 detik → 0,4 detik).
+- Biner `--emit-llvm`: `match x { None => .., _ => .. }` atas elemen array atau isi dict campur tipe yang berisi
+  `None` (atau varian tanpa isi milik programmu) memilih lengan yang benar — dulu selalu jatuh ke `_`. Pola
+  `Some(v)`, `Ok(x)`, `Err(e)` dan varian enum generik atas nilai campur tipe jalan (dulu ditolak saat kompilasi),
+  `for` atas nilai campur tipe yang berisi dict, teks atau bilangan jalan, dan `match` tanpa lengan yang cocok
+  menyebut nilainya seperti interpreter.
+- Biner `--emit-llvm`: menulis lewat indeks ke dalam nilai campur tipe (`e[1] = x` atas elemen array campur,
+  `d["k"][1] = x`, `a[0][1] = y`) jalan seperti di interpreter — dulu ditolak saat kompilasi. `t.0` atas tuple di
+  dalam nilai campur tipe juga jalan. `--vm` menyebut `t.5` di luar batas dengan kalimat yang sama dengan interpreter.
+- `jrgc f.jrg --uji --emit-llvm` menjalankan tes di biner native, dengan laporan dan kode keluar yang sama dengan
+  interpreter (dulu "fungsi `main` tidak ditemukan"). Laporan `--uji` tidak lagi menyebut nomor baris berkas uji
+  untuk galat yang lahir di modul lain — baris itu dulu karangan.
+- Biner `--emit-llvm`: ke-23 modul `std/` baru (dulu 7) jalan di sana — `base32`, `batas`, `cli`, `cron`, `diff`,
+  `dotenv`, `glob`, `graf`, `hitung`, `ini`, `ip`, `lru`, `markdown`, `shlex`, `tanggal`, `templat` bertambah. `arr::min`/`max` menerima array
+  yang panjangnya baru diketahui saat jalan. Cabang `typeof` yang mustahil tidak lagi
+  diturunkan, closure di dalam modul bisa memanggil fungsi modulnya, `r.map_err(..)` dan `Ok(None)` bertipe benar,
+  `math::min`/`max`, `str::join` dan operator bit menerima nilai campur jenis, dan `x = m::f(x, ..)` serta
+  `x, y = f(x, ..)` tidak lagi menyalin `x`.
+- Biner `--emit-llvm`: `arr::sort_desc` menukar elemen yang setara (`[2, 2.0]` → `[2.0, 2]`) — sekarang stabil
+  seperti dua mesin lain. `<` dan pengurutan atas array berisi nilai campur jenis jalan (dulu ditolak), literal
+  array campur dari variabel (`[n, i, nama]`) dan indeks konstanta modul (`NAMA[i]`) diterima; `std/mirip` dan
+  `std/uuid` jalan di sana. Akses karakter teks lebih cepat: `string_ops` 822 → 276 ms, `mixed_report` 585 → 301 ms.
+- Biner `--emit-llvm`: perulangan atas teks (`for c in s`, `str::chars`) dan `s = s + rune` sekarang linear (dulu
+  480 ribu karakter ±5 s), `x = arr::pop(x)[0]` tidak lagi menyalin `x`, dan `x = arr::push(x, ..)` di fungsi yang
+  memakai closure tidak lagi menyalin `x` — `std/csv`, `std/shlex`, `std/path` dan `std/tabel` jadi linear di sana.
+- `arr::contains`, `arr::index_of`, `.starts_with`/`.ends_with` atas array di `--vm` tidak lagi menyalin seluruh array.
+- `std/tabel` (`baris_baru`, `dari`, `rata_kanan`) linear di tiga mesin.
+- Teks tidak lagi disalin tiap kali dibaca: argumen `str::`, `s[i]`, `str::char_at` dan `str::starts_with` atas
+  teks panjang sekarang tidak bergantung pada panjangnya (dulu 1,6 MB teks ±1 ms per panggilan di `--vm`), dan
+  `s[a:b]`/`str::substr` tidak lagi membuat daftar karakter seluruh teks.
+- `std/csv::parse`, `std/path::normalize`, `std/graf` (membangun graf dan `urut_topologi`), `std/iterator::group_by`
+  dan `std/lru` sekarang linear — dulu kuadrat (12 ribu baris CSV 4,7 s → 85 ms); antrean `std/lru` dulu tumbuh
+  tanpa batas.
+- Di `--emit-llvm`, array/dict yang tersimpan di tempat campur tipe sekarang bisa dibandingkan dengan `==`/`!=`
+  (dulu ditolak) dan ditampilkan sedalam apa pun (dulu 20 ribu tingkat kehabisan stack).
+- `x = [.., x, ..]` (mis. `a = [a, i]` di perulangan) di `--emit-llvm` sekarang linear; dulu seluruh `x` disalin
+  tiap langkah, jadi 20 ribu langkah memakan 3 GB.
+- `--vm` yang tidak bisa membuat thread programnya (batas memori proses) sekarang menjalankan program di thread
+  pemanggil; dulu ia panik.
+
+- `obj.d = dict::set(obj.d, k, v)` dan `obj.d = dict::remove(obj.d, k)` sekarang mengubah dict di tempat; dulu menyalin
+  seluruh dict tiap kali, jadi menghapus 16 000 kunci satu per satu makan 20 detik.
+
+- `obj.daftar = arr::push(obj.daftar, x)` sekarang tumbuh di tempat seperti `obj.daftar.push(x)`; dulu menyalin seluruh
+  array tiap kali, jadi 32 000 elemen makan 52 detik.
+
+- `int("777…7x")` dan `str::to_int` atas teks panjang yang bukan bilangan dulu disebut "di luar jangkauan integer
+  128 bit". Sekarang disebut "bukan bilangan bulat", karena luapan cuma dilaporkan kalau teksnya seluruhnya digit.
+
+- Klien `http::`/`dok::http_*`: menyambung dibatasi 10 detik per alamat (dulu bisa menggantung beberapa menit), dan
+  URL berhost IPv6 (`http://[::1]:8080/`) dulu ditolak sebagai port tidak sah.
+- `dok::password_hash`/`password_verify`: sandi yang sangat panjang dulu membuat satu login memakan menit CPU (sandi
+  di-hash ulang tiap putaran); sekarang biayanya sama dengan sandi biasa. Hash lama tetap cocok.
+- `--vm`: `let`/`const`/`var` tingkat modul yang initializer-nya membuat variabel lokal (`a ?? b`, `match` yang
+  mengikat nama, blok berisi `let`) dulu gagal dengan galat internal `local slot 0 OOB`.
+- `--emit-llvm`: `str::repeat(s, n)` dan `s * n` dengan `n` negatif dulu menjawab teks kosong; sekarang galat seperti
+  dua mesin lain, juga untuk hasil di atas 256 MiB. `arr::fill`/`arr::repeat` memegang batas 16 777 216 elemen yang
+  sama.
+- Contoh web tidak lagi menulis rahasia sesi di sumbernya; mereka membaca `SESSION_KEY`, atau membuat kunci acak.
+
 ## [0.2.0] — 2026-10-18
 
 Rilis kedua. Backend LLVM sekarang menjalankan konkurensi, modul, dan sebagian besar pustaka; `jrgm` jadi pengelola

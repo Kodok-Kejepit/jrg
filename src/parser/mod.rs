@@ -27,6 +27,19 @@ pub struct ParseError {
 
 use crate::lexer::is_keyword_token;
 
+impl Parser {
+    /// Satu tingkat sarang lagi, atau galat berlokasi kalau melewati `MAKS_SARANG`.
+    pub(crate) fn masuk_sarang(&mut self) -> Result<(), ParseError> {
+        if self.dalam >= MAKS_SARANG {
+            return Err(ParseError { span: self.current().span, msg: format!(
+                "sarang terlalu dalam — lebih dari {} tingkat kurung, blok, atau operator bertumpuk\n\
+                 bantuan: pecah ekspresinya lewat variabel sementara atau fungsi", MAKS_SARANG) });
+        }
+        self.dalam += 1;
+        Ok(())
+    }
+}
+
 pub struct Parser {
     tokens:  Vec<Token>,
     pos:     usize,
@@ -47,13 +60,19 @@ pub struct Parser {
     minus_baru: bool,
     /// Literal 2^127 yang diizinkan di bawah `-`, diperiksa lagi oleh `-`-nya.
     literal_min: Option<Span>,
+    /// Kedalaman sarang ekspresi/blok yang sedang diurai (`masuk_sarang`).
+    dalam: u32,
 }
+
+/// Batas sarang: lebih dalam dari ini, stack pengurai sendiri habis (dulu SIGABRT tanpa pesan,
+/// juga di `jrgm lint`, LSP dan mesin Praktik). Kode sungguhan tidak pernah sedalam ini.
+pub const MAKS_SARANG: u32 = 256;
 
 impl Parser {
     pub fn new(tokens: Vec<Token>, recover: bool) -> Self {
         Parser { tokens, pos: 0, errors: Vec::new(),
             tambahan_item: Vec::new(), arg_sebar: Vec::new(), recover,
-                 larang_struct_literal: false, minus_baru: false, literal_min: None }
+                 larang_struct_literal: false, minus_baru: false, literal_min: None, dalam: 0 }
     }
 
     /// Urai ekspresi sebagai HEADER kontrol: `{` yang menyusulnya membuka
@@ -526,6 +545,11 @@ impl Parser {
     }
 
     fn telusuri_lingkup(file: &ParsedFile) -> mutabilitas::Pemeriksa {
+        Self::telusuri_lingkup_modul(file, &[])
+    }
+
+    fn telusuri_lingkup_modul(file: &ParsedFile, modul: &[(String, &ParsedFile)]) -> mutabilitas::Pemeriksa {
+        use std::collections::HashMap;
         let mut pm = mutabilitas::Pemeriksa::baru();
         // Pemeriksaan arity builtin ikut penelusuran INI, bukan yang kedua — persis
         // alasan yang sudah tertulis di bawah.
@@ -542,14 +566,36 @@ impl Parser {
                     }
                 }
                 Item::Trait(d)  => { pm.tipe_sendiri.insert(d.name.clone()); }
-                Item::Fn(f) => {
-                    let nama = |p: &crate::parser::FnParam| match &p.pattern {
-                        crate::parser::Pattern::Ident { name, .. } => name.clone(), _ => String::new() };
-                    let min = f.params.iter().filter(|p| p.default.is_none() && !p.is_variadic).count();
-                    let maks = (!f.params.iter().any(|p| p.is_variadic)).then_some(f.params.len());
-                    pm.fungsi_atas.insert(f.name.clone(), (min, maks, f.params.iter().map(nama).collect()));
-                }
+                Item::Fn(f) => { pm.fungsi_atas.insert(f.name.clone(), batas_fungsi(f)); }
                 _ => {}
+            }
+        }
+        // `T::m(..)`: cuma method yang dideklarasikan tepat sekali untuk `T` di berkas ini
+        // (warisan, default trait dan nama ganda diputuskan saat jalan), tipe non-generik.
+        let mut metode: HashMap<String, Option<(usize, Option<usize>, Vec<String>)>> = HashMap::new();
+        for item in &file.items {
+            let Item::Impl(d) = item else { continue };
+            let TypeExpr::Named(t) = &d.self_type else { continue };
+            if !t.args.is_empty() || t.package.is_some() || t.modul.is_some() || !d.generics.params.is_empty() || !pm.tipe_sendiri.contains(&t.name) { continue }
+            for it in &d.items {
+                let ImplItem::Method(f) = it else { continue };
+                metode.entry(format!("{}::{}", t.name, f.name))
+                    .and_modify(|v| *v = None).or_insert(Some(batas_fungsi(f)));
+            }
+        }
+        let alias: std::collections::HashSet<String> = file.imports.iter()
+            .map(|i| i.alias.clone().unwrap_or_else(|| crate::module::ModuleResolver::module_name(&i.path))).collect();
+        for (jalur, b) in metode {
+            let Some((a, m, p)) = b else { continue };
+            if alias.contains(jalur.split("::").next().unwrap_or("")) { continue }
+            pm.jalur_atas.insert(jalur.clone(), (a, m, p, jalur));
+        }
+        for (al, m) in modul {
+            for item in &m.items {
+                let Item::Fn(f) = item else { continue };
+                if f.name.starts_with('_') { continue }
+                let (a, b, c) = batas_fungsi(f);
+                pm.jalur_atas.insert(format!("{}::{}", al, f.name), (a, b, c, f.name.clone()));
             }
         }
         let mut pemilik: std::collections::BTreeMap<String, Vec<String>> = Default::default();
@@ -558,6 +604,7 @@ impl Parser {
                 for v in &d.variants { pemilik.entry(v.name.clone()).or_default().push(d.name.clone()); }
             }
         }
+        pm.varian_berkas = pemilik.iter().map(|(v, e)| (v.clone(), e[0].clone())).collect();
         pm.varian_ganda = pemilik.into_iter().filter(|(_, e)| e.len() > 1).collect();
         pm.berkas(&file.items);
         pm
@@ -603,13 +650,7 @@ impl Parser {
                 }
             }
             let tabrak_varian = |nama: &str, kw: &str, span: Span, temuan: &mut Vec<(String, Span)>| {
-                if let Some(tipe) = varian.get(nama) {
-                    temuan.push((format!(
-                        "`{}` sudah jadi nama varian `{}::{}` di berkas ini, sekarang sebagai `{}`\n \
-                         bantuan: nama `{}` telanjang selalu berarti variannya, jadi deklarasi ini \
-                         tidak akan pernah terjangkau — ganti salah satu namanya",
-                        nama, tipe, nama, kw, nama), span));
-                }
+                if let Some(tipe) = varian.get(nama) { temuan.push((pesan_nama_varian(nama, tipe, kw), span)); }
             };
             for item in &file.items {
                 match item {
@@ -786,7 +827,6 @@ impl Parser {
                     for it in &td.items {
                         let fd = match it {
                             TraitItem::Method(fd) | TraitItem::DefaultMethod(fd) => fd,
-                            _ => continue,
                         };
                         let mut gm = g.clone();
                         gm.extend(nama_generik(&fd.generics));
@@ -1393,10 +1433,30 @@ pub fn aritas_fungsi_pemakai(file: &ParsedFile) -> Vec<(String, Span)> {
     Parser::telusuri_lingkup(file).aritas_pemakai
 }
 
+/// Sama, ditambah `alias::f(..)` ke fungsi tingkat atas modul yang diimpor `file` (`modul`: alias → isinya).
+pub fn aritas_dengan_modul(file: &ParsedFile, modul: &[(String, &ParsedFile)]) -> Vec<(String, Span)> {
+    Parser::telusuri_lingkup_modul(file, modul).aritas_pemakai
+}
+
+/// (paling sedikit, paling banyak, nama parameter) sebuah fungsi, dengan aturan saat jalan.
+fn batas_fungsi(f: &FnDecl) -> (usize, Option<usize>, Vec<String>) {
+    let nama = |p: &FnParam| match &p.pattern { Pattern::Ident { name, .. } => name.clone(), _ => String::new() };
+    let min = f.params.iter().filter(|p| p.default.is_none() && !p.is_variadic).count();
+    let maks = (!f.params.iter().any(|p| p.is_variadic)).then_some(f.params.len());
+    (min, maks, f.params.iter().map(nama).collect())
+}
+
 /// Lokal `let`/`var`/`const`/`:=` yang tidak pernah dibaca, dari penelusuran lingkup yang sama
 /// dengan aturan mutabilitas (dipakai `jrgm lint`); urut menurut letaknya.
 pub fn lokal_tak_dibaca(file: &ParsedFile) -> Vec<(String, Span)> {
     let mut v = Parser::telusuri_lingkup(file).tak_dibaca;
     v.sort_by_key(|(_, sp)| sp.lo.0);
     v
+}
+
+/// Nama varian telanjang milik berkas dipakai lagi oleh `fn`/`const`/`var` tingkat atas atau `let`/`const` lokal.
+pub(crate) fn pesan_nama_varian(nama: &str, tipe: &str, kw: &str) -> String {
+    format!("`{}` sudah jadi nama varian `{}::{}` di berkas ini, sekarang sebagai `{}`\n \
+             bantuan: nama `{}` telanjang selalu berarti variannya, jadi deklarasi ini \
+             tidak akan pernah terjangkau — ganti salah satu namanya", nama, tipe, nama, kw, nama)
 }

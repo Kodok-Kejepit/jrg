@@ -1,0 +1,38 @@
+package main
+import "std/batas"
+
+fn test_kapasitas_lalu_terisi_lagi() {
+    var p = batas::baru(3, 1, 100)
+    var hasil = []
+    for _, t in [0, 0, 0, 0, 500, 1000, 1001, 4000, 4000, 4000, 4000] {
+        let (q, boleh) = batas::coba(p, "1.2.3.4", t)
+        p = q
+        hasil = arr::push(hasil, boleh)
+    }
+    assert_eq(hasil, [true, true, true, false, false, true, false, true, true, true, false])
+    assert_eq(batas::tunggu_ms(p, "1.2.3.4", 4000), 1000)
+    assert_eq(batas::tunggu_ms(p, "lain", 4000), 0)
+}
+
+fn test_kunci_terpisah() {
+    var p = batas::baru(1, 0.5, 100)
+    let (p1, a) = batas::coba(p, "a", 0)
+    let (p2, b) = batas::coba(p1, "b", 0)
+    let (p3, a2) = batas::coba(p2, "a", 10)
+    assert_eq([a, b, a2], [true, true, false])
+    assert_eq(batas::tunggu_ms(p3, "a", 10), 1990)
+}
+
+fn test_memori_berbatas_dan_murah() {
+    var p = batas::baru(5, 0.001, 1000)
+    let t0 = time::now_ms()
+    // Bentuk yang memindahkan `p` ke `coba`: `let (q, _) = ..; p = q` menyalin dict-nya tiap panggilan.
+    for _, i in range(20000) {
+        p, _ = batas::coba(p, «palsu-${i}», i)
+        assert(batas::jumlah_kunci(p) <= 1000)
+    }
+    assert(time::now_ms() - t0 < 60000)
+    var boleh = false
+    p, boleh = batas::coba(p, "palsu-19999", 20000)
+    assert(boleh)
+}

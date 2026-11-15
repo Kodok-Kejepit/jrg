@@ -133,7 +133,7 @@ impl Interpreter {
                     Ok(_) => {
                         if line.ends_with('\n') { line.pop(); }
                         if line.ends_with('\r') { line.pop(); }
-                        Ok(Value::Str(line))
+                        Ok(Value::Str(std::sync::Arc::new(line)))
                     }
                     Err(e) => runtime_err!("tok: {}", e),
                 }
@@ -145,7 +145,7 @@ impl Interpreter {
             }
             FmtSprint => {
                 let s = self.tampil_gabung(&args)?;
-                Ok(Value::Str(s))
+                Ok(Value::Str(std::sync::Arc::new(s)))
             }
 
             // ---------------------------------------------------------------
@@ -162,7 +162,7 @@ impl Interpreter {
             // Tanpa argumen DITOLAK, seperti `int()` — dulu `str()` menjawab
             // teks "nil" di sini dan "" di `--vm`.
             ToStr if args.is_empty() => runtime_err!("{}", crate::interpreter::pesan_butuh_nilai("str()")),
-            ToStr   => Ok(Value::Str(format!("{}", fst(&args)))),
+            ToStr   => Ok(Value::teks(format!("{}", fst(&args)))),
             ToList if args.is_empty() => runtime_err!("{}", crate::interpreter::pesan_butuh_nilai("list()")),
             ToList  => match fst(&args) {
                 Value::Array(a)  => Ok(Value::Array(a)),
@@ -193,7 +193,7 @@ impl Interpreter {
             ParseInt   => Self::parse_int_lepas(&fst(&args)),
             ParseFloat => Self::parse_float_lepas(&fst(&args)),
             Typeof if args.is_empty() => runtime_err!("{}", crate::interpreter::pesan_butuh_nilai("typeof()")),
-            Typeof => Ok(Value::Str(crate::ruang_tipe::bersihkan(fst(&args).type_name()))),
+            Typeof => Ok(Value::Str(std::sync::Arc::new(crate::ruang_tipe::bersihkan(fst(&args).type_name())))),
 
             // `terap(f, args)` — mesin di balik gula `f(...v)`.
             Terap => {

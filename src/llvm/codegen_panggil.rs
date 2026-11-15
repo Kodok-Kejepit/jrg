@@ -41,6 +41,7 @@ impl Codegen {
                     || self.tables.extern_desk.contains_key(name) {
                     return self.call_named_function(name, args, expected, span);
                 }
+                if let Some(r) = self.terap_statis(name, args, expected, span) { return r; }
                 if let Some(g) = Self::aritas_bawaan(name, args.len(), span) { return Err(g); }
                 if let Some(r) = self.try_builtin_call(name, args, expected, span) { return r; }
                 if matches!(name.as_str(), "Some" | "None" | "Ok" | "Err") {
@@ -51,6 +52,7 @@ impl Codegen {
                 if !self.tables.functions.contains_key(&self.k(name)) {
                     let cocok = self.enum_punya_varian(name, false);
                     if cocok.len() == 1 {
+                        self.harapan_ktor = expected.cloned();
                         return self.construct_user_enum_variant(&cocok[0], name, args, span);
                     }
                     if cocok.len() > 1 {
@@ -76,6 +78,7 @@ impl Codegen {
                     return self.codegen_path_call(&segments[1..], args, expected, *pspan);
                 }
                 let name = segments.get(1).map(|s| s.as_str()).unwrap_or("");
+                if let Some(r) = self.terap_statis(name, args, expected, span) { return r; }
                 if let Some(galat) = Self::celah_turunan(name, span) { return Err(galat); }
                 if let Some(g) = Self::aritas_bawaan(name, args.len(), span) { return Err(g); }
                 if let Some(r) = self.try_builtin_call(name, args, expected, span) { return r; }
@@ -153,8 +156,29 @@ impl Codegen {
 
     /// Kunci fungsi lapis ketiga yang melayani `ns::item`, kalau ada.
     pub(crate) fn kunci_lapis(&self, ns: &str, item: &str) -> Option<String> {
+        // `__` menandai varian internal lapis; nama yang ditulis program tidak bisa mencapainya.
+        if item.contains("__") { return None; }
         let k = super::modul::kunci(self.unit_lapis?, &format!("{}_{}", ns, item));
         if self.tables.functions.contains_key(&k) { Some(k) } else { None }
+    }
+
+    /// Lapis yang dipilih menurut tipe argumen pertamanya: `arr::flatten` atas elemen yang
+    /// bukan array menyimpannya apa adanya, seperti acuan.
+    pub(crate) fn kunci_lapis_menurut(&self, ns: &str, item: &str, pertama: Option<&JrgType>) -> Option<String> {
+        if ns == "arr" && item == "flatten" {
+            if let Some(JrgType::Array(e, _) | JrgType::Slice(e)) = pertama {
+                let varian = match &**e {
+                    JrgType::Array(..) | JrgType::Slice(_) => None,
+                    JrgType::Any => Some("arr_flatten__campur"),
+                    _ => Some("arr_flatten__datar"),
+                };
+                if let Some(v) = varian {
+                    let k = super::modul::kunci(self.unit_lapis?, v);
+                    return self.tables.functions.contains_key(&k).then_some(k);
+                }
+            }
+        }
+        self.kunci_lapis(ns, item)
     }
 
     pub(crate) fn unit_alias(&self, ns: &str) -> Option<usize> {
@@ -222,6 +246,7 @@ impl Codegen {
             }
             if let Some(en) = self.tables.enums.get(ns).cloned() {
                 if en.variants.iter().any(|v| v.name == item) {
+                    self.harapan_ktor = expected.cloned();
                     return self.construct_user_enum_variant(ns, item, args, span);
                 }
             }
@@ -261,15 +286,55 @@ impl Codegen {
                 if let Some(blok) = self.buffer_dari_hex(&args[0], span) { return self.codegen_expr(&blok, expected); }
             }
             // Lapis ketiga: builtin yang ditulis dalam JRG, dicari sesudah semua penurun asli.
-            if let Some(kunci) = self.kunci_lapis(ns, item) {
-                return self.call_named_function(&kunci, args, expected, span);
+            // `flat_map(a, f)` adalah `flatten(map(a, f))`: hasil `f` yang bukan array ikut apa adanya.
+            if ns == "arr" && item == "flat_map" && args.len() == 2 {
+                let jalur = |n: &str| Expr::PathExpr { segments: vec!["arr".to_string(), n.to_string()], span };
+                let map = Expr::Call { func: Box::new(jalur("map")), args: args.to_vec(), span };
+                let datar = Expr::Call { func: Box::new(jalur("flatten")), args: vec![map], span };
+                return self.codegen_expr(&datar, expected);
+            }
+            // `arr::flatten` dipilih dari tipe argumen yang SUDAH dievaluasi, bukan tebakan.
+            if ns == "arr" && item == "flatten" && args.len() == 1 && self.unit_lapis.is_some() {
+                let v = self.codegen_expr(&args[0], None)?;
+                let ptr = self.spill_to_place(&v);
+                let kunci = self.kunci_lapis_menurut(ns, item, Some(&v.ty));
+                let isi = self.lokal_sementara(ptr, v.ty, span);
+                if let Some(kunci) = kunci { return self.call_named_function(&kunci, &[isi], expected, span); }
+            }
+            // Acuan menjawab STRUCT yang boleh membawa field tambahan dari dict; tata letak struct di sini
+            // tetap, jadi ditolak di situs panggil pemakai, bukan dari dalam lapis dengan tipe yang salah.
+            if ns == "json" && item == "merge" && args.len() == 2 {
+                for a in args {
+                    let n = match (a, self.peek_expr_type(a)) {
+                        (_, Some(JrgType::Struct(n))) => Some(n),
+                        (Expr::Struct { ty: crate::parser::TypeExpr::Named(nt), .. }, _)
+                            if nt.package.is_none() && self.tables.structs.contains_key(&nt.name) => Some(nt.name.clone()),
+                        _ => None,
+                    };
+                    if let Some(n) = n {
+                        return Err(crate::llvm::galat::tandai(span, format!(
+                            "`json::merge` atas struct `{0}` belum bisa di backend LLVM: hasilnya struct `{0}` yang bisa \
+                             membawa field tambahan, dan tata letak struct di sini tetap — ubah dulu jadi dict, \
+                             mis. `dict {{ ...p }}`", crate::ruang_tipe::bersih(&n))));
+                    }
+                }
+            }
+            let pertama = args.first().and_then(|a| self.peek_expr_type(a));
+            if let Some(kunci) = self.kunci_lapis_menurut(ns, item, pertama.as_ref()) {
+                // `rune` di `str::` adalah teks satu karakter, seperti acuan: `::str(r)` sebelum masuk lapis.
+                let args: Vec<Expr> = args.iter().map(|a| match (ns, self.peek_expr_type(a)) {
+                    ("str", Some(JrgType::Rune)) => Expr::Call { func: Box::new(Expr::PathExpr {
+                        segments: vec![String::new(), "str".into()], span }), args: vec![a.clone()], span },
+                    _ => a.clone(),
+                }).collect();
+                return self.call_named_function(&kunci, &args, expected, span);
             }
             // Builtin yang implementasinya milik `jrgc`: lewat jembatan pustaka dinamis.
             if let Some(r) = self.coba_jembatan(ns, item, args, span) { return r; }
             let di_import = self.tables.imports.iter().any(|n| n == ns);
             return Err(crate::llvm::galat::tandai(
                 span,
-                crate::llvm::galat::jelaskan_path_hilang(ns, item, di_import),
+                crate::llvm::galat::jelaskan_path_hilang(ns, item, di_import, self.program_punya_nama(item)),
             ));
         }
         // `modul::Enum::Varian(..)`: tipe satu ruang sesudah `import`, jadi segmen modulnya dibuang.
@@ -296,21 +361,114 @@ impl Codegen {
         }
     }
 
+    /// `f(...v)` dan `f(a: 1)` atas fungsi bernama milik program: urutan argumennya disusun
+    /// saat kompilasi. `None` = bentuk lain, yang tetap ditolak `celah_turunan`.
+    fn terap_statis(&mut self, name: &str, args: &[Expr], expected: Option<&JrgType>, span: Span)
+                    -> Option<Result<Val, String>> {
+        if !matches!(name, "terap" | "terap_bernama") { return None; }
+        let Some(Expr::Ident(fnama, fspan)) = args.first() else { return None };
+        if self.lookup_local(fnama).is_some() { return None; }
+        // Builtin dengan daftar argumen literal (`terap(abs, [-5])`): panggilan langsung, seperti acuan.
+        if name == "terap" && !self.tables.functions.contains_key(&self.k(fnama)) && crate::vm::ada_builtin(fnama) {
+            if let Some(Expr::Array { elems, .. }) = args.get(1) {
+                return Some(self.codegen_call(&Expr::Ident(fnama.clone(), *fspan), elems, expected, span));
+            }
+        }
+        let decl = self.tables.functions.get(&self.k(fnama)).cloned()?;
+        if decl.params.iter().any(|p| p.is_variadic) { return None; }
+        let param: Vec<String> = decl.params.iter().map(|p| match &p.pattern {
+            Pattern::Ident { name, .. } => name.clone(),
+            _ => String::new(),
+        }).collect();
+        let fungsi = Expr::Ident(fnama.clone(), *fspan);
+        if name == "terap_bernama" {
+            let [_, Expr::Array { elems: pos, .. }, Expr::Array { elems: nama, .. }, Expr::Array { elems: nilai, .. }] = args
+                else { return None };
+            let nama: Option<Vec<String>> = nama.iter().map(|n| match n {
+                Expr::Literal(LitKind::Str(s), _) => Some(s.clone()),
+                _ => None,
+            }).collect();
+            let nama = nama?;
+            let (posisi, panjang) = match crate::interpreter::susun_argumen_bernama(&param, pos.len(), &nama) {
+                Ok(x) => x,
+                Err(e) => return Some(Err(super::galat::tandai(span, crate::interpreter::pesan_terap_bernama(&e)))),
+            };
+            // Urutan evaluasinya urutan TULIS: yang bisa berefek dihitung dulu ke lokal sementara.
+            let mut akhir: Vec<Option<Expr>> = vec![None; panjang];
+            let urut = pos.iter().enumerate().chain(nilai.iter().enumerate().map(|(k, e)| (posisi[k], e)));
+            for (slot, e) in urut {
+                let e = if matches!(e, Expr::Literal(..) | Expr::Ident(..)) { e.clone() } else {
+                    let want = decl.params.get(slot).and_then(|p| self.resolve_type_pub(&p.ty).ok());
+                    let v = match self.codegen_expr(e, want.as_ref()) { Ok(v) => v, Err(g) => return Some(Err(g)) };
+                    let ptr = self.spill_to_place(&v);
+                    self.lokal_sementara(ptr, v.ty, span)
+                };
+                akhir[slot] = Some(e);
+            }
+            let akhir: Vec<Expr> = akhir.into_iter().flatten().collect();
+            return Some(self.codegen_call(&fungsi, &akhir, expected, span));
+        }
+        let daftar = args.get(1)?;
+        if let Expr::Array { elems, .. } = daftar {
+            return Some(self.codegen_call(&fungsi, elems, expected, span));
+        }
+        // Panjangnya baru diketahui saat jalan: satu lengan `match` per jumlah yang sah.
+        let v = match self.codegen_expr(daftar, None) { Ok(v) => v, Err(g) => return Some(Err(g)) };
+        if !matches!(v.ty, JrgType::Array(..) | JrgType::Slice(_)) { return None; }
+        let ptr = self.spill_to_place(&v);
+        let tetap = if let JrgType::Array(_, n) = v.ty { Some(n as usize) } else { None };
+        let isi = self.lokal_sementara(ptr, v.ty, span);
+        let lit = |n: usize| Expr::Literal(LitKind::Int(n as u128), span);
+        if let Some(n) = tetap {
+            let a: Vec<Expr> = (0..n).map(|i| Expr::Index { obj: Box::new(isi.clone()), idx: Box::new(lit(i)), span }).collect();
+            return Some(self.codegen_call(&fungsi, &a, expected, span));
+        }
+        let maks = param.len();
+        let wajib = decl.params.iter().take_while(|p| p.default.is_none()).count();
+        let teks = |t: String| Expr::Literal(LitKind::Str(t), span);
+        let bawaan = |n: &str, a: Vec<Expr>| Expr::Call {
+            func: Box::new(Expr::PathExpr { segments: vec![String::new(), n.to_string()], span }), args: a, span };
+        let lengan = |pola: Pattern, isi: Expr| MatchArm { patterns: vec![pola], guard: None,
+            body: MatchBody::Expr(Box::new(isi)), span };
+        let mut arms = Vec::new();
+        for n in 0..=maks {
+            let isi_lengan = if n < wajib {
+                bawaan("panik", vec![teks(crate::interpreter::pesan_parameter_wajib(fnama, &param[n], n + 1))])
+            } else {
+                let a = (0..n).map(|i| Expr::Index { obj: Box::new(isi.clone()), idx: Box::new(lit(i)), span }).collect();
+                Expr::Call { func: Box::new(fungsi.clone()), args: a, span }
+            };
+            arms.push(lengan(Pattern::Literal { lit: LitKind::Int(n as u128), span }, isi_lengan));
+        }
+        // Kalimat "kebanyakan" milik acuan, dengan jumlahnya disisipkan saat jalan.
+        const PENANDA: usize = 3_987_654_321;
+        let kalimat = crate::interpreter::pesan_fungsi_kebanyakan(fnama, maks, PENANDA, &param);
+        let (awal, akhir) = kalimat.split_once(&PENANDA.to_string()).unwrap_or((&kalimat, ""));
+        let n_nama = format!("$sebar{}", self.penerima_lapis);
+        let n_expr = Expr::Ident(n_nama.clone(), span);
+        let gabung = |a: Expr, b: Expr| Expr::Binary { op: BinaryOp::Add, lhs: Box::new(a), rhs: Box::new(b), span };
+        let pesan = gabung(gabung(teks(awal.to_string()), bawaan("str", vec![n_expr])), teks(akhir.to_string()));
+        arms.push(lengan(Pattern::Ident { name: n_nama, is_mut: false, span }, bawaan("panik", vec![pesan])));
+        let m = Expr::Match { scrutinee: Box::new(bawaan("len", vec![isi])), arms, span };
+        Some(self.codegen_expr(&m, expected))
+    }
+
     /// `terap`/`terap_bernama` adalah nama TURUNAN: muncul karena gula `f(...v)` dan
     /// `f(a: 1)`, dan pemakainya tidak pernah menulisnya — jadi yang disebut gulanya.
     pub(crate) fn celah_turunan(name: &str, span: Span) -> Option<String> {
         match name {
             "terap" => Some(format!(
-                "[{}:{}] spread di pemanggilan (`f(...v)`) belum didukung backend \
-                 LLVM: jumlah argumennya baru diketahui saat program jalan, \
-                 sementara backend ini menentukannya saat kompilasi. Interpreter \
-                 dan `--vm` mendukungnya",
+                "[{}:{}] spread di pemanggilan (`f(...v)`) atas nilai fungsi belum \
+                 didukung backend LLVM: fungsinya baru diketahui saat program jalan, \
+                 sementara backend ini menyusun argumennya saat kompilasi (ke fungsi \
+                 bernama milik program sudah bisa). Interpreter dan `--vm` mendukungnya",
                 span.lo.0, span.hi.0)),
             "terap_bernama" => Some(format!(
-                "[{}:{}] argumen bernama (`f(a: 1)`) belum didukung backend LLVM: \
-                 urutannya ditentukan dari nama parameter fungsinya SAAT JALAN, \
-                 sementara backend ini menyusun daftar argumen saat kompilasi. \
-                 Interpreter dan `--vm` mendukungnya",
+                "[{}:{}] argumen bernama (`f(a: 1)`) ke nilai fungsi belum didukung \
+                 backend LLVM: urutannya ditentukan dari nama parameter fungsinya SAAT \
+                 JALAN, sementara backend ini menyusun daftar argumen saat kompilasi \
+                 (ke fungsi bernama milik program sudah bisa). Interpreter dan `--vm` \
+                 mendukungnya",
                 span.lo.0, span.hi.0)),
             _ => None,
         }
@@ -592,7 +750,17 @@ impl Codegen {
         if bersarang { self.catat_sarang(&mangled); }
         let ret_ty = self.tipe_return_duga(&decl, &subst, &mangled, None, terpakai)?;
         self.enqueue_fn_arity(name, &decl, subst, mangled.clone(), None, terpakai);
-        self.emit_call(&mangled, &final_args, &ret_ty, None)
+        let hasil = self.emit_call(&mangled, &final_args, &ret_ty, None);
+        // Argumen pertama dipindahkan dan callee cuma mengembalikan parameter itu: hasilnya milik
+        // pemanggil sepenuhnya, jadi penugasannya tidak menyalin lagi (dulu struct berisi dict tersalin tiap kali).
+        if pindah.is_some() {
+            let p0 = decl.params.first().and_then(|p| super::codegen_access::pattern_simple_name_pub(&p.pattern));
+            self.hasil_pindah_milik = match (&*decl.body, p0) {
+                (FnBody::Block(b), Some(n)) => crate::interpreter::capture::blok_hanya_kembali(b, &n),
+                _ => false,
+            };
+        }
+        hasil
     }
 
     pub(crate) fn call_static_method(&mut self, self_ty_name: &str, decl: &FnDecl, args: &[Expr], span: Span) -> Result<Val, String> {
@@ -628,8 +796,80 @@ impl Codegen {
         self.emit_call(&mangled, &final_args, &ret_ty, None)
     }
 
+    /// Method yang bukan method acuan atas teks/array/dict: gagal SAAT JALAN sesudah argumennya
+    /// dievaluasi, dengan kalimat acuan; untuk dict kalimatnya menyebut kunci yang ada.
+    fn metode_tak_ada_saat_jalan(&mut self, ns: &str, optr: &str, oty: &JrgType, method: &str,
+                                 args: &[Expr], _span: Span) -> Result<Val, String> {
+        for a in args { self.codegen_expr(a, None)?; }
+        if ns == "dict" {
+            let d = self.load_place(optr, oty);
+            let vty = match oty { JrgType::Dict(v) => (**v).clone(), _ => JrgType::Any };
+            let (p, n) = self.bagian_dict_mentah(&d);
+            let uk = self.ukuran_pasangan(&vty);
+            let calon = crate::interpreter::calon_method("dict");
+            let saran = crate::diag::saran_nama_terdekat(method, calon.iter().map(|s| s.as_str()));
+            let utuh = crate::interpreter::pesan_method_tak_ada("dict", method, "\u{0}", saran.as_deref());
+            let (a, b) = utuh.split_once('\u{0}').expect("penanda kunci");
+            let (a, b) = (self.intern_string(a), self.intern_string(b));
+            let ((ap, al), (bp, bl)) = (self.split_str(&a), self.split_str(&b));
+            self.ensure_extern("declare void @jrg_panic_field_dict(ptr, i64, i64, ptr, i64, ptr, i64) cold nounwind noreturn",
+                               "jrg_panic_field_dict");
+            self.emit(format!("call void @jrg_panic_field_dict(ptr {}, i64 {}, i64 {}, ptr {}, i64 {}, ptr {}, i64 {})",
+                              p, n, uk, ap, al, bp, bl));
+        } else {
+            let calon = crate::interpreter::calon_method(ns);
+            let saran = crate::diag::saran_nama_terdekat(method, calon.iter().map(|s| s.as_str()));
+            return self.gagal_sesudah_argumen(&crate::interpreter::pesan_method_tak_ada(&oty.nama_typeof(), method, "", saran.as_deref()), &[]);
+        }
+        self.terminate("unreachable".to_string());
+        let lanjut = self.fresh_label("sesudah_panik.");
+        self.start_block(lanjut);
+        Ok(Val::unit())
+    }
+
+    /// Evaluasi `args`, lalu gagal SAAT JALAN dengan `pesan` — bentuk acuan untuk method yang tidak ada.
+    pub(crate) fn gagal_sesudah_argumen(&mut self, pesan: &str, args: &[Expr]) -> Result<Val, String> {
+        for a in args { self.codegen_expr(a, None)?; }
+        let m = self.intern_string(pesan);
+        let (mp, ml) = self.split_str(&m);
+        self.ensure_extern("declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
+        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+        self.terminate("unreachable".to_string());
+        let lanjut = self.fresh_label("sesudah_panik.");
+        self.start_block(lanjut);
+        Ok(Val::unit())
+    }
+
+    /// Kalimat acuan untuk skalar dan tuple yang tidak punya method `method`.
+    fn pesan_skalar_tak_punya(oty: &JrgType, method: &str) -> Option<String> {
+        let tipe = oty.nama_typeof();
+        if matches!(oty, JrgType::Tuple(_)) {
+            return Some(crate::interpreter::pesan_method_tak_ada("tuple", method,
+                " (yang ada untuk tuple cuma indeks numerik: `t.0`, `t.1`, ...)", None));
+        }
+        if !matches!(tipe.as_str(), "int" | "float" | "bool" | "rune") { return None; }
+        if let Some(jalan) = crate::interpreter::padanan_math(&tipe, method) {
+            return Some(crate::interpreter::pesan_method_tak_ada_dgn_jalan(&tipe, method, &jalan));
+        }
+        let calon = crate::interpreter::calon_method_skalar(&tipe);
+        if calon.contains(&method) { return None; }
+        let saran = crate::diag::saran_nama_terdekat(method, calon.iter().copied());
+        Some(crate::interpreter::pesan_method_tak_ada(&tipe, method, "", saran.as_deref()))
+    }
+
     pub fn codegen_method(&mut self, obj: &Expr, method: &str, args: &[Expr], _expected: Option<&JrgType>, span: Span) -> Result<Val, String> {
-        let (optr, oty) = self.get_place(obj)?;
+        if let Some(r) = self.slot_bulat_metode(obj, method, args, _expected, span) { return r; }
+        if let Some(r) = self.jumlah_arg_metode_salah(obj, method, args, _expected, span) { return r; }
+        // `r.keluaran.trim()` atas nilai bertag: field-nya dibaca sebagai NILAI, seperti di
+        // `codegen_index` — `self` sebuah method memang salinan, jadi tidak ada tulisan yang hilang.
+        let field_bertag = matches!(obj, Expr::Field { obj: o, .. } if self.field_dibaca_nilai(o));
+        // Nama yang bukan variabel (`None`, varian telanjang, `const`) dibaca sebagai nilai.
+        let bukan_variabel = matches!(obj, Expr::Ident(n, _)
+            if self.lookup_local(n).is_none() && !self.var_global.contains_key(&self.k(n)));
+        let (optr, oty) = if field_bertag || bukan_variabel {
+            let v = self.codegen_expr(obj, None)?;
+            (self.spill_to_place(&v), v.ty)
+        } else { self.get_place(obj)? };
         // Penerima milik `var` modul dibaca lewat penunjuk: kalau method-nya atau argumennya bisa
         // menulis `var` modul, `self` disalin dulu — dulu tulisan itu ikut terlihat dari `self`.
         let (optr, oty) = if self.akar_var_modul(obj)
@@ -668,10 +908,10 @@ impl Codegen {
 
         if let JrgType::Enum(ename) = &oty {
             if let Some(t) = self.option_args.get(ename).cloned() {
-                return self.codegen_option_method(&optr, ename, &t, method, args, span);
+                return self.codegen_option_method(&optr, ename, &t, method, args, span, _expected);
             }
             if let Some((t, e)) = self.result_args.get(ename).cloned() {
-                return self.codegen_result_method(&optr, ename, &t, &e, method, args, span);
+                return self.codegen_result_method(&optr, ename, &t, &e, method, args, span, _expected);
             }
         }
         if oty == JrgType::Str {
@@ -696,18 +936,24 @@ impl Codegen {
             };
             if let Some(r) = self.metode_opsi_koleksi(&v, &elem, method, args, span) { return r; }
             if method == "pop" && args.is_empty() { return self.metode_pop(&v, &elem, span); }
-            // Bentuk method dialihkan ke `arr::` yang sudah ada — `a.min()`
-            // dan `arr::min(a)` adalah satu hal yang sama di acuannya, jadi
-            // yang ditambahkan pengalihan, bukan implementasi kedua.
+            // Bentuk method dialihkan ke `arr::`/`str::` yang sudah ada (satu hal di acuannya), dengan nilai
+            // yang SUDAH dievaluasi: `obj` diturunkan ulang berharapan `[]string` menolak elemen bulat
+            // (`[1, 2].join("-")`) dan efeknya terjadi dua kali.
             if method == "join" && args.len() == 1 {
-                let semua = [obj.clone(), args[0].clone()];
+                let tempat = self.spill_to_place(&v);
+                let semua = [self.lokal_sementara(tempat, v.ty.clone(), span), args[0].clone()];
                 if let Some(r) = self.coba_builtin_str("str::join", &semua, span) { return r; }
             }
             const METODE_ARR: &[&str] =
                 &["push", "contains", "sum", "reverse", "sort", "min", "max"];
             if METODE_ARR.contains(&method) {
                 let mut semua = Vec::with_capacity(args.len() + 1);
-                semua.push(obj.clone());
+                let penerima = if matches!(obj, Expr::Array { elems, .. } if elems.is_empty()) {
+                    obj.clone()
+                } else {
+                    self.lokal_sementara(optr.clone(), oty.clone(), span)
+                };
+                semua.push(penerima);
                 semua.extend(args.iter().cloned());
                 if let Some(r) = self.coba_builtin_arr(
                     &format!("arr::{}", method), &semua, span)
@@ -724,7 +970,7 @@ impl Codegen {
                 &["len", "is_empty", "has", "get", "keys", "values", "remove", "merge"];
             if METODE_DICT.contains(&method) {
                 let mut semua = Vec::with_capacity(args.len() + 1);
-                semua.push(obj.clone());
+                semua.push(self.lokal_sementara(optr.clone(), oty.clone(), span));
                 semua.extend(args.iter().cloned());
                 if let Some(r) = self.coba_builtin_dict(
                     &format!("dict::{}", method), &semua, None, span)
@@ -775,24 +1021,71 @@ impl Codegen {
                 }
                 // Lapis ketiga melayani bentuk method juga; penerimanya SUDAH dievaluasi, jadi
                 // ia diserahkan lewat lokal bernama mustahil, bukan dievaluasi sekali lagi.
-                if let Some(kunci) = ns.filter(|_| ada).and_then(|n| self.kunci_lapis(n, method)) {
+                if ns == Some("arr") && method == "flat_map" && args.len() == 1 {
+                    let penerima = self.lokal_sementara(optr.clone(), oty.clone(), span);
+                    let jalur = Expr::PathExpr { segments: vec!["arr".to_string(), "flat_map".to_string()], span };
+                    let panggil = Expr::Call { func: Box::new(jalur), args: vec![penerima, args[0].clone()], span };
+                    return self.codegen_expr(&panggil, _expected);
+                }
+                if let Some(kunci) = ns.filter(|_| ada).and_then(|n| self.kunci_lapis_menurut(n, method, Some(&oty))) {
                     let mut semua = Vec::with_capacity(args.len() + 1);
                     semua.push(self.lokal_sementara(optr.clone(), oty.clone(), span));
                     semua.extend(args.iter().cloned());
                     return self.call_named_function(&kunci, &semua, _expected, span);
                 }
+                // Nilai bertag (handle `py::`, kanvas titipan, …): method-nya dicari saat jalan di `jrgc`.
+                if oty == JrgType::Any {
+                    let v = self.load_place(&optr, &oty);
+                    return self.metode_keluarga_bertag(&v, method, args, span, |cg| {
+                        if let Some(r) = cg.metode_bawaan_bertag(&v, method, args, span) { return r; }
+                        if cg.ada_metode_program(method, args.len()) {
+                            return cg.panggil_metode_dinamis(&v, method, args);
+                        }
+                        cg.metode_titipan(&v, method, args, span)
+                    });
+                }
+                // Method sah menurut acuan yang belum punya pintu method di sini: lewat bentuk namespace.
+                let metode_sah = ns.map_or(false, |n| crate::interpreter::calon_method(n).iter().any(|c| c == method));
+                if let (true, true, Some(n)) = (metode_sah, ada, ns) {
+                    let mut semua = Vec::with_capacity(args.len() + 1);
+                    semua.push(self.lokal_sementara(optr.clone(), oty.clone(), span));
+                    semua.extend(args.iter().cloned());
+                    if let Some(r) = self.try_builtin_call(&format!("{}::{}", n, method), &semua, _expected, span) { return r; }
+                }
+                if let (false, Some(n)) = (metode_sah, ns) {
+                    return self.metode_tak_ada_saat_jalan(n, &optr, &oty, method, args, span);
+                }
+                // Method skalar: `math::` yang sama dengan acuan, `to_string` lewat `str(x)`.
+                let tipe = oty.nama_typeof();
+                if matches!(tipe.as_str(), "int" | "float") && crate::interpreter::metode_skalar_math(&tipe, method) {
+                    if let Some(p) = crate::interpreter::pesan_arg_metode_skalar(&tipe, method, args.len()) {
+                        return self.gagal_sesudah_argumen(&p, args);
+                    }
+                    let mut semua = vec![self.lokal_sementara(optr.clone(), oty.clone(), span)];
+                    semua.extend(args.iter().cloned());
+                    let jalur = Expr::PathExpr { segments: vec!["math".to_string(), method.to_string()], span };
+                    return self.codegen_expr(&Expr::Call { func: Box::new(jalur), args: semua, span }, _expected);
+                }
+                if method == "to_string" && args.is_empty() && matches!(tipe.as_str(), "int" | "float" | "bool" | "rune") {
+                    let penerima = self.lokal_sementara(optr.clone(), oty.clone(), span);
+                    if let Some(r) = self.try_builtin_call("str", &[penerima], _expected, span) { return r; }
+                }
                 let pesan = if ada {
                     format!("method `.{}` untuk `{}` ada di pustaka standar, tapi backend `--emit-llvm` \
                              belum mendukungnya\nbantuan: jalankan tanpa `--emit-llvm` (interpreter) \
                              atau dengan `--vm`", method, oty.nama_typeof())
+                } else if let Some(p) = Self::pesan_skalar_tak_punya(&oty, method) {
+                    return self.gagal_sesudah_argumen(&p, args);
                 } else {
                     format!("tipe `{}` tidak punya method `{}`", oty.nama_typeof(), method)
                 };
                 return Err(crate::llvm::galat::tandai(span, pesan));
             }
         };
-        let decl = self.tables.find_method(&self_ty_name, method).cloned()
-            .ok_or_else(|| format!("[{}:{}] `{}` tidak punya method `{}`", span.lo.0, span.hi.0, self_ty_name, method))?;
+        let Some(decl) = self.tables.find_method(&self_ty_name, method).cloned() else {
+            if let Some(p) = self.pesan_tak_punya(&oty, method) { return self.gagal_sesudah_argumen(&p, args); }
+            return Err(format!("[{}:{}] `{}` tidak punya method `{}`", span.lo.0, span.hi.0, self_ty_name, method));
+        };
         let takes_self = decl.params.first().map(|p| pattern_simple_name_pub(&p.pattern).as_deref() == Some("self")).unwrap_or(false);
         if !takes_self {
             return Err(format!("[{}:{}] `{}` bukan instance method (tidak punya parameter `self`)", span.lo.0, span.hi.0, method));
@@ -951,6 +1244,8 @@ impl Codegen {
         let qname = llvm_quoted_ident(mangled);
         if *ret_ty == JrgType::Unit {
             self.emit(format!("call void @{}({})", qname, argstr.join(", ")));
+            // Instans yang tidak pernah kembali: sisa blok pemanggil tidak tercapai (dan tidak diturunkan).
+            if self.fn_tak_kembali.contains(mangled) { self.terminate("unreachable".to_string()); }
             Ok(Val::unit())
         } else {
             let r = self.fresh("call.");

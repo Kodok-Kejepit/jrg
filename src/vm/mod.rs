@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod ffi_jembatan;
 pub mod ffi_asing;
 pub mod value;
+pub mod peta;
 pub mod channel;
 pub mod visibilitas;
 pub mod compiler;
@@ -20,10 +21,12 @@ pub mod vm;
 // impl inheren dipecah lintas modul dalam satu crate, dan itu yang
 // membuat `vm.rs` bisa tinggal jadi rangkanya saja.
 mod jalankan;
+pub(crate) use jalankan::{cocok_enum, larik_milik_tunggal};
 mod panggil;
 pub(crate) mod info_native;
 mod akses;
-mod hof;
+pub(crate) mod hof;
+mod op;
 pub(crate) mod bawaan;
 
 pub use compiler::{compile, CompileError};
@@ -53,10 +56,38 @@ pub fn run_file_with_paths(
     emit_bc: bool,
     profiling: bool,
 ) -> Result<(), VmError> {
-    let hasil = jalankan_berkas(file, search_paths, emit_bc, profiling);
+    let hasil = di_stack_lega(move || jalankan_berkas(file, search_paths, emit_bc, profiling));
     // Sama dengan `interpret_with_paths`: terminal kembali SEBELUM galatnya dilaporkan.
     crate::term::pulihkan();
     hasil
+}
+
+/// Jalankan `f` di thread ber-stack sama dengan interpreter: menampilkan, membandingkan dan melepas
+/// nilai bersarang dalam rekursif di Rust, dan di stack 8 MB thread utama 50 ribu tingkat sudah mematikan proses.
+fn di_stack_lega<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    // Thread cuma MEMINJAM slotnya: kalau ia gagal dibuat, `f` masih di sini untuk jalan cadangan.
+    let slot = std::sync::Mutex::new(Some(f));
+    let hasil = std::thread::scope(|s| {
+        let h = std::thread::Builder::new()
+            .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
+            .spawn_scoped(s, || {
+                crate::interpreter::catat_puncak_stack();
+                let f = slot.lock().unwrap_or_else(|p| p.into_inner()).take()?;
+                let r = f();
+                crate::profiler::flush();
+                Some(r)
+            });
+        match h {
+            Ok(h) => h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            Err(_) => None,
+        }
+    });
+    // Thread tidak bisa dibuat (batas memori): jalan di sini saja, dengan stack yang ada.
+    match (hasil, slot.into_inner().unwrap_or_else(|p| p.into_inner())) {
+        (Some(r), _) => r,
+        (None, Some(f)) => { let r = f(); crate::profiler::flush(); r }
+        (None, None) => unreachable!("closure dipakai tapi tidak menghasilkan apa pun"),
+    }
 }
 
 fn jalankan_berkas(
@@ -71,9 +102,9 @@ fn jalankan_berkas(
     let chunk = compile(file, impor).map_err(|e| VmError::new(e.to_string()))?;
     if emit_bc { chunk.disassemble(); }
     let hasil = vm.run(chunk);
-    // Goroutine ditunggu SESUDAH program utama selesai — berhasil maupun gagal,
-    // sama seperti `Interpreter::join_all_goroutines`.
-    crate::vm::channel::join_all_goroutines();
+    // Goroutine ditunggu hanya kalau program utama berhasil, sama dengan
+    // `Interpreter::run_file`: yang gagal langsung melapor dan berhenti.
+    if hasil.is_ok() { crate::vm::channel::join_all_goroutines(); }
     hasil
 }
 
@@ -84,7 +115,7 @@ pub fn jalankan_uji_with_paths(
     filter: Option<&str>,
     src: Option<&str>,
 ) -> Result<usize, VmError> {
-    let hasil = jalankan_uji(file, search_paths, filter, src);
+    let hasil = di_stack_lega(move || jalankan_uji(file, search_paths, filter, src));
     crate::term::pulihkan();
     hasil
 }
@@ -117,7 +148,8 @@ fn jalankan_uji(
                     Ok(_) => Ok(()),
                     Err(e) => {
                         // `Span` yang dibawa `VmError` sejak fase SPAN-VM.
-                        baris = e.span.zip(src)
+                        // Cuma galat dari berkas uji ini (id 0) yang berbaris, seperti interpreter.
+                        baris = e.span.filter(|sp| sp.file_id == 0).zip(src)
                             .map(|(sp, t)| indeks.get_or_insert_with(|| crate::uji::IndeksBaris::baru(t))
                                 .baris(sp.lo.0 as usize));
                         Err(e.msg.clone())
@@ -144,8 +176,45 @@ pub fn daftar_builtin() -> Vec<String> {
 /// `None` kalau namanya bukan fungsi bawaan.
 pub fn panggil_bawaan(nama: &str, args: &[VmValue]) -> Option<Result<VmValue, String>> {
     match bawaan::bawaan(nama)? {
-        VmValue::NativeFn(f) => Some(f(args)),
+        // Builtin yang butuh mesin (FFI, HOF, `num_solve`, …): lewat `Vm` yang sama dengan `--vm`,
+        // jadi fungsi milik pemanggil (`Asing::Fungsi`) dipanggil balik lewat jalur biasanya.
+        VmValue::NativeFn(f) if info_native::info(f).map_or(false, |i| i.khusus.is_some()) =>
+            Some(Vm::new().call_value_immediate(VmValue::NativeFn(f), args.to_vec()).map_err(|e| e.msg)),
+        VmValue::NativeFn(f) => Some(f(args).map_err(|e| value::perjelas_pesan_native(e, args))),
         _ => None,
+    }
+}
+
+/// `x.f = v` atas nilai titipan jembatan: aturan `SetField` milik `--vm`, atas salinan yang terpisah.
+/// `x.nama` atas nilai titipan jembatan, lewat pintu field yang sama dengan `--vm` (dict: kuncinya).
+pub fn baca_field(obj: &VmValue, nama: &str) -> Result<VmValue, String> {
+    Vm::new().get_field(obj, nama, None).map_err(|e| e.msg)
+}
+
+pub fn tulis_field(obj: &VmValue, nama: &str, val: VmValue) -> Result<VmValue, String> {
+    let mut o = obj.clone();
+    o.pisahkan();
+    Vm::new().set_field(&o, nama, val, None).map_err(|e| e.msg)?;
+    Ok(o)
+}
+
+/// `x.nama(args)` atas nilai titipan jembatan (`args[0]` penerimanya): handle asing lewat pintu
+/// FFI, penerima bawaan lain (kanvas, teks, …) lewat resolusi method yang sama dengan `--vm`.
+pub fn panggil_metode(nama: &str, args: &[VmValue]) -> Result<VmValue, String> {
+    if matches!(args.first(), Some(VmValue::Asing(_))) {
+        return Vm::new().metode_asing_vm(nama, args).map_err(|e| e.msg);
+    }
+    let Some(obj) = args.first() else { return Err(format!("method `{}` dipanggil tanpa penerimanya", nama)) };
+    // `Option`/`Result`: method-nya builtin `Option::m`; pintu field menolaknya sebagai "tanpa kurung".
+    if let Some((tipe @ ("Option" | "Result"), _, _)) = obj.bagian_enum() {
+        if let Some(VmValue::NativeFn(f)) = bawaan::bawaan(&format!("{}::{}", tipe, nama)) { return f(args); }
+    }
+    thread_local! { static MESIN: std::cell::RefCell<Vm> = std::cell::RefCell::new(Vm::new()); }
+    let f = MESIN.with(|m| m.borrow().get_field_pintu(obj, nama, None, true)).map_err(|e| e.msg)?;
+    match f {
+        VmValue::NativeFn(f) => f(args),
+        _ => Err(format!("method `{}` atas `{}` belum bisa dipanggil dari biner `--emit-llvm` — ini celah \
+                          backend, bukan salah programmu", nama, obj.type_name())),
     }
 }
 
@@ -197,10 +266,20 @@ pub fn periksa_dengan_paths(file: &ParsedFile, search_paths: Vec<PathBuf>) -> Re
     let mut vm = Vm::new();
     let mut pemuat = Pemuat::new(false);
     pemuat.periksa_saja = true;
-    let (impor, file) = &pemuat.muat_utama(&mut vm, file, &search_paths).map_err(|e| vec![e])?;
-    let utama = compile(file, impor).map_err(|e| vec![VmError::new(e.to_string())])?;
+    // Jumlah argumen ikut dilaporkan walau modulnya gagal dimuat (cuma untuk berkas utama).
+    let aritas_utama = || crate::parser::aritas_fungsi_pemakai(file).into_iter()
+        .map(|(pesan, span)| VmError::at(pesan, Some(span)));
+    let (impor, salinan) = match pemuat.muat_utama(&mut vm, file, &search_paths) {
+        Ok(h) => h,
+        Err(e) => return Err(std::iter::once(e).chain(aritas_utama()).collect()),
+    };
+    let utama = match compile(&salinan, &impor) {
+        Ok(c) => c,
+        Err(e) => return Err(std::iter::once(VmError::new(e.to_string())).chain(aritas_utama()).collect()),
+    };
     pemuat.unit_periksa.push(utama);
-    let galat = nama_tak_dideklarasikan(&vm, &pemuat.unit_periksa);
+    let mut galat = nama_tak_dideklarasikan(&vm, &pemuat.unit_periksa);
+    galat.extend(pemuat.aritas.drain(..).map(|(pesan, span)| VmError::at(pesan, Some(span))));
     if galat.is_empty() { Ok(()) } else { Err(galat) }
 }
 
@@ -268,12 +347,16 @@ struct Pemuat {
     unit_periksa: Vec<Chunk>,
     /// Pemilik tiap nama tipe (`crate::ruang_tipe`).
     ruang: crate::ruang_tipe::Ruang,
+    /// `--periksa`: isi tiap modul (sebelum dilabeli) dan panggilan berjumlah argumen salah.
+    ast_periksa: HashMap<String, ParsedFile>,
+    aritas: Vec<(String, crate::lexer::Span)>,
 }
 
 impl Pemuat {
     fn new(emit_bc: bool) -> Self {
         Pemuat { selesai: HashMap::new(), sedang: Vec::new(), nomor: 0, emit_bc, periksa_saja: false,
-                 unit_periksa: Vec::new(), ruang: Default::default() }
+                 unit_periksa: Vec::new(), ruang: Default::default(),
+                 ast_periksa: HashMap::new(), aritas: Vec::new() }
     }
 
     /// Berkas utama: tipenya diklaim SEBELUM modulnya dimuat, lalu salinannya ditulis
@@ -284,10 +367,20 @@ impl Pemuat {
         use crate::ruang_tipe::UNIT_UTAMA;
         self.ruang.klaim(UNIT_UTAMA, UNIT_UTAMA, file);
         let (impor, daftar) = self.muat(vm, file, search_paths)?;
+        self.catat_aritas(file, &daftar);
         let mut salinan = file.clone();
         self.ruang.olah(UNIT_UTAMA, UNIT_UTAMA, &mut salinan, &daftar)
             .map_err(|(pesan, span)| VmError::at(pesan, Some(span)))?;
         Ok((impor, salinan))
+    }
+
+    /// `--periksa`: panggilan di `file` ke fungsinya sendiri, ke `T::m` dan ke fungsi modul impornya.
+    fn catat_aritas(&mut self, file: &ParsedFile, daftar: &[(String, String)]) {
+        if !self.periksa_saja { return }
+        let modul: Vec<(String, &ParsedFile)> = daftar.iter()
+            .filter_map(|(a, id)| self.ast_periksa.get(id).map(|m| (a.clone(), m))).collect();
+        let g = crate::parser::aritas_dengan_modul(file, &modul);
+        self.aritas.extend(g);
     }
 
     /// Muat tiap import `file`; jawabannya peta alias → modul untuk kompilasi `file`,
@@ -383,6 +476,10 @@ impl Pemuat {
             };
             self.sedang.push((id.clone(), alias.clone()));
             let (impor_modul, daftar_modul) = self.muat(vm, &module, &nested_paths).map_err(sebut)?;
+            if self.periksa_saja {
+                self.catat_aritas(&module, &daftar_modul);
+                self.ast_periksa.insert(id.clone(), module.clone());
+            }
             self.ruang.olah(&id, &ModuleResolver::module_name(&import.path), &mut module, &daftar_modul)
                 .map_err(|(pesan, span)| VmError::at(pesan, Some(span)))?;
 

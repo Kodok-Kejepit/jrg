@@ -1,0 +1,51 @@
+# Sapuan penuh (`perkakas/sapu_penuh.sh`): konformans, contoh, modul std, contoh di situs, pemasang, mesin Praktik
+# (wasm), jendela di Xvfb, JRG IDE di chromium. Dijalankan MANUAL (`gh workflow run sapu.yml`) sekali per gelombang
+# kerja — ia menggandakan menit kalau ikut tiap dorongan. Uji APK sengaja dilewati di sini (SDK dikosongkan).
+
+name: sapu
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sapu:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          rustup target add wasm32-unknown-unknown
+          # Jaringan apt runner kadang mati berjam-jam (2026-11-11: gagal tiga kali, lalu menggantung sejam). Image
+          # runner sudah membawa xvfb/ImageMagick; yang benar-benar hilang membuat langkah Sapuan gagal menyebutnya.
+          timeout 300 sh -c 'sudo apt-get -o Acquire::Retries=2 update -qq && sudo apt-get -o Acquire::Retries=2 install -y -qq xvfb imagemagick python3-pil > /dev/null' || echo "apt gagal; memakai paket bawaan image"
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bangun jrgc, runtime, jembatan, Praktik
+        run: |
+          cargo build --release -j 2
+          (cd runtime && cargo build --release)
+          (cd jembatan && cargo build --release)
+          JOBS=2 sh perkakas/bangun_praktik.sh
+
+      - name: Sapuan
+        env:
+          ANDROID_HOME: ""
+          ANDROID_SDK_ROOT: ""
+        run: |
+          set +e
+          sh perkakas/sapu_penuh.sh > sapu.log 2>&1
+          rc=$?
+          tail -40 sapu.log
+          grep -A3 "== tes std/ lewat --uji" sapu.log || echo "bab tes std/ lewat --uji tidak ditemukan"
+          exit $rc
+        shell: bash
+
+      - name: Simpan log sapuan
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sapu-log
+          path: sapu.log

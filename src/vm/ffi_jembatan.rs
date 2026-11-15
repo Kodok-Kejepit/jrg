@@ -12,12 +12,21 @@ const PESAN_FUNGSI: &str = "sebuah fungsi tidak bisa menyeberang antar-backend: 
      memindahkan NILAI, dan fungsi bukan nilai — ia terikat pada runtime \
      yang membuatnya, lengkap dengan bytecode dan tangkapannya";
 
+/// Penutup `fungsi` dipakai thread lain HANYA selama pemiliknya diam menunggu `join` (`di_stack_lega`), dan isinya
+/// cuma tabel titipan di heap — tanpa `thread_local` — jadi aksesnya tetap berurutan.
+struct KirimPaksa<T>(T);
+unsafe impl<T> Send for KirimPaksa<T> {}
+
 /// Penelusur nilai VM → interpreter; `fungsi` memutuskan nasib tiap nilai fungsi di
 /// kedalaman mana pun — satu definisi konversi untuk semua jalur (lihat `TitipanVm`).
 pub(crate) fn vm_ke_nilai_dgn(
     v: &VmValue,
     fungsi: &mut dyn FnMut(&VmValue) -> Result<Value, String>,
 ) -> Result<Value, String> {
+    if crate::interpreter::stack_menipis() == Some(true) {
+        let f = KirimPaksa(fungsi);
+        return crate::interpreter::di_stack_lega(move || { let f = f; vm_ke_nilai_dgn(v, f.0) });
+    }
     Ok(match v {
         VmValue::Nil => Value::Nil,
         VmValue::Unit => Value::Unit,
@@ -25,7 +34,7 @@ pub(crate) fn vm_ke_nilai_dgn(
         VmValue::Int(n) => Value::Int(*n),
         VmValue::Float(f) => Value::Float(*f),
         VmValue::Rune(c) => Value::Rune(*c),
-        VmValue::Str(s) => Value::Str(s.to_string()),
+        VmValue::Str(s) => Value::Str(Arc::clone(s)),
         VmValue::Ptr(a) => Value::Ptr(*a),
         // Array numerik `wokwok::` menyeberang dengan MENYALIN PENUNJUK, bukan
         // isinya.
@@ -33,6 +42,7 @@ pub(crate) fn vm_ke_nilai_dgn(
         VmValue::Canvas(c) => Value::Canvas(Arc::clone(c)),
         VmValue::Sinkron(p) => Value::Sinkron(p.clone()),
         VmValue::Asing(a) if a.ke_nilai().is_some() => a.ke_nilai().unwrap_or(Value::Nil),
+        VmValue::Asing(super::ffi_asing::Asing::Fungsi(_)) => return fungsi(v),
         // Sel binding tidak pernah jadi nilai yang dilihat program, tapi
         // kalau bocor, artinya tetap "nilai di dalam binding".
         VmValue::Cell(c) => vm_ke_nilai_dgn(&c.lock().unwrap_or_else(|p| p.into_inner()), fungsi)?,
@@ -53,9 +63,9 @@ pub(crate) fn vm_ke_nilai_dgn(
         // Struct, enum, dict, dan handle `ptr::`/`jawa::` semuanya `Map` di VM; jenisnya
         // dari LABEL, jadi kunci `variant` milik data (mis. hasil JSON) tetap data.
         VmValue::Map(m) => match &m.label {
-            crate::vm::value::Label::Enum { tipe, varian, payload } => Value::Enum {
-                type_name: tipe.to_string(),
-                variant: varian.to_string(),
+            crate::vm::value::Label::Enum { nama, payload } => Value::Enum {
+                type_name: nama.tipe.to_string(),
+                variant: nama.varian.to_string(),
                 payload: match payload {
                     Some(p) => Some(Box::new(vm_ke_nilai_dgn(p, fungsi)?)),
                     None => None,
@@ -69,7 +79,7 @@ pub(crate) fn vm_ke_nilai_dgn(
                 let g = m.lock().unwrap_or_else(|p| p.into_inner());
                 let mut f = std::collections::HashMap::new();
                 for (k, v) in g.iter() {
-                    f.insert(k.clone(), vm_ke_nilai_dgn(v, fungsi)?);
+                    f.insert(k.to_string(), vm_ke_nilai_dgn(v, fungsi)?);
                 }
                 Value::Struct { name: nama, fields: f.into() }
             }
@@ -78,7 +88,7 @@ pub(crate) fn vm_ke_nilai_dgn(
         VmValue::Function(_) | VmValue::Closure(_) | VmValue::NativeFn(_) | VmValue::Channel(_) => return fungsi(v),
         // Konstruktor cuma data (tipe, varian, jumlah payload), jadi menyeberang utuh.
         VmValue::Ktor(k) => Value::EnumCtor {
-            type_name: k.tipe.to_string(), variant: k.varian.to_string(), arity: k.arity,
+            type_name: k.nama.tipe.to_string(), variant: k.nama.varian.to_string(), arity: k.arity,
         },
         lain => return Err(pesan_tak_menyeberang(lain)),
     })
@@ -93,6 +103,10 @@ pub(crate) fn nilai_ke_vm_dgn(
     v: &Value,
     fungsi: &mut dyn FnMut(&Value) -> Result<VmValue, String>,
 ) -> Result<VmValue, String> {
+    if crate::interpreter::stack_menipis() == Some(true) {
+        let f = KirimPaksa(fungsi);
+        return crate::interpreter::di_stack_lega(move || { let f = f; nilai_ke_vm_dgn(v, f.0) });
+    }
     Ok(match v {
         Value::Nil => VmValue::Nil,
         Value::Unit => VmValue::Unit,
@@ -100,7 +114,7 @@ pub(crate) fn nilai_ke_vm_dgn(
         Value::Int(n) => VmValue::Int(*n),
         Value::Float(f) => VmValue::Float(*f),
         Value::Rune(c) => VmValue::Rune(*c),
-        Value::Str(s) => VmValue::str(s.clone()),
+        Value::Str(s) => VmValue::Str(Arc::clone(s)),
         Value::Ptr(a) => VmValue::Ptr(*a),
         Value::Nd(a) => VmValue::Nd(Arc::clone(a)),
         Value::Canvas(c) => VmValue::Canvas(Arc::clone(c)),

@@ -9,6 +9,7 @@
 void jrg_panic(const unsigned char *ptr, int64_t len);
 void jrg_tunda_buang(void);
 int jrg_ko_di_stack(uintptr_t alamat);
+int jrg_ko_selamatkan(void (*fn)(void));
 
 static char jrg_stack_cadangan[64 * 1024];
 static uintptr_t jrg_stack_atas, jrg_stack_bawah;
@@ -20,12 +21,21 @@ static const char JRG_PESAN_STACK[] =
     "  catatan: kalau memang butuh kedalaman sebesar ini, ubah jadi perulangan "
     "(`while`/`for`), atau perbesar stack (`ulimit -s`)";
 
+static void jrg_lapor_stack(void) {
+    jrg_situs = 0;  // stack habis di pembuka fungsi: situs panggilan terakhir bukan tempatnya
+    jrg_panic((const unsigned char *)JRG_PESAN_STACK, (int64_t)(sizeof JRG_PESAN_STACK - 1));
+}
+
 static void jrg_tangani_stack(int sinyal, siginfo_t *info, void *konteks) {
     (void)konteks;
     uintptr_t alamat = (uintptr_t)info->si_addr;
     // Cuma galat di wilayah stack (plus halaman penjaganya) yang berarti stack habis.
     if ((alamat < jrg_stack_atas && alamat >= jrg_stack_bawah) || jrg_ko_di_stack(alamat)) {
+        // Di stack baru `defer` jalan dan goroutine bisa berhenti sendirian; kalau stack
+        // penyelamatnya pun habis, laporkan dari sini tanpa menjalankan sisanya.
+        jrg_ko_selamatkan(jrg_lapor_stack);
         jrg_tunda_buang();
+        jrg_situs = 0;
         jrg_panic((const unsigned char *)JRG_PESAN_STACK, (int64_t)(sizeof JRG_PESAN_STACK - 1));
     }
     // Selain itu bukan urusan penjaga ini: kembalikan perilaku bawaan dan biarkan terulang.

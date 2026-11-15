@@ -3,7 +3,8 @@ package main
 // Aplikasi web utuh dalam satu berkas: route, middleware, template, sesi
 // bertanda tangan, sandi ter-hash, dan penyimpanan SQLite.
 
-const RAHASIA: string = "ganti-ini-di-produksi"
+// Rahasia sesi dari lingkungan; tanpa itu acak tiap jalan (sesi lama gugur), tidak pernah kunci tetap di sumber.
+let RAHASIA: string = env::get("SESSION_KEY") ?? crypto::random_hex(32)
 // `{{#each}}` mengulang dan `{{ x }}` melolosi HTML sendiri, jadi daftar
 // tidak perlu dirakit dengan penyambungan string — cara yang lebih mudah salah.
 const HALAMAN: string = """<!doctype html><meta charset=utf-8>
@@ -76,5 +77,5 @@ fn masuk(req) {
     let cocok = dok::password_verify("rahasia123", hash)
     let sesi = dok::session_encode({"user": "sari"}, RAHASIA)
     let resp = dok::json_response({"masuk": cocok})
-    return dok::cookie_set(resp, "sesi", sesi, {"Max-Age": "3600"})
+    return dok::cookie_set(resp, "sesi", sesi, {"max_age": 3600})
 }

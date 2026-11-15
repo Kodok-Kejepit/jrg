@@ -163,7 +163,7 @@ fn id_dari(v: &Value) -> Result<usize, String> {
 
 fn teks(v: &Value, nama: &str, ke: usize) -> Result<String, String> {
     match v {
-        Value::Str(s) => Ok(s.clone()),
+        Value::Str(s) => Ok(String::clone(&s.clone())),
         lain => Err(format!("{}: argumen ke-{} harus string, dapat `{}`",
                             nama, ke + 1, lain.type_name())),
     }

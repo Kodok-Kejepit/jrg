@@ -154,16 +154,16 @@ pub enum GagalTeksPecahan { Kosong, BukanAngka }
 fn sebab_teks_bulat(g: GagalTeksBulat, t: &str) -> String {
     match g {
         GagalTeksBulat::Kosong => "teks kosong bukan bilangan bulat".to_string(),
-        GagalTeksBulat::Luar128 => format!("teks `{}` di luar jangkauan integer 128 bit", t),
+        GagalTeksBulat::Luar128 => format!("teks `{}` di luar jangkauan integer 128 bit", crate::kutip_inti::kutip(t)),
         GagalTeksBulat::BukanBulat | GagalTeksBulat::Pecahan =>
-            format!("teks `{}` bukan bilangan bulat", t),
+            format!("teks `{}` bukan bilangan bulat", crate::kutip_inti::kutip(t)),
     }
 }
 
 fn sebab_teks_pecahan(g: GagalTeksPecahan, t: &str) -> String {
     match g {
         GagalTeksPecahan::Kosong => "teks kosong bukan angka".to_string(),
-        GagalTeksPecahan::BukanAngka => format!("teks `{}` bukan angka", t),
+        GagalTeksPecahan::BukanAngka => format!("teks `{}` bukan angka", crate::kutip_inti::kutip(t)),
     }
 }
 
@@ -253,10 +253,15 @@ pub fn bulat_dari_teks(s: &str) -> Result<i128, GagalTeksBulat> {
     let t = s.trim();
     t.parse::<i128>().map_err(|e| match e.kind() {
         IntErrorKind::Empty => GagalTeksBulat::Kosong,
-        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => GagalTeksBulat::Luar128,
+        // Rust melapor luapan begitu digitnya kepanjangan, sebelum sampai ke huruf: `777…7x` bukan bilangan.
+        IntErrorKind::PosOverflow | IntErrorKind::NegOverflow if semua_digit(t) => GagalTeksBulat::Luar128,
         _ if t.parse::<f64>().is_ok() => GagalTeksBulat::Pecahan,
         _ => GagalTeksBulat::BukanBulat,
     })
+}
+
+fn semua_digit(t: &str) -> bool {
+    t.strip_prefix(['+', '-']).unwrap_or(t).bytes().all(|b| b.is_ascii_digit())
 }
 
 fn float_dari_teks(s: &str) -> Result<f64, GagalTeksPecahan> {

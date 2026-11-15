@@ -174,6 +174,46 @@ pub struct Interpreter {
 }
 
 
+thread_local! {
+    /// Alamat dekat puncak stack thread ber-stack `INTERPRETER_STACK_SIZE`; 0 = tidak tercatat.
+    static PUNCAK_STACK: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// Dipanggil paling awal di tiap thread yang dibuat dengan `INTERPRETER_STACK_SIZE`.
+pub fn catat_puncak_stack() {
+    let p = 0u8;
+    PUNCAK_STACK.with(|c| c.set(std::hint::black_box(&p) as *const u8 as usize));
+}
+
+/// Jalankan `f` di thread baru ber-stack besar kalau stack thread ini menipis, selain itu langsung. Untuk penjelajah
+/// rekursif atas NILAI (tampil, banding): nilai bersarang jutaan tingkat diproses utuh, tidak mematikan proses.
+pub fn di_stack_lega<R: Send>(f: impl FnOnce() -> R + Send) -> R {
+    if stack_menipis() != Some(true) { return f(); }
+    std::thread::scope(|s| {
+        match std::thread::Builder::new().stack_size(Interpreter::INTERPRETER_STACK_SIZE)
+            .spawn_scoped(s, || { catat_puncak_stack(); f() }) {
+            Ok(h) => h.join().unwrap_or_else(|e| std::panic::resume_unwind(e)),
+            Err(e) => panic!("{}", pesan_goroutine_tak_dibuat(&e)),
+        }
+    })
+}
+
+/// `Some(true)` kalau stack thread ini tinggal seperdelapan; `None` kalau puncaknya tidak tercatat.
+/// Rekursi dibatasi sumber daya, seperti di LLVM — bukan angka karangan.
+pub fn stack_menipis() -> Option<bool> {
+    let ukuran = Interpreter::INTERPRETER_STACK_SIZE;
+    stack_terpakai().map(|t| t > ukuran - ukuran / 8)
+}
+
+/// Byte stack thread ini yang sudah terpakai sejak `catat_puncak_stack`; `None` = thread tanpa catatan.
+pub fn stack_terpakai() -> Option<usize> {
+    let puncak = PUNCAK_STACK.with(|c| c.get());
+    if puncak == 0 { return None; }
+    let p = 0u8;
+    let kini = std::hint::black_box(&p) as *const u8 as usize;
+    Some(puncak.saturating_sub(kini))
+}
+
 impl Interpreter {
     pub fn new() -> Self {
         Interpreter {
@@ -208,8 +248,13 @@ impl Interpreter {
         }
     }
 
-    /// Batas kedalaman rekursi sebelum interpreter menyerah dengan diagnostik.
+    /// Batas hitungan rekursi untuk thread yang puncak stack-nya tidak tercatat (`catat_puncak_stack`).
     pub const MAX_CALL_DEPTH: usize = 10_000;
+
+    /// Rekursi ditolak: sisa stack thread ini menipis, atau (tanpa catatan puncak) hitungannya lewat batas.
+    pub(crate) fn rekursi_terlalu_dalam(&self) -> bool {
+        stack_menipis().unwrap_or(self.call_depth > Self::MAX_CALL_DEPTH)
+    }
 
     /// Stack untuk thread yang menjalankan program JRG.
     /// Profil dev memakai bingkai beberapa kali lebih besar, jadi cadangannya ikut besar.
@@ -259,10 +304,9 @@ impl Interpreter {
                     match r {
                         Ok(_) | Err(Signal::Return(_)) => Ok(()),
                         Err(Signal::RuntimeError(e)) => {
-                            // Lokasinya diambil dari `Span` yang sudah dibawa
-                            // galatnya sejak lama — tidak ada mekanisme baru
-                            // di sini, cuma dipakai.
-                            baris = e.span.zip(src)
+                            // Lokasinya dari `Span` galatnya, dan cuma untuk galat yang lahir di berkas UJI ini
+                            // (id 0): offset modul lain dibaca terhadap sumber ini menunjuk baris yang salah.
+                            baris = e.span.filter(|sp| sp.file_id == 0).zip(src)
                                 .map(|(sp, t)| indeks.get_or_insert_with(|| crate::uji::IndeksBaris::baru(t))
                                     .baris(sp.lo.0 as usize));
                             Err(e.message.clone())
@@ -305,6 +349,9 @@ impl Interpreter {
         // ── Proses top-level imports dulu (Tier 2 module system) ───────────
         let file = &self.siapkan_utama(file)?;
         self.hoist_top_level(file)?;
+        let kembali = kembali_main(file.items.iter().find_map(|it| match it {
+            crate::parser::Item::Fn(f) if f.name == "main" => f.ret_type.as_ref(), _ => None }));
+        if let KembaliMain::Tolak(pesan) = &kembali { return Err(RuntimeError::new(pesan.clone())); }
         let result = match self.env.get("main") {
             Some(Value::Function(func)) => {
                 let mut ce = Env::with_globals(self.env.globals.clone());
@@ -328,14 +375,13 @@ impl Interpreter {
                                 .as_ref()
                                 .map(|p| format!(": {}", p))
                                 .unwrap_or_default();
-                            Err(RuntimeError::new(format!(
-                                "program berhenti karena `{}::{}` merambat keluar dari `main`{} \
-                                 — tangani dengan `match` di dalam `main`, atau pakai \
-                                 `.unwrap_or(...)`, kalau kegagalan ini memang boleh terjadi",
-                                type_name, variant, isi
-                            )))
+                            Err(RuntimeError::new(pesan_main_gagal(type_name, variant, &isi)))
                         }
-                        _ => Ok(()),
+                        // `main -> int`: bulat = kode keluar (aturan `exit`); tanpa anotasi nilainya dibuang.
+                        _ if !matches!(kembali, KembaliMain::Kode) => Ok(()),
+                        Value::Int(n) => crate::host::pasang_kode_main(*n).map_err(RuntimeError::new),
+                        Value::Unit | Value::Nil => Ok(()),
+                        lain => Err(RuntimeError::new(crate::host::pesan_main_bukan_kode(&lain.type_name()))),
                     },
                     Err(Signal::RuntimeError(e))   => Err(e),
                     // `break`/`continue` yang sampai ke sini berarti tidak ada loop yang mau
@@ -359,10 +405,10 @@ impl Interpreter {
             Some(_) => Err(RuntimeError::new(PESAN_MAIN_BUKAN_FN)),
             None => Err(RuntimeError::new(PESAN_TANPA_MAIN)),
         };
-        // Wait for every goroutine spawned during the run (directly from
-        // `main`, or transitively from another goroutine) to finish,
-        // whether or not `main` itself succeeded. See `join_all_goroutines`.
-        self.join_all_goroutines();
+        // Goroutine ditunggu hanya kalau `main` berhasil: program yang gagal
+        // langsung melapor dan berhenti, seperti LLVM dan Go (dulu galatnya
+        // tertahan, dan menggantung tanpa pesan kalau goroutine-nya terblokir).
+        if result.is_ok() { self.join_all_goroutines(); }
         result
     }
 
@@ -737,7 +783,7 @@ where
     std::thread::scope(|s| {
         std::thread::Builder::new()
             .stack_size(Interpreter::INTERPRETER_STACK_SIZE)
-            .spawn_scoped(s, || f(file))
+            .spawn_scoped(s, || { catat_puncak_stack(); f(file) })
             .expect("gagal membuat thread interpreter")
             .join()
             .unwrap_or_else(|_| Err(RuntimeError::new(
@@ -759,6 +805,7 @@ where
         match std::thread::Builder::new()
             .stack_size(Interpreter::INTERPRETER_STACK_SIZE)
             .spawn_scoped(scope, move || {
+                catat_puncak_stack();
                 let hasil = taken(file);
                 // Profiler menumpuk di thread-local demi kecepatan, jadi hasil thread ini
                 // harus DISETOR sebelum ia mati — kalau tidak, seluruh kerjanya hilang tanpa …

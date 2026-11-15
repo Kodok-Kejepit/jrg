@@ -1,6 +1,6 @@
 [package]
 name        = "jrgrt"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2021"
 description = "JawaRustGo++ native runtime — linked into every jrgc --emit-llvm compiled binary. no_std + alloc on libc, zero external crates: must build fully offline."
 

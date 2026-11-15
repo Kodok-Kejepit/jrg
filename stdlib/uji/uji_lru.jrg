@@ -1,0 +1,45 @@
+package main
+import "std/lru"
+
+fn test_buang_yang_paling_lama() {
+    var c = lru::baru(2)
+    c = lru::taruh(c, "a", 1)
+    c = lru::taruh(c, "b", 2)
+    let (c2, v) = lru::ambil(c, "a")
+    c = c2
+    assert_eq(v, Some(1))
+    c = lru::taruh(c, "c", 3)
+    assert_eq(lru::intip(c, "b"), None)
+    assert_eq(lru::intip(c, "a"), Some(1))
+    assert_eq(lru::urutan(c), ["a", "c"])
+    c = lru::taruh(c, "a", 10)
+    assert_eq(lru::urutan(c), ["c", "a"])
+    assert_eq(lru::ukuran(c), 2)
+    c = lru::buang(c, "c")
+    assert_eq(lru::urutan(c), ["a"])
+    let (_, kosong) = lru::ambil(c, "zz")
+    assert_eq(kosong, None)
+}
+
+fn test_sesuai_model_dan_tetap_padat() {
+    var c = lru::baru(3)
+    var model = []
+    var x = 7
+    for _, i in range(3000) {
+        x = (x * 1103515245 + 12345) % 2147483648
+        let k = «k${x % 6}»
+        if x % 3 == 0 {
+            let (c2, v) = lru::ambil(c, k)
+            c = c2
+            let ada = arr::contains(model, k)
+            assert_eq(v.is_some(), ada)
+            if ada { model = arr::push(arr::filter(model, |m| m != k), k) }
+        } else {
+            c = lru::taruh(c, k, i)
+            model = arr::push(arr::filter(model, |m| m != k), k)
+            if len(model) > 3 { model = model[1:] }
+        }
+        assert_eq(lru::urutan(c), model)
+    }
+    assert(len(c.antre) - c.kepala <= 2 * 3 + 17)
+}

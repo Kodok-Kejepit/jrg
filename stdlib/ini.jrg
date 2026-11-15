@@ -1,0 +1,99 @@
+package std_ini
+
+// Berkas INI dengan aturan yang tidak bisa dibaca dua arti: bagian/kunci kembar `Err`, kunci peka huruf besar,
+// tidak ada baris sambungan, komentar cuma satu baris penuh (`;` atau `#`), nilai diambil apa adanya — kutip
+// tidak dibuang dan `a = 1 ; x` bernilai `1 ; x`. Kunci sebelum bagian pertama masuk bagian `""`.
+
+fn _kendali(s) {
+    for _, r in str::chars(s) {
+        let k = r as int
+        if (k < 32 && k != 9) || k == 127 { return true }
+    }
+    return false
+}
+
+fn _kutip(s) {
+    if _kendali(s) || len(s) > 40 { return «(${len(s)} karakter)» }
+    return «`${s}`»
+}
+
+/// Urai teks INI jadi `dict` bagian → `dict` kunci → teks.
+pub fn parse(teks) {
+    var s = teks
+    if str::starts_with(s, "\uFEFF") { s = s[1:] }
+    var hasil = dict::new()
+    var bagian = ""
+    hasil[""] = dict::new()
+    var dari_header = dict::new()
+    for n, baris0 in str::split(s, "\n") {
+        let no = n + 1
+        var baris = baris0
+        if str::ends_with(baris, "\r") { baris = baris[0:len(baris) - 1] }
+        if _kendali(baris) { return Err(«baris ${no}: memuat karakter kendali») }
+        let t = str::trim(baris)
+        if t == "" || str::starts_with(t, ";") || str::starts_with(t, "#") { continue }
+        if baris != str::trim_start(baris) {
+            return Err(«baris ${no}: diawali spasi — baris sambungan tidak didukung, tulis nilainya di satu baris»)
+        }
+        if str::starts_with(t, "[") {
+            if !str::ends_with(t, "]") { return Err(«baris ${no}: kepala bagian tidak ditutup `]`») }
+            let nama = str::trim(t[1:len(t) - 1])
+            if nama == "" || str::contains(nama, "[") || str::contains(nama, "]") {
+                return Err(«baris ${no}: nama bagian ${_kutip(nama)} tidak sah»)
+            }
+            if dict::has(dari_header, nama) { return Err(«baris ${no}: bagian ${_kutip(nama)} ditulis dua kali») }
+            if nama != "" && dict::has(hasil, nama) == false { hasil[nama] = dict::new() }
+            dari_header[nama] = true
+            bagian = nama
+            continue
+        }
+        let Some(k) = str::index_of(t, "=") else {
+            return Err(«baris ${no}: harusnya `kunci = nilai` atau `[bagian]`»)
+        }
+        let kunci = str::trim(t[0:k])
+        let nilai = str::trim(t[k + 1:])
+        if kunci == "" { return Err(«baris ${no}: kunci kosong») }
+        var isi = hasil[bagian]
+        if dict::has(isi, kunci) { return Err(«baris ${no}: kunci ${_kutip(kunci)} ditulis dua kali di bagian ${_kutip(bagian)}») }
+        isi[kunci] = nilai
+        hasil[bagian] = isi
+    }
+    if dict::is_empty(hasil[""]) { hasil = dict::remove(hasil, "") }
+    return Ok(hasil)
+}
+
+fn _bisa_ditulis(apa, s, kunci) {
+    if _kendali(s) || str::contains(s, "\t") { return Err(«${apa} ${_kutip(s)} memuat karakter kendali») }
+    if s != str::trim(s) { return Err(«${apa} ${_kutip(s)} berspasi di ujung — akan hilang saat dibaca ulang») }
+    if kunci {
+        if s == "" || str::contains(s, "=") || str::starts_with(s, "[") || str::starts_with(s, ";") || str::starts_with(s, "#") {
+            return Err(«${apa} ${_kutip(s)} tidak bisa ditulis sebagai kunci INI»)
+        }
+    }
+    return Ok(())
+}
+
+/// Tulis `dict` bagian → `dict` kunci → nilai jadi teks INI; `Err` kalau ada yang akan terbaca lain.
+pub fn stringify(d) {
+    var keluar = ""
+    if dict::has(d, "") {
+        for k, v in d[""] {
+            _bisa_ditulis("kunci", k, true)?
+            _bisa_ditulis("nilai", str(v), false)?
+            keluar = keluar + k + " = " + str(v) + "\n"
+        }
+    }
+    for b, isi in d {
+        if b == "" { continue }
+        _bisa_ditulis("bagian", b, false)?
+        if str::contains(b, "[") || str::contains(b, "]") { return Err(«bagian ${_kutip(b)} memuat kurung siku») }
+        if keluar != "" { keluar = keluar + "\n" }
+        keluar = keluar + "[" + b + "]\n"
+        for k, v in isi {
+            _bisa_ditulis("kunci", k, true)?
+            _bisa_ditulis("nilai", str(v), false)?
+            keluar = keluar + k + " = " + str(v) + "\n"
+        }
+    }
+    return Ok(keluar)
+}

@@ -44,7 +44,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::map", sp)?;
                 let mut result = Vec::with_capacity(items.len());
                 for item in items {
-                    result.push(self.call_value_immediate(f.clone(), vec![item])?);
+                    result.push(self.call_value_immediate_n(&f, [item])?);
                 }
                 self.push(VmValue::array(result));
             }
@@ -54,7 +54,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::filter", sp)?;
                 let mut result = Vec::new();
                 for item in items {
-                    let keep = self.call_value_immediate(f.clone(), vec![item.clone()])?;
+                    let keep = self.call_value_immediate_n(&f, [item.clone()])?;
                     if keep.is_truthy() { result.push(item); }
                 }
                 self.push(VmValue::array(result));
@@ -66,7 +66,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::reduce", sp)?;
                 let mut acc = init;
                 for item in items {
-                    acc = self.call_value_immediate(f.clone(), vec![acc, item])?;
+                    acc = self.call_value_immediate_n(&f, [acc, item])?;
                 }
                 self.push(acc);
             }
@@ -78,7 +78,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::fold", sp)?;
                 let mut acc = init;
                 for item in items {
-                    acc = self.call_value_immediate(f.clone(), vec![acc, item])?;
+                    acc = self.call_value_immediate_n(&f, [acc, item])?;
                 }
                 self.push(acc);
             }
@@ -88,7 +88,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::any", sp)?;
                 let mut found = false;
                 for item in items {
-                    if self.call_value_immediate(f.clone(), vec![item])?.is_truthy() { found = true; break; }
+                    if self.call_value_immediate_n(&f, [item])?.is_truthy() { found = true; break; }
                 }
                 self.push(VmValue::Bool(found));
             }
@@ -98,7 +98,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::all", sp)?;
                 let mut all_true = true;
                 for item in items {
-                    if !self.call_value_immediate(f.clone(), vec![item])?.is_truthy() { all_true = false; break; }
+                    if !self.call_value_immediate_n(&f, [item])?.is_truthy() { all_true = false; break; }
                 }
                 self.push(VmValue::Bool(all_true));
             }
@@ -109,7 +109,7 @@ impl Vm {
                 // `Option`, sama dengan bentuk method `.find(f)`.
                 let mut found = opsi_none();
                 for item in items {
-                    if self.call_value_immediate(f.clone(), vec![item.clone()])?.is_truthy() {
+                    if self.call_value_immediate_n(&f, [item.clone()])?.is_truthy() {
                         found = opsi_some(item);
                         break;
                     }
@@ -122,7 +122,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::find_idx", sp)?;
                 let mut ketemu = opsi_none();
                 for (i, item) in items.into_iter().enumerate() {
-                    if self.call_value_immediate(f.clone(), vec![item])?.is_truthy() {
+                    if self.call_value_immediate_n(&f, [item])?.is_truthy() {
                         ketemu = opsi_some(VmValue::Int(i as i128));
                         break;
                     }
@@ -134,7 +134,7 @@ impl Vm {
                 let arr = self.pop(sp)?;
                 let items = self.expect_array(&arr, "arr::each", sp)?;
                 for item in items {
-                    self.call_value_immediate(f.clone(), vec![item])?;
+                    self.call_value_immediate_n(&f, [item])?;
                 }
                 self.push(VmValue::Unit);
             }
@@ -144,7 +144,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::flat_map", sp)?;
                 let mut out = Vec::new();
                 for item in items {
-                    match self.call_value_immediate(f.clone(), vec![item])? {
+                    match self.call_value_immediate_n(&f, [item])? {
                         VmValue::Array(inner) => out.extend(
                             inner.lock().unwrap_or_else(|p| p.into_inner()).iter().cloned()),
                         lain => out.push(lain),
@@ -158,7 +158,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::count_if", sp)?;
                 let mut n: i128 = 0;
                 for item in items {
-                    if self.call_value_immediate(f.clone(), vec![item])?.is_truthy() {
+                    if self.call_value_immediate_n(&f, [item])?.is_truthy() {
                         n += 1;
                     }
                 }
@@ -202,7 +202,7 @@ impl Vm {
                 let items = self.expect_array(&arr, "arr::partition", sp)?;
                 let (mut ya, mut tidak) = (Vec::new(), Vec::new());
                 for item in items {
-                    if self.call_value_immediate(f.clone(), vec![item.clone()])?.is_truthy() {
+                    if self.call_value_immediate_n(&f, [item.clone()])?.is_truthy() {
                         ya.push(item);
                     } else {
                         tidak.push(item);
@@ -227,7 +227,7 @@ impl Vm {
                 let xb = self.expect_array_ke(&b, "arr::zip_with", 2, sp)?;
                 let mut out = Vec::new();
                 for (p, q) in xa.into_iter().zip(xb) {
-                    out.push(self.call_value_immediate(f.clone(), vec![p, q])?);
+                    out.push(self.call_value_immediate_n(&f, [p, q])?);
                 }
                 self.push(VmValue::array(out));
             }

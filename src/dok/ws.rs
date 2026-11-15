@@ -95,6 +95,18 @@ pub fn minta_upgrade(headers: &[(String, String)]) -> Option<String> {
     cari("sec-websocket-key").map(|k| k.to_string())
 }
 
+/// CSWSH (CWE-1385): peramban selalu mengirim `Origin`, dan host-nya harus host `Host` — port boleh beda,
+/// seperti cookie. Klien bukan peramban (tanpa `Origin`) diterima; `Origin: null` dan domain lain tidak.
+pub fn origin_sah(headers: &[(String, String)]) -> bool {
+    let cari = |n: &str| headers.iter().find(|(k, _)| k.eq_ignore_ascii_case(n)).map(|(_, v)| v.trim());
+    let Some(o) = cari("origin") else { return true };
+    let host = |v: &str| crate::stdlib::url::urai_kepala_host(v).ok().map(|(h, _)| h.to_ascii_lowercase());
+    match (o.split_once("://").and_then(|(_, sisa)| host(sisa)), cari("host").and_then(host)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
+}
+
 /// Jawab jabat tangannya di atas `stream`, lalu daftarkan koneksinya.
 pub fn terima(mut stream: TcpStream, kunci: &str) -> Result<u64, String> {
     let jawab = format!(
@@ -134,6 +146,7 @@ fn jenis_dari(op: u8) -> Option<Jenis> {
     })
 }
 
+#[derive(Debug)]
 struct Frame { fin: bool, jenis: Jenis, muatan: Vec<u8> }
 
 /// Coba baca satu frame dari `buf`. `Ok(None)` berarti byte-nya belum cukup —
@@ -179,16 +192,37 @@ fn baca_frame(buf: &[u8]) -> Result<Option<(Frame, usize)>, String> {
         if panjang > 125 { return Err("ws: frame kontrol lebih dari 125 byte".into()); }
         if !fin { return Err("ws: frame kontrol tidak boleh terfragmentasi".into()); }
     }
-    let mask = if masked {
-        if buf.len() < i + 4 { return Ok(None); }
-        let m = [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]; i += 4; Some(m)
-    } else { None };
+    if !masked {
+        return Err("ws: frame dari klien wajib bermask (RFC 6455 §5.1)".into());
+    }
+    if buf.len() < i + 4 { return Ok(None); }
+    let m = [buf[i], buf[i + 1], buf[i + 2], buf[i + 3]]; i += 4;
     if buf.len() < i + panjang { return Ok(None); }
     let mut muatan = buf[i..i + panjang].to_vec();
-    if let Some(m) = mask {
-        for (k, b) in muatan.iter_mut().enumerate() { *b ^= m[k % 4]; }
-    }
+    for (k, b) in muatan.iter_mut().enumerate() { *b ^= m[k % 4]; }
     Ok(Some((Frame { fin, jenis, muatan }, i + panjang)))
+}
+
+/// Rakit fragmen data sesuai urutan RFC 6455 §5.4; mengembalikan kode tutup protokol bila melanggar.
+fn gabung_fragmen(
+    jenis_awal: &mut Option<Jenis>, gabung: &mut Vec<u8>, f: Frame,
+) -> Result<Option<(Jenis, Vec<u8>)>, (u16, String)> {
+    match (*jenis_awal, f.jenis) {
+        (None, Jenis::Lanjutan) =>
+            return Err((1002, "ws: frame lanjutan tanpa frame pembuka (kode 1002)".into())),
+        (Some(_), Jenis::Teks | Jenis::Biner) =>
+            return Err((1002, "ws: frame data baru di tengah pesan terfragmentasi (kode 1002)".into())),
+        (None, j) => *jenis_awal = Some(j),
+        (Some(_), Jenis::Lanjutan) => {}
+        _ => {}
+    }
+    if gabung.len() + f.muatan.len() > MAKS_PESAN {
+        return Err((1009, format!("ws: pesan gabungan melebihi batas {} byte", MAKS_PESAN)));
+    }
+    gabung.extend_from_slice(&f.muatan);
+    if !f.fin { return Ok(None); }
+    let jenis = jenis_awal.take().unwrap_or(Jenis::Teks);
+    Ok(Some((jenis, std::mem::take(gabung))))
 }
 
 /// Rakit satu frame untuk dikirim. Server TIDAK memasang mask (RFC 6455 §5.1).
@@ -239,27 +273,27 @@ pub fn ws_recv(args: &[Value]) -> Result<Value, String> {
                         k.tandai_tutup();
                         return Ok(none());
                     }
-                    j => {
-                        if jenis_awal.is_none() { jenis_awal = Some(j); }
-                        if gabung.len() + f.muatan.len() > MAKS_PESAN {
-                            k.tandai_tutup();
-                            return Err(format!(
-                                "ws: pesan gabungan melebihi batas {} byte", MAKS_PESAN));
-                        }
-                        gabung.extend_from_slice(&f.muatan);
-                        if f.fin {
-                            if matches!(jenis_awal, Some(Jenis::Biner)) {
-                                return Ok(some(super::crypto::byte_ke_array(gabung)));
-                            }
-                            // RFC 6455 §8.1: pesan teks yang bukan UTF-8 menutup koneksi (1007).
-                            let Ok(teks) = String::from_utf8(gabung) else {
-                                let _ = k.kirim(&tulis_frame(Jenis::Tutup, &[0x03, 0xEF]));
+                    _ => {
+                        match gabung_fragmen(&mut jenis_awal, &mut gabung, f) {
+                            Err((kode, pesan)) => {
+                                let _ = k.kirim(&tulis_frame(Jenis::Tutup, &kode.to_be_bytes()));
                                 k.tandai_tutup();
-                                return Err("ws: pesan teks dari klien bukan UTF-8 yang sah; koneksinya ditutup (kode 1007)".to_string());
-                            };
-                            return Ok(some(Value::Str(teks)));
+                                return Err(pesan);
+                            }
+                            Ok(None) => continue,
+                            Ok(Some((Jenis::Biner, isi))) => {
+                                return Ok(some(super::crypto::byte_ke_array(isi)));
+                            }
+                            Ok(Some((_, isi))) => {
+                                // RFC 6455 §8.1: pesan teks yang bukan UTF-8 menutup koneksi (1007).
+                                let Ok(teks) = String::from_utf8(isi) else {
+                                    let _ = k.kirim(&tulis_frame(Jenis::Tutup, &[0x03, 0xEF]));
+                                    k.tandai_tutup();
+                                    return Err("ws: pesan teks dari klien bukan UTF-8 yang sah; koneksinya ditutup (kode 1007)".to_string());
+                                };
+                                return Ok(some(Value::Str(std::sync::Arc::new(teks))));
+                            }
                         }
-                        continue;
                     }
                 }
             }
@@ -278,7 +312,7 @@ pub fn ws_send(args: &[Value]) -> Result<Value, String> {
     let id = id_dari(args.get(0), "dok::ws_send")?;
     // Array byte dikirim sebagai pesan BINER; selain itu teks (nilai lain ditampilkan).
     let (jenis, teks) = match args.get(1) {
-        Some(Value::Str(s)) => (Jenis::Teks, s.clone().into_bytes()),
+        Some(Value::Str(s)) => (Jenis::Teks, s.as_bytes().to_vec()),
         Some(Value::Array(a)) => (Jenis::Biner, super::crypto::array_ke_byte(a, "dok::ws_send")?),
         Some(lain) => (Jenis::Teks, format!("{}", lain).into_bytes()),
         None => return Err("dok::ws_send: butuh pesannya".to_string()),
@@ -381,5 +415,37 @@ mod tes {
     fn frame_kontrol_wajib_pendek_dan_utuh() {
         assert!(baca_frame(&[0x89, 126, 0, 200]).is_err());  // ping > 125
         assert!(baca_frame(&[0x09, 0x00]).is_err());         // ping terfragmentasi
+    }
+
+    #[test]
+    fn frame_tanpa_mask_dan_fragmen_kacau_ditolak() {
+        assert!(baca_frame(&[0x81, 0x04, b'h', b'a', b'l', b'o']).unwrap_err().contains("bermask"));
+        let (mut awal, mut gabung) = (None, Vec::new());
+        let lanjutan_yatim = Frame { fin: true, jenis: Jenis::Lanjutan, muatan: b"x".to_vec() };
+        assert_eq!(gabung_fragmen(&mut awal, &mut gabung, lanjutan_yatim).unwrap_err().0, 1002);
+        let buka = Frame { fin: false, jenis: Jenis::Teks, muatan: b"ha".to_vec() };
+        assert!(gabung_fragmen(&mut awal, &mut gabung, buka).unwrap().is_none());
+        let tabrak = Frame { fin: true, jenis: Jenis::Biner, muatan: b"lo".to_vec() };
+        assert_eq!(gabung_fragmen(&mut awal, &mut gabung, tabrak).unwrap_err().0, 1002);
+    }
+}
+
+#[cfg(test)]
+mod uji_origin {
+    use super::origin_sah;
+    fn k(o: Option<&str>, h: &str) -> Vec<(String, String)> {
+        let mut v = vec![("Host".to_string(), h.to_string())];
+        if let Some(o) = o { v.push(("Origin".to_string(), o.to_string())); }
+        v
+    }
+    #[test]
+    fn origin_websocket_harus_host_yang_sama() {
+        assert!(origin_sah(&k(None, "127.0.0.1:8080")));
+        assert!(origin_sah(&k(Some("http://localhost:5173"), "localhost:8080")));
+        assert!(origin_sah(&k(Some("https://JRG-lang.org"), "jrg-lang.org")));
+        assert!(origin_sah(&k(Some("http://[::1]:3000"), "[::1]:8080")));
+        for o in ["https://jahat.example", "null", "http://localhost.jahat.example", "localhost", "http://a@localhost"] {
+            assert!(!origin_sah(&k(Some(o), "localhost:8080")), "{}", o);
+        }
     }
 }

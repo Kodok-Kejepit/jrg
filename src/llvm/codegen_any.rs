@@ -38,6 +38,45 @@ pub fn tag_untuk(t: &JrgType) -> Option<i32> {
     })
 }
 
+/// Satu tipe untuk dua cabang yang bisa menghasilkan nilai (lengan `if`/`match`, `return`):
+/// jenis yang sama tetap telanjang, jenis yang berbeda jadi nilai bertag, seperti di acuan.
+pub fn satukan_jenis(a: &JrgType, b: &JrgType) -> JrgType {
+    use JrgType as T;
+    match (a, b) {
+        (T::Never, x) | (x, T::Never) => x.clone(),
+        _ if a == b => a.clone(),
+        (T::Any, _) | (_, T::Any) => T::Any,
+        // `[]` belum punya jenis elemen: ia mengikuti sisi lain.
+        (T::Array(_, 0), T::Array(e, _) | T::Slice(e)) | (T::Array(e, _) | T::Slice(e), T::Array(_, 0)) =>
+            T::Slice(Box::new(luruh(e))),
+        (T::Array(x, _) | T::Slice(x), T::Array(y, _) | T::Slice(y)) =>
+            T::Slice(Box::new(satukan_jenis(&luruh(x), &luruh(y)))),
+        (T::Dict(x), T::Dict(y)) => T::Dict(Box::new(satukan_jenis(x, y))),
+        (T::DictCampur(_), T::Dict(_) | T::DictCampur(_)) | (T::Dict(_), T::DictCampur(_)) =>
+            T::Dict(Box::new(T::Any)),
+        (T::Tuple(x), T::Tuple(y)) if x.len() == y.len() =>
+            T::Tuple(x.iter().zip(y).map(|(p, q)| satukan_jenis(p, q)).collect()),
+        // Lebar yang berbeda dan instans generik yang sama dasarnya diurus `coerce`.
+        _ if a.is_int() && b.is_int() || a.is_float() && b.is_float() => a.clone(),
+        (T::Struct(x), T::Struct(y)) | (T::Enum(x), T::Enum(y))
+            if super::generik::dasar(x) == super::generik::dasar(y) => a.clone(),
+        (T::Fn(..), T::Fn(..)) | (T::Unit, _) | (_, T::Unit) => a.clone(),
+        _ if tag_untuk(a).is_some() && tag_untuk(b).is_some() => T::Any,
+        _ => a.clone(),
+    }
+}
+
+/// Apakah nilai bertipe `b` yang masuk wadah bernilai `a` mengganti JENIS isinya (dict-nya lalu
+/// harus bernilai bertag)? Lebar bilangan, peluruhan array, dan `Never` bukan pergantian.
+pub fn ganti_jenis_isi(a: &JrgType, b: &JrgType) -> bool {
+    use JrgType as T;
+    if *a == T::Any || matches!(b, T::Never | T::Unit) || a == b { return false; }
+    if a.is_int() && b.is_int() || a.is_float() && b.is_float() { return false; }
+    if luruh(b) == *a { return false; }
+    !matches!((a, b), (T::Struct(x), T::Struct(y)) | (T::Enum(x), T::Enum(y))
+        if super::generik::dasar(x) == super::generik::dasar(y))
+}
+
 /// Lukisan sebuah tipe untuk isi kotak, satu nibble per tingkat (kode sama dengan `primitif.c`).
 fn lukis(t: &JrgType) -> Option<(u32, u32)> {
     let satu = |k: u32| Some((k, 4));
@@ -54,6 +93,9 @@ fn lukis(t: &JrgType) -> Option<(u32, u32)> {
         _ => None,
     }
 }
+
+/// Apakah isi kotak bertipe `t` bisa dilukis (`lukis`); yang tidak, menyeberang sebagai elemen bertag.
+pub fn terlukis(t: &JrgType) -> bool { lukis(t).is_some() }
 
 /// Bentuk sebuah agregat di dalam kotak: array berukuran tetap di tingkat mana pun jadi slice.
 pub fn luruh(t: &JrgType) -> JrgType {
@@ -82,6 +124,66 @@ pub fn nama_isi(t: &JrgType) -> String {
         JrgType::DictCampur(_) => "dict<campur>".to_string(),
         JrgType::Any => "campur".to_string(),
         lain => lain.nama_typeof(),
+    }
+}
+
+/// Satu cabang yang bisa menghasilkan nilai, untuk `Codegen::jenis_cabang`.
+pub(crate) enum Cabang<'a> {
+    Ekspr(&'a crate::parser::Expr),
+    Blok(&'a crate::parser::Block),
+}
+
+impl Codegen {
+    /// Tipe bersama cabang-cabang `if`/ternary yang jenisnya BERBEDA (`None` kalau sama atau
+    /// tak terbaca): dibaca sekilas dulu, lalu dengan menurunkan tiap cabang di satu salinan.
+    pub(crate) fn jenis_cabang(&mut self, cabang: &[Cabang]) -> Option<JrgType> {
+        let sekilas = |cg: &Codegen, e: &crate::parser::Expr| cg.peek_expr_type(e)
+            .or_else(|| super::codegen_expr::tipe_bawaan_ekspresi(e));
+        let ts: Vec<Option<JrgType>> = cabang.iter().map(|c| match c {
+            Cabang::Ekspr(e) => sekilas(self, e),
+            Cabang::Blok(b) if b.stmts.is_empty() => b.tail.as_ref().and_then(|e| sekilas(self, e)),
+            Cabang::Blok(_) => None,
+        }).collect();
+        let ts: Vec<JrgType> = if ts.iter().all(|t| t.is_some()) {
+            ts.into_iter().flatten().collect()
+        } else {
+            if self.kedalaman_cabang >= 3 { return None; }
+            // Badan fungsi yang sudah jadi tidak dibaca salinannya; tanpa ini tiap `if` menyalin modulnya.
+            let jadi = std::mem::take(&mut self.fn_defs);
+            let mut salinan = self.clone();
+            self.fn_defs = jadi;
+            salinan.mode_duga = true;
+            salinan.kedalaman_cabang += 1;
+            salinan.separuh_duga = (None, None);
+            let mut ts = Vec::with_capacity(cabang.len());
+            for c in cabang {
+                let l = salinan.fresh_label("duga.cabang.");
+                if salinan.is_terminated() { salinan.start_block(l); } else {
+                    salinan.terminate(format!("br label %{}", l));
+                    salinan.start_block(l);
+                }
+                let v = match c {
+                    Cabang::Ekspr(e) => salinan.codegen_expr(e, None),
+                    Cabang::Blok(b) => salinan.codegen_block_expr(b, None),
+                }.ok()?;
+                ts.push(if salinan.is_terminated() { JrgType::Never } else { v.ty });
+            }
+            // `c $ Ok(a) : Err(b)`: dua separuh itu bersama-sama menyebut `Result<A, B>`, seperti
+            // penduga tipe kembalian fungsi; separuh yang tidak terlihat bertag.
+            if ts.iter().all(|t| *t == JrgType::Never) {
+                let (t, e) = salinan.separuh_duga.clone();
+                if t.is_some() || e.is_some() {
+                    let (t, e) = (t.unwrap_or(JrgType::Any), e.unwrap_or(JrgType::Any));
+                    return Some(JrgType::Enum(self.instantiate_result(&t, &e)));
+                }
+            }
+            ts
+        };
+        if ts.iter().any(|t| *t == JrgType::Unit) { return None; }
+        let bersama = ts.iter().fold(JrgType::Never, |a, t| satukan_jenis(&a, t));
+        let pertama = ts.iter().find(|t| **t != JrgType::Never)?;
+        // Cabang yang separuh tipenya belum terlihat (`None`) mengikuti cabang lain.
+        (bersama != *pertama || ts.iter().any(|t| *t == JrgType::Never)).then_some(bersama)
     }
 }
 
@@ -307,6 +409,8 @@ impl Codegen {
     pub(crate) fn pancarkan_sama_buram(&mut self, no: usize) {
         let t = self.tipe_buram[no].clone();
         let nol = crate::lexer::Span { lo: crate::lexer::BytePos(0), hi: crate::lexer::BytePos(0), file_id: 0 };
+        // Dipanggil lewat `@jrg_sama_buram`, yang sudah memasang situs pemanggilnya.
+        let lama = std::mem::replace(&mut self.warisi_situs, true);
         self.mulai_fungsi_kosong(JrgType::Bool);
         let (a, b) = (self.load_place("%a", &t), self.load_place("%b", &t));
         let slot = self.alloca_raw("sbur.", "i8", Some(1));
@@ -326,6 +430,7 @@ impl Codegen {
         self.tambah_definisi(format!(
             "define internal i8 @sama.buram.{}(ptr %a, ptr %b) nounwind {{\n{}}}\n", no + 1, badan));
         self.selesai_fungsi_kosong();
+        self.warisi_situs = lama;
     }
 
     /// `@jrg_sama_buram(kata, ptr, ptr)`: pemilih pembanding per nomor tipe buram.
@@ -455,34 +560,68 @@ impl Codegen {
         Val { text: r, ty: JrgType::I32 }
     }
 
-    /// Badan `@jrg_tampil_kotak(ptr)`: array/dict di dalam kotak, dicetak lewat bentuk bertagnya.
+    /// Badan `@jrg_tampil_kotak(ptr)`: array/dict di dalam kotak, dijelajahi `jrg_tampil_lukis` (C, tanpa
+    /// rekursi — dulu satu bingkai IR per tingkat, 20 ribu tingkat kehabisan stack); daunnya `@jrg_tampil_daun`.
     pub(crate) fn pancarkan_tampil_kotak(&mut self) -> Result<(), String> {
         self.mulai_fungsi_kosong(JrgType::Str);
-        let nol = Span { lo: crate::lexer::BytePos(0), hi: crate::lexer::BytePos(0), file_id: 0 };
-        let v = self.load_place("%k", &JrgType::Any);
-        let tag = self.tag_any(&v);
-        let d = self.fresh("tkd.");
-        self.emit(format!("{} = icmp eq i32 {}, {}", d, tag.text, TAG_DICT));
-        let (l_dict, l_arr) = (self.fresh_label("tk.dict."), self.fresh_label("tk.arr."));
-        self.terminate(format!("br i1 {}, label %{}, label %{}", d, l_dict, l_arr));
-        let pola = "mencetak array/dict berisi tipe ini (`\u{1}`) dari tempat campur tipe belum didukung backend --emit-llvm";
-        for (label, tujuan) in [
-            (l_arr, JrgType::Slice(Box::new(JrgType::Any))),
-            (l_dict, JrgType::Dict(Box::new(JrgType::Any))),
-        ] {
-            self.start_block(label);
-            let kata = self.kata_kotak(&tujuan).expect("array/dict bertag selalu punya kata-tag");
-            let isi = self.buka_agregat(&v, &tujuan, kata, Some(pola));
-            let teks = match &tujuan {
-                JrgType::Dict(_) => self.tampilan_dict(&isi, &JrgType::Any)?,
-                _ => self.build_display_str(&isi)?,
-            };
-            self.emit_return(&teks, &JrgType::Str);
-        }
-        let _ = nol;
+        self.ensure_extern("declare void @jrg_tampil_lukis(ptr, ptr, ptr, i64, ptr, ptr)", "jrg_tampil_lukis");
+        let pola = self.intern_string("mencetak array/dict berisi tipe ini (`\u{1}`) dari tempat campur tipe belum didukung backend --emit-llvm");
+        let (pp, pl) = (self.fresh("tkpp."), self.fresh("tkpl."));
+        self.emit(format!("{} = extractvalue %JrgStr {}, 0", pp, pola.text));
+        self.emit(format!("{} = extractvalue %JrgStr {}, 1", pl, pola.text));
+        let (op, ol) = (self.alloca_raw("tkop.", "ptr", Some(8)), self.alloca_raw("tkol.", "i64", Some(8)));
+        self.emit(format!("call void @jrg_tampil_lukis(ptr %k, ptr @jrg_tampil_daun, ptr {}, i64 {}, ptr {}, ptr {})",
+                          pp, pl, op, ol));
+        let (sp, sl) = (self.fresh("tksp."), self.fresh("tksl."));
+        self.emit(format!("{} = load ptr, ptr {}", sp, op));
+        self.emit(format!("{} = load i64, ptr {}", sl, ol));
+        let (t0, t1) = (self.fresh("tks0."), self.fresh("tks1."));
+        self.emit(format!("{} = insertvalue %JrgStr undef, ptr {}, 0", t0, sp));
+        self.emit(format!("{} = insertvalue %JrgStr {}, i64 {}, 1", t1, t0, sl));
+        self.emit_return(&Val { text: t1, ty: JrgType::Str }, &JrgType::Str);
         let badan = self.take_function_body();
         self.tambah_definisi(format!(
             "define internal %JrgStr @jrg_tampil_kotak(ptr %k) nounwind {{\n{}}}\n", badan));
+        self.selesai_fungsi_kosong();
+        // Daun: nilai bukan array/dict, dicetak lewat jalur yang sama dengan kotak telanjang.
+        self.mulai_fungsi_kosong(JrgType::Unit);
+        let nol = Span { lo: crate::lexer::BytePos(0), hi: crate::lexer::BytePos(0), file_id: 0 };
+        let v = self.load_place("%k", &JrgType::Any);
+        // Galat di daun memakai situs pemanggil `jrg_tampil_kotak`, bukan situs nol.
+        let lama = std::mem::replace(&mut self.warisi_situs, true);
+        let teks = self.tampilan_any(&v, nol);
+        self.warisi_situs = lama;
+        let teks = teks?;
+        let (sp, sl) = (self.fresh("tdsp."), self.fresh("tdsl."));
+        self.emit(format!("{} = extractvalue %JrgStr {}, 0", sp, teks.text));
+        self.emit(format!("{} = extractvalue %JrgStr {}, 1", sl, teks.text));
+        self.emit(format!("store ptr {}, ptr %op", sp));
+        self.emit(format!("store i64 {}, ptr %ol", sl));
+        self.terminate("ret void".to_string());
+        let badan = self.take_function_body();
+        self.tambah_definisi(format!(
+            "define internal void @jrg_tampil_daun(ptr %k, ptr %op, ptr %ol) nounwind {{\n{}}}\n", badan));
+        self.selesai_fungsi_kosong();
+        Ok(())
+    }
+
+    /// Badan `@jrg_sama_daun(ptr, ptr) -> i8`: `==` dua kotak lewat jalur kotak biasa.
+    pub(crate) fn pancarkan_sama_daun(&mut self) -> Result<(), String> {
+        self.mulai_fungsi_kosong(JrgType::Bool);
+        let nol = Span { lo: crate::lexer::BytePos(0), hi: crate::lexer::BytePos(0), file_id: 0 };
+        let (a, b) = (self.load_place("%a", &JrgType::Any), self.load_place("%b", &JrgType::Any));
+        let slot = self.alloca_raw("sdslot.", "i8", Some(1));
+        self.emit(format!("store i8 1, ptr {}", slot));
+        let lama = std::mem::replace(&mut self.warisi_situs, true);
+        let r = self.kumpul_sama(&slot, &JrgType::Any, &a.text, &b.text, nol);
+        self.warisi_situs = lama;
+        r?;
+        let r = self.fresh("sdr.");
+        self.emit(format!("{} = load i8, ptr {}", r, slot));
+        self.terminate(format!("ret i8 {}", r));
+        let badan = self.take_function_body();
+        self.tambah_definisi(format!(
+            "define internal i8 @jrg_sama_daun(ptr %a, ptr %b) {{\n{}}}\n", badan));
         self.selesai_fungsi_kosong();
         Ok(())
     }
@@ -716,10 +855,31 @@ impl Codegen {
         self.terminate(format!("br i1 {}, label %{}, label %{}", ada_str, l_str, cek_flt));
         self.start_block(cek_flt);
         self.terminate(format!("br i1 {}, label %{}, label %{}", ada_flt, l_flt, cek_int));
-        self.start_block(cek_int);
-        self.terminate(format!("br i1 {}, label %{}, label %{}", dua_int, l_int, l_tolak));
-
         use crate::parser::BinaryOp;
+        // `a + b` atas dua array bertag menyambung isinya (`c = c + [2]` sesudah `c` bertag).
+        let l_arr = (*op == BinaryOp::Add).then(|| self.fresh_label("aany.arr."));
+        self.start_block(cek_int);
+        match &l_arr {
+            Some(la) => {
+                let cek_arr = self.fresh_label("aany.cekarr.");
+                self.terminate(format!("br i1 {}, label %{}, label %{}", dua_int, l_int, cek_arr));
+                self.start_block(cek_arr);
+                let (la_, ra_, dua) = (self.fresh("aanyla."), self.fresh("aanyra."), self.fresh("aanyda."));
+                self.emit(format!("{} = icmp eq i32 {}, {}", la_, lt.text, TAG_SLICE));
+                self.emit(format!("{} = icmp eq i32 {}, {}", ra_, rt.text, TAG_SLICE));
+                self.emit(format!("{} = and i1 {}, {}", dua, la_, ra_));
+                self.terminate(format!("br i1 {}, label %{}, label %{}", dua, la, l_tolak));
+                self.start_block(la.clone());
+                let isi = JrgType::Slice(Box::new(JrgType::Any));
+                let a = self.buka_any(&l, &isi, span)?;
+                let b = self.buka_any(&r, &isi, span)?;
+                let h = self.sambung_slice(&a, &b, &JrgType::Any, span)?;
+                let k = self.kotak_any(&h, span)?;
+                self.emit(format!("store %JrgAny {}, ptr {}", k.text, slot));
+                self.terminate(format!("br label %{}", gab));
+            }
+            None => self.terminate(format!("br i1 {}, label %{}, label %{}", dua_int, l_int, l_tolak)),
+        }
 
         // ── Cabang STRING ──
         self.start_block(l_str);
@@ -775,19 +935,37 @@ impl Codegen {
                 self.start_block(bn);
                 self.panik("`str * n` butuh n berupa bilangan bulat");
             }
-            _ => self.panik(
-                "operator ini tidak berarti apa-apa untuk string — yang ada \
-                 cuma `+` (gabung) dan `*` (ulang)"),
+            _ => self.panik_op_any(op, &l, &r, &lt),
         }
 
         // ── Cabang PECAHAN ──
         self.start_block(l_flt);
+        // Operator bit atas pecahan gagal saat jalan, berkalimat acuan menurut jenis tiap sisi.
+        if matches!(op, BinaryOp::BitAnd | BinaryOp::BitOr | BinaryOp::BitXor
+            | BinaryOp::Shl | BinaryOp::Shr | BinaryOp::AndNot) {
+            let sim = crate::interpreter::operator::simbol_biner(op);
+            let pesan = |a: &str, b: &str| crate::interpreter::pesan_op_bit(sim, a, b);
+            let (dua, kiri) = (self.fresh_label("aany.bitff."), self.fresh_label("aany.bitf."));
+            let (fi, ifl) = (self.fresh_label("aany.bitfi."), self.fresh_label("aany.bitif."));
+            let keduanya = self.fresh("aanybk.");
+            self.emit(format!("{} = and i1 {}, {}", keduanya, lf, rf));
+            self.terminate(format!("br i1 {}, label %{}, label %{}", keduanya, dua, kiri));
+            self.start_block(dua);
+            self.panik(&pesan("float", "float"));
+            self.start_block(kiri);
+            self.terminate(format!("br i1 {}, label %{}, label %{}", lf, fi, ifl));
+            self.start_block(fi);
+            self.panik(&pesan("float", "int"));
+            self.start_block(ifl);
+            self.panik(&pesan("int", "float"));
+        } else {
         let lb = self.ke_f64_sesuai_tag(&l, &lt, span)?;
         let rb = self.ke_f64_sesuai_tag(&r, &rt, span)?;
-        let hasil = self.arith_binop(op, &lb, &rb, span)?;
+        let hasil = if *op == BinaryOp::Pow { self.pow_binop(&lb, &rb, span)? } else { self.arith_binop(op, &lb, &rb, span)? };
         let kotak = self.kotak_any(&hasil, span)?;
         self.emit(format!("store %JrgAny {}, ptr {}", kotak.text, slot));
         self.terminate(format!("br label %{}", gab));
+        }
 
         // ── Cabang BULAT ──
         //
@@ -795,15 +973,26 @@ impl Codegen {
         self.start_block(l_int);
         let lb = self.buka_any(&l, &JrgType::I64, span)?;
         let rb = self.buka_any(&r, &JrgType::I64, span)?;
-        let hasil = self.arith_binop(op, &lb, &rb, span)?;
+        if *op == BinaryOp::Pow {
+            // Eksponen negatif menjawab pecahan, seperti acuan; selain itu pangkat bulat berperiksa.
+            let (neg, pos, c) = (self.fresh_label("aany.pown."), self.fresh_label("aany.powp."), self.fresh("aanypn."));
+            self.emit(format!("{} = icmp slt i64 {}, 0", c, rb.text));
+            self.terminate(format!("br i1 {}, label %{}, label %{}", c, neg, pos));
+            self.start_block(neg);
+            let (fl, fr) = (self.coerce_longgar(&lb, &JrgType::F64), self.coerce_longgar(&rb, &JrgType::F64));
+            let h = self.pow_binop(&fl, &fr, span)?;
+            let k = self.kotak_any(&h, span)?;
+            self.emit(format!("store %JrgAny {}, ptr {}", k.text, slot));
+            self.terminate(format!("br label %{}", gab));
+            self.start_block(pos);
+        }
+        let hasil = if *op == BinaryOp::Pow { self.pow_binop(&lb, &rb, span)? } else { self.arith_binop(op, &lb, &rb, span)? };
         let kotak = self.kotak_any(&hasil, span)?;
         self.emit(format!("store %JrgAny {}, ptr {}", kotak.text, slot));
         self.terminate(format!("br label %{}", gab));
 
         self.start_block(l_tolak);
-        self.panik(
-            "operator aritmetika di sini dipakai pada nilai yang golongannya \
-             tidak punya arti aritmetika (nil, unit, array, atau dict)");
+        self.panik_op_any(op, &l, &r, &lt);
 
         self.start_block(gab);
         Ok(self.load_place(&slot, &JrgType::Any))
@@ -813,6 +1002,37 @@ impl Codegen {
 }
 
 impl Codegen {
+    /// Gagal dengan kalimat acuan `pesan_op_biner`, kedua tipenya dibaca dari tag saat jalan.
+    fn panik_op_any(&mut self, op: &crate::parser::BinaryOp, l: &Val, r: &Val, lt: &Val) {
+        use super::codegen_konversi::{Cetak, PENANDA};
+        let sim = crate::interpreter::operator::simbol_biner(op);
+        let Ok(tl) = self.typeof_any(l) else { return self.panik(&crate::interpreter::pesan_op_biner(sim, "nilai", "nilai")) };
+        let Ok(tr) = self.typeof_any(r) else { return self.panik(&crate::interpreter::pesan_op_biner(sim, "nilai", "nilai")) };
+        // `"%d" % 5`: acuan punya kalimat sendiri untuk teks di kiri `%`.
+        if sim == "%" {
+            let (ya, tidak, c) = (self.fresh_label("popa.str."), self.fresh_label("popa.lain."), self.fresh("popa."));
+            self.emit(format!("{} = icmp eq i32 {}, {}", c, lt.text, TAG_STR));
+            self.terminate(format!("br i1 {}, label %{}, label %{}", c, ya, tidak));
+            self.start_block(ya);
+            self.panik_sisip(&crate::interpreter::pesan_op_biner("%", "string", PENANDA), &Cetak::Teks(tr.clone()));
+            self.start_block(tidak);
+        }
+        let pola = crate::interpreter::pesan_op_biner(sim, "\u{E001}", "\u{E002}");
+        let (pre, sisa) = pola.split_once('\u{E001}').unwrap_or((&pola, ""));
+        let (mid, suf) = sisa.split_once('\u{E002}').unwrap_or((sisa, ""));
+        let rakit = |cg: &mut Self| -> Result<Val, String> {
+            let (a, b, c) = (cg.intern_string(pre), cg.intern_string(mid), cg.intern_string(suf));
+            let x = cg.str_concat(&a, &tl)?;
+            let x = cg.str_concat(&x, &b)?;
+            let x = cg.str_concat(&x, &tr)?;
+            cg.str_concat(&x, &c)
+        };
+        match rakit(self) {
+            Ok(pesan) => self.panik_sisip(PENANDA, &Cetak::Teks(pesan)),
+            Err(_) => self.panik(&crate::interpreter::pesan_op_biner(sim, "nilai", "nilai")),
+        }
+    }
+
     /// `<` `<=` `>` `>=` ketika salah satu sisinya sebuah kotak.
     pub fn urut_any(
         &mut self, op: &crate::parser::BinaryOp, lv: &Val, rv: &Val, span: Span,
@@ -886,10 +1106,22 @@ impl Codegen {
         self.emit(format!("store i8 {}, ptr {}", h.text, slot));
         self.terminate(format!("br label %{}", gab));
 
+        // Sisanya (array bertag leksikografis, bool, rune; yang tak sebanding gagal dengan kalimat acuan).
         self.start_block(b_tolak);
-        self.panik(
-            "nilai-nilai ini tidak sebanding, jadi tidak bisa diurutkan — \
-             yang punya urutan cuma angka dengan angka, dan string dengan string");
+        let pv = self.intern_string(&crate::interpreter::pesan_banding("\u{1}", "\u{2}"));
+        let (pp, pl) = self.split_str(&pv);
+        self.ensure_extern("declare i32 @jrg_banding_any(ptr, ptr, ptr, i64, i32)", "jrg_banding_any");
+        let (ta, tb) = (self.alloca_typed("uanya.", &JrgType::Any), self.alloca_typed("uanyb.", &JrgType::Any));
+        self.emit(format!("store %JrgAny {}, ptr {}", l.text, ta));
+        self.emit(format!("store %JrgAny {}, ptr {}", r.text, tb));
+        let (h, c) = (self.fresh("uanyh."), self.fresh("uanyc."));
+        self.emit(format!("{} = call i32 @jrg_banding_any(ptr {}, ptr {}, ptr {}, i64 {}, i32 1)", h, ta, tb, pp, pl));
+        let pred = match op { crate::parser::BinaryOp::Lt => "slt", crate::parser::BinaryOp::Le => "sle",
+                              crate::parser::BinaryOp::Gt => "sgt", _ => "sge" };
+        self.emit(format!("{} = icmp {} i32 {}, 0", c, pred, h));
+        let c8 = self.from_i1(&c);
+        self.emit(format!("store i8 {}, ptr {}", c8.text, slot));
+        self.terminate(format!("br label %{}", gab));
 
         self.start_block(gab);
         Ok(self.load_place(&slot, &JrgType::Bool))

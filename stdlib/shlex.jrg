@@ -1,0 +1,98 @@
+package std_shlex
+
+// Memecah dan mengutip baris perintah menurut aturan shell POSIX. `quote` membuat teks apa pun jadi SATU
+// argumen yang dibaca shell apa adanya; itu tidak mencegah argumen berawalan `-` dibaca sebagai opsi oleh
+// programnya — taruh `--` sebelum nama berkas dari luar.
+
+fn _aman(r) {
+    return ((r as int) < 128 && str::is_alphanumeric(r)) || str::contains("@%+=:,./-_", str(r))
+}
+
+/// Pecah `s` jadi argumen: spasi memisah, `'..'` apa adanya, `".."` dengan `\` untuk `$` `` ` `` `"` `\`,
+/// `\` di luar kutip meloloskan satu karakter. `Err` kalau kutipnya tidak ditutup.
+pub fn split(s) {
+    let cs = str::chars(s)
+    var hasil = []
+    var kini = ""
+    var ada = false
+    var i = 0
+    while i < len(cs) {
+        let c = str(cs[i])
+        if c == "\u0000" { return Err(«karakter NUL di posisi ${i} — tidak bisa jadi argumen program») }
+        if c == " " || c == "\t" || c == "\n" {
+            if ada {
+                hasil = arr::push(hasil, kini)
+                kini = ""
+                ada = false
+            }
+            i += 1
+        } else if c == "'" {
+            ada = true
+            var k = i + 1
+            while k < len(cs) && str(cs[k]) != "'" {
+                if str(cs[k]) == "\u0000" { return Err(«karakter NUL di posisi ${k} — tidak bisa jadi argumen program») }
+                kini = kini + str(cs[k])
+                k += 1
+            }
+            if k >= len(cs) { return Err(«kutip tunggal di posisi ${i} tidak ditutup») }
+            i = k + 1
+        } else if c == "\"" {
+            ada = true
+            var k = i + 1
+            var tutup = false
+            while k < len(cs) {
+                let d = str(cs[k])
+                if d == "\u0000" { return Err(«karakter NUL di posisi ${k} — tidak bisa jadi argumen program») }
+                if d == "\"" {
+                    tutup = true
+                    break
+                }
+                if d == "\\" && k + 1 < len(cs) {
+                    let e = str(cs[k + 1])
+                    if e == "$" || e == "`" || e == "\"" || e == "\\" {
+                        kini = kini + e
+                        k += 2
+                        continue
+                    }
+                    if e == "\n" {
+                        k += 2
+                        continue
+                    }
+                }
+                kini = kini + d
+                k += 1
+            }
+            if !tutup { return Err(«kutip ganda di posisi ${i} tidak ditutup») }
+            i = k + 1
+        } else if c == "\\" {
+            if i + 1 >= len(cs) { return Err("`\\` di ujung tanpa karakter yang diloloskan") }
+            let e = str(cs[i + 1])
+            if e != "\n" {
+                kini = kini + e
+                ada = true
+            }
+            i += 2
+        } else {
+            kini = kini + c
+            ada = true
+            i += 1
+        }
+    }
+    if ada { hasil = arr::push(hasil, kini) }
+    return Ok(hasil)
+}
+
+/// Kutip `s` jadi satu argumen shell; teks yang aman dibiarkan, `""` jadi `''`.
+pub fn quote(s) {
+    if str::contains(s, "\u0000") { panik("shlex::quote: teks memuat NUL — tidak bisa jadi argumen program") }
+    if s == "" { return "''" }
+    var aman = true
+    for _, r in str::chars(s) {
+        if !_aman(r) { aman = false }
+    }
+    if aman { return s }
+    return "'" + str::replace(s, "'", "'\"'\"'") + "'"
+}
+
+/// Gabung argumen jadi satu baris perintah; `split(join(a)) == Ok(a)`.
+pub fn join(args) { return str::join(arr::map(args, |a| quote(a)), " ") }

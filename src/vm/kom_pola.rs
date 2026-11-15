@@ -292,7 +292,7 @@ impl Compiler {
                         let hi = self.chunk.add_constant(VmValue::Int(-(after.len() as i128)));
                         self.chunk.emit_arg(OpCode::Const, hi);
                     }
-                    self.chunk.emit(OpCode::Slice);
+                    self.chunk.emit_arg(OpCode::Slice, if after.is_empty() { 1 } else { 3 });
                     self.define_local(nama);
                     bindings.push(nama.clone());
                 }
@@ -474,7 +474,7 @@ impl Compiler {
                     let hi = self.chunk.add_constant(VmValue::Int(-*belakang));
                     self.chunk.emit_arg(OpCode::Const, hi);
                 }
-                self.chunk.emit(OpCode::Slice);
+                self.chunk.emit_arg(OpCode::Slice, if *belakang == 0 { 1 } else { 3 });
             }
         }
     }
@@ -756,11 +756,6 @@ impl Compiler {
                 }
                 Ok(())
             }
-            // Ditolak terang-terangan (lihat catatan di `bind_pattern`).
-            Pattern::Array { .. } => Err(CompileError::new(
-                "pola array (`[a, b]`, `[kepala, ...ekor]`) belum didukung backend --vm — \
-                 jalankan tanpa --vm (interpreter) untuk memakainya",
-            )),
         }
     }
 

@@ -132,7 +132,7 @@ impl Interpreter {
         self.sarang_hook -= 1;
         let hasil = hasil?;
         match hasil {
-            Value::Str(s) => Ok(Some(s)),
+            Value::Str(s) => Ok(Some(String::clone(&s))),
             lain => Err(Signal::RuntimeError(crate::interpreter::RuntimeError::new(
                 format!(
                     "`{}::{}` dipakai sebagai hook tampilan, jadi ia harus \

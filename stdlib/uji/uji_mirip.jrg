@@ -1,0 +1,31 @@
+package main
+import "std/mirip"
+
+fn test_jarak() {
+    assert_eq(mirip::jarak("kitten", "sitting").unwrap(), 3)
+    assert_eq(mirip::jarak("", "abc").unwrap(), 3)
+    assert_eq(mirip::jarak("sama", "sama").unwrap(), 0)
+    assert_eq(mirip::jarak("é", "e").unwrap(), 1)
+    assert_eq(mirip::jarak("日本語", "日本").unwrap(), 1)
+}
+
+fn test_rasio() {
+    assert_eq(mirip::rasio("", "").unwrap(), 1.0)
+    assert_eq(mirip::rasio("abcd", "abcf").unwrap(), 0.75)
+}
+
+fn test_saran() {
+    let nama = ["println", "print", "parse_int", "panik", "push"]
+    assert_eq(mirip::saran("prnt", nama, 2).unwrap(), ["print"])
+    assert_eq(mirip::saran("prnt", nama, 3).unwrap(), ["print", "println", "panik", "push"])
+    assert_eq(mirip::terdekat("prinln", nama).unwrap(), Some("println"))
+    assert_eq(mirip::terdekat("pirnt", nama).unwrap(), None)
+    assert_eq(mirip::terdekat("zzzzz", nama).unwrap(), None)
+}
+
+fn test_masukan_raksasa_ditolak() {
+    assert_eq(mirip::jarak(str::repeat("a", 2001), "a").unwrap_err(), "mirip: teks pertama 2001 karakter, di atas batas 2000")
+    let t0 = time::now_ms()
+    assert_eq(mirip::saran(str::repeat("a", 2000), [str::repeat("b", 2000)], 3).unwrap(), [])
+    assert(time::now_ms() - t0 < 20000)
+}

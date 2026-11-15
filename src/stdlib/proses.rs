@@ -73,7 +73,7 @@ fn b_jalankan(a: &[Value]) -> Result<Value, String> {
             if !o.stderr.is_empty() {
                 s.push_str(&String::from_utf8_lossy(&o.stderr));
             }
-            Ok(crate::interpreter::ok_value(Value::Str(s)))
+            Ok(crate::interpreter::ok_value(Value::Str(std::sync::Arc::new(s))))
         }
     }
 }
@@ -175,8 +175,8 @@ fn b_keluaran(a: &[Value]) -> Result<Value, String> {
     if let Some(t) = tulis { let _ = t.join(); }
     let (k, g) = (keluar.join().unwrap_or_default(), galat.join().unwrap_or_default());
     let mut f: HashMap<String, Value> = HashMap::new();
-    f.insert("keluaran".into(), Value::Str(String::from_utf8_lossy(&k).to_string()));
-    f.insert("galat".into(), Value::Str(String::from_utf8_lossy(&g).to_string()));
+    f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&k).to_string())));
+    f.insert("galat".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&g).to_string())));
     f.insert("kode".into(), Value::Int(status.and_then(|s| s.code()).unwrap_or(-1) as i128));
     f.insert("sukses".into(), Value::Bool(!habis && status.map_or(false, |s| s.success())));
     f.insert("habis_waktu".into(), Value::Bool(habis));
@@ -297,16 +297,16 @@ fn b_baca(a: &[Value]) -> Result<Value, String> {
         // Sisa kelompoknya (pekerjaan latar sebuah shell) masih memegang pipanya; tanpa ini `join` di bawah menunggu selamanya.
         if j.kelompok { matikan(&mut j.anak, true); }
         for u in j.pembaca.drain(..) { let _ = u.join(); }
-        f.insert("keluaran".into(), Value::Str(ambil(&j.keluar, true)));
-        f.insert("galat".into(), Value::Str(ambil(&j.galat, true)));
+        f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(ambil(&j.keluar, true))));
+        f.insert("galat".into(), Value::Str(std::sync::Arc::new(ambil(&j.galat, true))));
         f.insert("selesai".into(), Value::Bool(true));
         f.insert("kode".into(), Value::Int(s.code().unwrap_or(-1) as i128));
         f.insert("sukses".into(), Value::Bool(!j.habis && s.success()));
         f.insert("habis_waktu".into(), Value::Bool(j.habis));
     } else {
         let j = d.1.get(&id).expect("baru saja ada");
-        f.insert("keluaran".into(), Value::Str(ambil(&j.keluar, false)));
-        f.insert("galat".into(), Value::Str(ambil(&j.galat, false)));
+        f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(ambil(&j.keluar, false))));
+        f.insert("galat".into(), Value::Str(std::sync::Arc::new(ambil(&j.galat, false))));
         f.insert("selesai".into(), Value::Bool(false));
         f.insert("kode".into(), Value::Int(-1));
         f.insert("sukses".into(), Value::Bool(false));
@@ -377,11 +377,26 @@ fn b_status(a: &[Value]) -> Result<Value, String> {
 fn b_ada(a: &[Value]) -> Result<Value, String> {
     if a.len() != 1 { return Err("proses::ada(program) -> bool".to_string()); }
     let prog = teks(&a[0], "proses::ada", 0)?;
-    let cek = if cfg!(windows) { "where" } else { "which" };
-    Ok(Value::Bool(Command::new(cek).arg(&prog)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status().map(|s| s.success()).unwrap_or(false)))
+    Ok(Value::Bool(ada_di_path(&prog)))
+}
+
+/// Dicari sendiri: lewat `which` jawabannya bergantung pada `which` yang terpasang (tidak ada di
+/// sebagian image minimal; GNU which menerima `--version`, jadi nama itu dijawab `true`).
+#[cfg(unix)]
+fn ada_di_path(prog: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let boleh = |p: &std::path::Path| std::fs::metadata(p)
+        .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0);
+    if prog.is_empty() || prog.contains('\0') { return false; }
+    if prog.contains('/') { return boleh(std::path::Path::new(prog)); }
+    std::env::var_os("PATH").is_some_and(|ps| std::env::split_paths(&ps).any(|d| boleh(&d.join(prog))))
+}
+
+#[cfg(not(unix))]
+fn ada_di_path(prog: &str) -> bool {
+    !prog.is_empty() && !prog.starts_with(['-', '/']) && Command::new("where").arg(prog)
+        .stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null())
+        .status().is_ok_and(|s| s.success())
 }
 
 /// PID proses JRG yang sedang berjalan.

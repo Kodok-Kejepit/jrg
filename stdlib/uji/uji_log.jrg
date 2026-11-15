@@ -1,0 +1,41 @@
+package main
+import "std/log"
+
+fn p() { return log::tanpa_waktu(log::baru("api")) }
+
+fn test_teks() {
+    assert_eq(log::baris(p(), "info", "mulai", dict::new()).unwrap(), "INFO api mulai")
+    assert_eq(log::baris(p(), "warn", "lambat sekali", {"ms": 120, "jalur": "/a b"}).unwrap(),
+        "WARN api \"lambat sekali\" jalur=\"/a b\" ms=120")
+    assert_eq(log::baris(p(), "error", "", {"x": ""}).unwrap(), "ERROR api \"\" x=\"\"")
+    assert_eq(log::baris(p(), "info", "a=b", dict::new()).unwrap(), "INFO api \"a=b\"")
+}
+
+fn test_tidak_bisa_memalsukan_baris() {
+    let b = log::baris(p(), "info", "masuk\nERROR api palsu", {"user": "x\r\nINFO api admin=1"}).unwrap()
+    assert(!str::contains(b, "\n"))
+    assert(!str::contains(b, "\r"))
+    assert_eq(b, "INFO api \"masuk\\nERROR api palsu\" user=\"x\\r\\nINFO api admin=1\"")
+    let c = log::baris(p(), "info", "a\u202Eb\u0000c\"d\\e", dict::new()).unwrap()
+    assert_eq(c, "INFO api \"a\\u{202e}b\\u{0}c\\\"d\\\\e\"")
+    assert_eq(log::baris(p(), "info", "${jndi:ldap://x} %s %n", dict::new()).unwrap(), "INFO api \"${jndi:ldap://x} %s %n\"")
+}
+
+fn test_json() {
+    let j = log::dengan_format(p(), "json")
+    let b = log::baris(j, "info", "a\nb\u2028", {"n": 3, "ok": true}).unwrap()
+    assert_eq(b, "{\"n\":3,\"nama\":\"api\",\"ok\":true,\"pesan\":\"a\\nb\\u2028\",\"tingkat\":\"info\"}")
+    let d = json::parse(b)
+    assert_eq(d["pesan"], "a\nb\u2028")
+}
+
+fn test_tingkat_dan_waktu() {
+    assert(log::baris(p(), "debug", "x", dict::new()).is_none())
+    assert(log::baris(log::dengan_tingkat(p(), "debug"), "debug", "x", dict::new()).is_some())
+    assert(log::baris(log::dengan_tingkat(p(), "error"), "warn", "x", dict::new()).is_none())
+    let w = log::baris(log::baru("api"), "info", "x", dict::new()).unwrap()
+    assert(str::ends_with(w, "Z INFO api x"))
+    assert_eq(len(w), 24 + len(" INFO api x"))
+    assert_eq(w[10:11], "T")
+    assert_eq(w[19:20], ".")
+}

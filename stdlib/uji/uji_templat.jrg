@@ -1,0 +1,40 @@
+package main
+import "std/templat"
+
+fn data() { return {"nama": "Sari", "umur": 30, "kota": {"nama": "Solo"}, "hobi": ["baca", "lari"], "kosong": ""} }
+
+fn test_isi() {
+    assert_eq(templat::isi("Halo {{ nama }}, {{umur}} tahun", data()).unwrap(), "Halo Sari, 30 tahun")
+    assert_eq(templat::isi("{{ kota.nama | upper }} {{ hobi.1 }}", data()).unwrap(), "SOLO lari")
+    assert_eq(templat::isi("[{{ kosong }}]", data()).unwrap(), "[]")
+    assert_eq(templat::isi("{{ hobi | json }}", data()).unwrap(), "[\"baca\",\"lari\"]")
+    assert_eq(templat::isi("tanpa tag", data()).unwrap(), "tanpa tag")
+    assert_eq(templat::isi("\\{{ nama }} = {{ nama }}", data()).unwrap(), "{{ nama }} = Sari")
+    assert_eq(templat::isi("é {{ nama }} 日本 {{ umur }}", data()).unwrap(), "é Sari 日本 30")
+}
+
+fn test_yang_tidak_bisa_dibaca_ditolak() {
+    assert_eq(templat::isi("a\n{{ tak_ada }}", data()).unwrap_err(), "baris 2: `tak_ada` — kunci `tak_ada` tidak ada")
+    assert_eq(templat::isi("{{ nama", data()).unwrap_err(), "baris 1: `{{` tidak ditutup `}}`")
+    assert_eq(templat::isi("{{ nama | rahasia }}", data()).unwrap_err(), "baris 1: filter `rahasia` tidak dikenal — yang ada: json, upper, lower, trim")
+    assert_eq(templat::isi("{{ hobi }}", data()).unwrap_err(), "baris 1: `hobi` bertipe `array` — tulis `{{ hobi | json }}` kalau memang mau dicetak")
+    assert_eq(templat::isi("{{ hobi.9 }}", data()).unwrap_err(), "baris 1: `hobi.9` — indeks `9` di luar array berisi 2")
+    assert_eq(templat::isi("{{ hobi.x }}", data()).unwrap_err(), "baris 1: `hobi.x` — array dibaca dengan `x` — indeks array berupa angka")
+    assert_eq(templat::isi("{{ nama.x }}", data()).unwrap_err(), "baris 1: `nama.x` — `x` dibaca dari nilai bertipe `string`")
+}
+
+fn test_bukan_bahasa_pemrograman() {
+    for _, t in ["{{ 7*7 }}", "{{ nama() }}", "{{ __class__.__mro__ }}x", "{{ config.items() }}", "{{ a + b }}", "{{ ${x} }}", "{{ nama | upper | lower }}"] {
+        assert(templat::isi(t, data()).is_err())
+    }
+    assert_eq(templat::isi("{{ 7*7 }}", data()).unwrap_err(), "baris 1: `7*7` bukan jalur nilai — templat ini cuma menerima nama, titik dan indeks, bukan ekspresi")
+    assert_eq(templat::isi("x\n{{ a\nPALSU: y }}", data()).unwrap_err(), "baris 2: (10 karakter, memuat karakter kendali) bukan jalur nilai — templat ini cuma menerima nama, titik dan indeks, bukan ekspresi")
+}
+
+fn test_linear() {
+    var t = ""
+    for _, i in range(3000) { t = t + "a{{ nama }}" }
+    let t0 = time::now_ms()
+    assert_eq(len(templat::isi(t, data()).unwrap()), 3000 * 5)
+    assert(time::now_ms() - t0 < 20000)
+}

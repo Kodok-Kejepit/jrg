@@ -1,0 +1,42 @@
+package main
+import "std/izin"
+
+fn aturan() {
+    var z = izin::baru()
+    z = izin::izinkan(z, "pelanggan", ["produk.lihat", "pesanan.buat"])
+    z = izin::izinkan(z, "staf", ["produk.*", "pesanan.lihat"])
+    z = izin::izinkan(z, "admin", ["*"])
+    return z
+}
+
+fn test_menolak_secara_bawaan() {
+    let z = aturan()
+    assert(izin::boleh(z, ["pelanggan"], "produk.lihat"))
+    assert(!izin::boleh(z, ["pelanggan"], "produk.hapus"))
+    assert(!izin::boleh(z, [], "produk.lihat"))
+    assert(!izin::boleh(z, ["tamu"], "produk.lihat"))
+    assert(!izin::boleh(z, ["pelanggan"], "pesanan"))
+    assert(!izin::boleh(z, ["pelanggan"], "Produk.Lihat"))
+    assert(!izin::boleh(z, ["pelanggan"], ""))
+    assert(!izin::boleh(z, ["pelanggan"], "produk.*"))
+    assert(!izin::boleh(z, "pelanggan", "produk.lihat"))
+    assert(!izin::boleh(izin::baru(), ["admin"], "apa.pun"))
+}
+
+fn test_wildcard_tidak_menyeberang() {
+    let z = aturan()
+    assert(izin::boleh(z, ["staf"], "produk.hapus"))
+    assert(izin::boleh(z, ["staf"], "produk.harga.ubah"))
+    assert(!izin::boleh(z, ["staf"], "produkx.hapus"))
+    assert(!izin::boleh(z, ["staf"], "produk"))
+    assert(!izin::boleh(z, ["staf"], "pesanan.hapus"))
+    assert(izin::boleh(z, ["pelanggan", "staf"], "pesanan.lihat"))
+    assert(izin::boleh(z, ["admin"], "apa.saja"))
+}
+
+fn test_wajib() {
+    let z = aturan()
+    assert(izin::wajib(z, ["staf"], "produk.ubah").is_ok())
+    assert_eq(izin::wajib(z, ["pelanggan"], "produk.hapus").unwrap_err(), "ditolak: tidak ada peran yang diberi hak `produk.hapus`")
+    assert_eq(izin::wajib(z, ["pelanggan"], "a\nPALSU").unwrap_err(), "ditolak: tidak ada peran yang diberi hak `(aksi tidak sah)`")
+}

@@ -29,7 +29,12 @@ impl Interpreter {
         // `fn` bernama di dalam blok di-hoist duluan, persis seperti `fn` top-level.
         self.hoist_block_fns(block, env);
         let result = (|| -> EvalResult {
-            for stmt in &block.stmts { self.exec_stmt(stmt, env)?; }
+            for (i, stmt) in block.stmts.iter().enumerate() {
+                match (stmt, crate::interpreter::capture::pindah_sebelum_ditimpa(stmt, block.stmts.get(i + 1))) {
+                    (Stmt::Let(l), Some(a)) => { self.exec_let_pindah(l, &a, env)?; }
+                    _ => { self.exec_stmt(stmt, env)?; }
+                }
+            }
             if let Some(tail) = &block.tail { self.eval_expr(tail, env) }
             else { Ok(Value::Unit) }
         })();
@@ -153,10 +158,9 @@ impl Interpreter {
         // ── Batas kedalaman rekursi ───────────────────────────────────────
         // Interpreter ini tree-walking: satu level rekursi JRG memakai beberapa …
         self.call_depth += 1;
-        if self.call_depth > Self::MAX_CALL_DEPTH {
+        if self.rekursi_terlalu_dalam() {
             self.call_depth -= 1;
-            return runtime_err!("{}", crate::interpreter::pesan_rekursi_dalam(
-                &func.name, Self::MAX_CALL_DEPTH));
+            return runtime_err!("{}", crate::interpreter::pesan_rekursi_dalam(&func.name));
         }
 
         let ruang_lama = std::mem::replace(&mut self.ruang_kini, func.ruang.clone());
@@ -264,10 +268,9 @@ impl Interpreter {
         // Closure ikut dihitung: rekursi tak berujung lewat closure dulu meluapkan stack
         // interpreter (proses mati), sementara `--vm` menolaknya dengan kalimat ini.
         self.call_depth += 1;
-        if self.call_depth > Self::MAX_CALL_DEPTH {
+        if self.rekursi_terlalu_dalam() {
             self.call_depth -= 1;
-            return runtime_err!("{}", crate::interpreter::pesan_rekursi_dalam(
-                "<closure>", Self::MAX_CALL_DEPTH));
+            return runtime_err!("{}", crate::interpreter::pesan_rekursi_dalam("<closure>"));
         }
         // Closure juga diprofilkan, dengan nama yang SAMA dengan yang dipakai VM
         // (`<closure>`).

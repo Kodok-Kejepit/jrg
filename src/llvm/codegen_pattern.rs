@@ -17,11 +17,18 @@ impl Codegen {
     }
 
     pub fn codegen_match_expr(&mut self, scrutinee: &Expr, arms: &[MatchArm], expected: Option<&JrgType>, span: Span) -> Result<Val, String> {
-        // `match` sebagai NILAI yang tipe lengannya tidak terbaca sekilas (`Some(v) => [v]`):
-        // diturunkan dulu di salinan untuk membaca tipe lengannya. Dulu nilainya dibuang dan
-        // hasilnya `()` tanpa pesan.
-        if expected.is_none() && self.tipe_hasil_arm(arms).is_none() {
+        // `match` sebagai NILAI yang tipe lengannya tak terbaca sekilas (`Some(v) => [v]`) atau
+        // terbaca BERBEDA (`0 => 1, _ => "a"`): diturunkan dulu di salinan untuk membaca tipe
+        // semua lengannya. Dulu yang pertama menjawab `()` tanpa pesan, yang kedua ditolak.
+        let sekilas: Vec<Option<JrgType>> = arms.iter().map(|a| self.tipe_arm(a, None)).collect();
+        let tahu: Vec<&JrgType> = sekilas.iter().flatten()
+            .filter(|t| !matches!(t, JrgType::Unit | JrgType::Never)).collect();
+        let berbeda = sekilas.iter().any(|t| t.is_none())
+            || tahu.iter().any(|t| super::codegen_any::satukan_jenis(tahu[0], t) != *tahu[0]);
+        if expected.is_none() && (berbeda || self.tipe_hasil_arm(arms).is_none()) {
+            let jadi = std::mem::take(&mut self.fn_defs);
             let mut salinan = self.clone();
+            self.fn_defs = jadi;
             salinan.rekam_lengan = Some(salinan.kedalaman_match + 1);
             salinan.lengan_terlihat = None;
             let _ = salinan.codegen_match_core(scrutinee, arms, None, span);
@@ -44,23 +51,25 @@ impl Codegen {
         &self, arms: &[MatchArm], skrutini: Option<&JrgType>,
     ) -> Option<JrgType> {
         for arm in arms {
-            let t = match &arm.body {
-                MatchBody::Expr(e) => self.peek_expr_type(e)
-                    .or_else(|| super::codegen_expr::tipe_bawaan_ekspresi(e))
-                    .or_else(|| self.tipe_nama_terikat(arm, e, skrutini)),
-                MatchBody::Block(b) => b.tail.as_ref().and_then(|e| {
-                    self.peek_expr_type(e)
-                        .or_else(|| super::codegen_expr::tipe_bawaan_ekspresi(e))
-                        .or_else(|| self.tipe_nama_terikat(arm, e, skrutini))
-                }),
-            };
-            if let Some(t) = t {
+            if let Some(t) = self.tipe_arm(arm, skrutini) {
                 if t != JrgType::Unit && t != JrgType::Never {
                     return Some(t);
                 }
             }
         }
         None
+    }
+
+    /// Tipe hasil satu lengan yang terbaca sekilas.
+    fn tipe_arm(&self, arm: &MatchArm, skrutini: Option<&JrgType>) -> Option<JrgType> {
+        let ekor = match &arm.body {
+            MatchBody::Expr(e) => e,
+            MatchBody::Block(b) => b.tail.as_ref()?,
+        };
+        if matches!(&**ekor, Expr::Literal(LitKind::Nil, _)) { return Some(JrgType::Nil); }
+        self.peek_expr_type(ekor)
+            .or_else(|| super::codegen_expr::tipe_bawaan_ekspresi(ekor))
+            .or_else(|| self.tipe_nama_terikat(arm, ekor, skrutini))
     }
 
     /// Tipe sebuah nama yang diikat pola arm ini, kalau badan arm-nya memang
@@ -94,6 +103,7 @@ impl Codegen {
     /// Nama yang diikat `pola` beserta tipenya, kalau nilai yang dicocokkan
     /// bertipe `ty`.
     fn tipe_pengikat(&self, pola: &Pattern, ty: &JrgType, keluar: &mut Vec<(String, JrgType)>) {
+        if let JrgType::Kotak(t) = ty { return self.tipe_pengikat(pola, t, keluar); }
         match pola {
             // Nama varian unit (`None`, `E::A` telanjang) MENGUJI, tidak mengikat — dulu `None => None`
             // terbaca bertipe skrutini, jadi `Some(v) => Some(str(v))` dipaksa ke tipe lamanya.
@@ -166,8 +176,10 @@ impl Codegen {
         let sty = sv.ty.clone();
 
         // Tanpa tipe harapan, tipe hasilnya DISIMPULKAN dari arm-nya.
+        let rekam = self.rekam_lengan == Some(self.kedalaman_match);
         let result_ty = match expected.cloned() {
             Some(t) => t,
+            None if rekam => JrgType::Unit,
             None => self.tipe_hasil_arm_dgn(arms, Some(&sty)).unwrap_or(JrgType::Unit),
         };
         let need_result = result_ty != JrgType::Unit;
@@ -183,22 +195,28 @@ impl Codegen {
         for (i, arm) in arms.iter().enumerate() {
             let next_lbl = self.fresh_label("match.next.");
             self.push_scope();
-            self.try_arm(arm, &splace, &sty, &next_lbl)?;
-            let bv = match &arm.body {
-                MatchBody::Expr(e) => self.codegen_expr(e, if need_result { Some(&result_ty) } else { None })?,
-                MatchBody::Block(b) => self.codegen_block_expr(b, if need_result { Some(&result_ty) } else { None })?,
-            };
-            if !need_result && self.rekam_lengan == Some(self.kedalaman_match) && self.lengan_terlihat.is_none()
-                && !matches!(bv.ty, JrgType::Unit | JrgType::Never)
-            {
-                self.lengan_terlihat = Some(bv.ty.clone());
-            }
-            if !self.is_terminated() {
-                if need_result {
-                    let bv2 = self.coerce(&bv, &result_ty);
-                    self.emit(format!("store {} {}, ptr {}", result_ty.llvm_ty(), bv2.text, result_slot.clone().unwrap()));
+            // Lengan yang PASTI tidak cocok (`Some(n)` atas dict) tidak diturunkan: pengikatnya tidak pernah ada.
+            if !arm.patterns.is_empty() && arm.patterns.iter().all(|p| Self::pola_varian_mustahil(p, &sty)) {
+                self.terminate(format!("br label %{}", next_lbl));
+            } else {
+                self.try_arm(arm, &splace, &sty, &next_lbl)?;
+                let bv = match &arm.body {
+                    MatchBody::Expr(e) => self.codegen_expr(e, if need_result { Some(&result_ty) } else { None })?,
+                    MatchBody::Block(b) => self.codegen_block_expr(b, if need_result { Some(&result_ty) } else { None })?,
+                };
+                if !need_result && rekam && !self.is_terminated() && !matches!(bv.ty, JrgType::Unit | JrgType::Never) {
+                    self.lengan_terlihat = Some(match &self.lengan_terlihat {
+                        Some(lama) => super::codegen_any::satukan_jenis(lama, &bv.ty),
+                        None => bv.ty.clone(),
+                    });
                 }
-                self.terminate(format!("br label %{}", merge_lbl));
+                if !self.is_terminated() {
+                    if need_result {
+                        let bv2 = self.coerce(&bv, &result_ty);
+                        self.emit(format!("store {} {}, ptr {}", result_ty.llvm_ty(), bv2.text, result_slot.clone().unwrap()));
+                    }
+                    self.terminate(format!("br label %{}", merge_lbl));
+                }
             }
             self.pop_scope();
             self.start_block(next_lbl);
@@ -207,9 +225,22 @@ impl Codegen {
                     "declare void @jrg_panic(ptr, i64) cold nounwind noreturn",
                     "jrg_panic",
                 );
-                let msg = self.intern_string("match: tidak ada pattern yang cocok (non-exhaustive)");
-                let (mp, ml) = self.split_str(&msg);
-                self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+                // Kalimat acuan yang menyebut nilainya (dipotong runtime seperti acuan).
+                let nol = Span { lo: crate::lexer::BytePos(0), hi: crate::lexer::BytePos(0), file_id: 0 };
+                let sv = self.load_place(&splace, &sty);
+                match self.do_cast(&sv, &JrgType::Str, nol) {
+                    Ok(teks) if teks.ty == JrgType::Str => {
+                        let t = self.intern_string(&crate::interpreter::pesan_match_tak_cocok("\u{1}"));
+                        let ((tp, tl), (vp, vl)) = (self.split_str(&t), self.split_str(&teks));
+                        self.ensure_extern("declare void @jrg_panic_match(ptr, i64, ptr, i64) cold nounwind noreturn", "jrg_panic_match");
+                        self.emit(format!("call void @jrg_panic_match(ptr {}, i64 {}, ptr {}, i64 {})", tp, tl, vp, vl));
+                    }
+                    _ => {
+                        let msg = self.intern_string("match: tidak ada pattern yang cocok (non-exhaustive)");
+                        let (mp, ml) = self.split_str(&msg);
+                        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+                    }
+                }
                 self.terminate("unreachable".to_string());
             }
         }
@@ -335,6 +366,9 @@ impl Codegen {
     fn try_arm(&mut self, arm: &MatchArm, splace: &str, sty: &JrgType, on_fail: &str) -> Result<(), String> {
         if arm.patterns.len() == 1 {
             self.test_pattern(&arm.patterns[0], splace, sty, on_fail)?;
+        } else if arm.patterns.iter().any(|p| self.mengikat(p, sty)) {
+            let or = Pattern::Or { pats: arm.patterns.clone(), span: arm.span };
+            self.test_pattern(&or, splace, sty, on_fail)?;
         } else {
             let mut acc: Option<String> = None;
             for p in &arm.patterns {
@@ -356,6 +390,13 @@ impl Codegen {
         Ok(())
     }
 
+    /// Apakah pola ini mengikat sedikitnya satu nama?
+    fn mengikat(&self, p: &Pattern, ty: &JrgType) -> bool {
+        let mut nama = Vec::new();
+        self.tipe_pengikat(p, ty, &mut nama);
+        !nama.is_empty()
+    }
+
     fn branch_or_fail(&mut self, cond_i1: String, on_fail: &str) {
         let cont = self.fresh_label("test.ok.");
         self.terminate(format!("br i1 {}, label %{}, label %{}", cond_i1, cont, on_fail));
@@ -365,10 +406,14 @@ impl Codegen {
     // ── binding-free condition (used for `pat1 | pat2 | ...`) ────────────
 
     fn pattern_condition_only(&mut self, pat: &Pattern, place: &str, ty: &JrgType) -> Result<String, String> {
+        if let JrgType::Kotak(t) = ty {
+            let p = self.isi_kotak(place);
+            return self.pattern_condition_only(pat, &p, t);
+        }
         match pat {
             Pattern::Wildcard(_) => Ok("true".to_string()),
             Pattern::Ident { name, .. } if name == "_" => Ok("true".to_string()),
-            Pattern::Literal { lit, .. } => self.literal_pattern_cond(lit, place, ty),
+            Pattern::Literal { lit, span } => self.literal_pattern_cond(lit, place, ty, *span),
             Pattern::Range { lo, hi, inclusive, .. } => self.range_pattern_cond(lo, hi, *inclusive, place, ty),
             Pattern::Ref { inner, .. } => self.pattern_condition_only(inner, place, ty),
             Pattern::Or { pats, .. } => {
@@ -389,23 +434,35 @@ impl Codegen {
     // ── full test + bind ──────────────────────────────────────────────────
 
     pub(crate) fn test_pattern(&mut self, pat: &Pattern, place: &str, ty: &JrgType, on_fail: &str) -> Result<(), String> {
+        if let JrgType::Kotak(t) = ty {
+            let p = self.isi_kotak(place);
+            return self.test_pattern(pat, &p, t, on_fail);
+        }
         // Pola varian atas nilai BERTAG (`match hasil[1] { Pindah::Tetap => .. }`): tipe enumnya dari
         // pola itu sendiri; kotak berisi tipe lain berarti pola ini tidak cocok, bukan galat.
         if *ty == JrgType::Any {
-            if let Pattern::Enum { ty: pty, .. } = pat {
+            // Varian unit telanjang (`None`, `Kosong`) menguji varian pemiliknya — dulu selalu "tidak cocok".
+            if let Pattern::Ident { name, span, .. } = pat {
+                if let Some(pemilik) = self.pemilik_varian_unit(name)? {
+                    let te = TypeExpr::Named(NamedType { package: Some(pemilik.clone()), modul: None, name: name.clone(), args: Vec::new(), span: *span });
+                    let generik = self.keluarga_pola(&te, name);
+                    let et = match generik {
+                        Some((et, sym)) => { let t = self.buka_keluarga(&sym, &et, place, on_fail); return self.uji_varian_unit(name, &t, &et, on_fail); }
+                        None => JrgType::Enum(pemilik),
+                    };
+                    let t = self.buka_buram_pola(&et, place, on_fail);
+                    return self.uji_varian_unit(name, &t, &et, on_fail);
+                }
+            }
+            if let Pattern::Enum { ty: pty, variant, .. } = pat {
+                // Enum generik: isinya diubah ke `F<any, ..>` saat jalan; bukan anggota keluarga = tidak cocok.
+                if let Some((sasaran, sym)) = self.keluarga_pola(pty, variant) {
+                    let t = self.buka_keluarga(&sym, &sasaran, place, on_fail);
+                    return self.test_pattern(pat, &t, &sasaran, on_fail);
+                }
                 if let Some(et) = self.enum_dari_pola(pty) {
-                    let kata = self.kata_buram(&et);
-                    self.pakai_buram = true;
-                    let v = self.load_place(place, &JrgType::Any);
-                    let (w, p) = self.bagian_buram(&v);
-                    let cocok = self.fresh("pbe.");
-                    self.emit(format!("{} = icmp eq i32 {}, {}", cocok, w, kata));
-                    let lanjut = self.fresh_label("pbe.ok.");
-                    self.terminate(format!("br i1 {}, label %{}, label %{}", cocok, lanjut, on_fail));
-                    self.start_block(lanjut);
-                    let isi = self.load_place(&p, &et);
-                    let tempat = self.spill_to_place(&isi);
-                    return self.test_pattern(pat, &tempat, &et, on_fail);
+                    let t = self.buka_buram_pola(&et, place, on_fail);
+                    return self.test_pattern(pat, &t, &et, on_fail);
                 }
             }
         }
@@ -467,14 +524,48 @@ impl Codegen {
                 Ok(())
             }
             Pattern::Ref { inner, .. } => self.test_pattern(inner, place, ty, on_fail),
-            Pattern::Literal { lit, .. } => {
-                let cond = self.literal_pattern_cond(lit, place, ty)?;
+            Pattern::Literal { lit, span } => {
+                let cond = self.literal_pattern_cond(lit, place, ty, *span)?;
                 self.branch_or_fail(cond, on_fail);
                 Ok(())
             }
             Pattern::Range { lo, hi, inclusive, .. } => {
                 let cond = self.range_pattern_cond(lo, hi, *inclusive, place, ty)?;
                 self.branch_or_fail(cond, on_fail);
+                Ok(())
+            }
+            // Alternatif yang MENGIKAT (`(1, a) | (a, 5) => a`): tiap alternatif diuji dan ikatannya disalin
+            // ke satu tempat bersama per nama — dulu ditolak "tidak didukung di dalam alternasi".
+            Pattern::Or { pats, .. } if pats.iter().any(|p| self.mengikat(p, ty)) => {
+                let ok = self.fresh_label("or.ok.");
+                let mut bersama: Vec<(String, String, JrgType)> = Vec::new();
+                for (i, p) in pats.iter().enumerate() {
+                    let terakhir = i + 1 == pats.len();
+                    let lanjut = if terakhir { on_fail.to_string() } else { self.fresh_label("or.alt.") };
+                    self.test_pattern(p, place, ty, &lanjut)?;
+                    let mut nama = Vec::new();
+                    self.tipe_pengikat(p, ty, &mut nama);
+                    for (n, _) in nama {
+                        let Some((src, t)) = self.lookup_local(&n) else { continue };
+                        let tujuan = match bersama.iter().find(|(m, _, _)| *m == n) {
+                            Some((_, s, t0)) if *t0 == t => s.clone(),
+                            Some((_, _, t0)) => return Err(format!(
+                                "`{}` terikat bertipe `{}` di satu alternatif dan `{}` di alternatif lain — backend \
+                                 LLVM butuh satu tipe per nama", n, t0.display_name(), t.display_name())),
+                            None => {
+                                let s = self.alloca_typed("or.ikat.", &t);
+                                bersama.push((n.clone(), s.clone(), t.clone()));
+                                s
+                            }
+                        };
+                        let v = self.load_place(&src, &t);
+                        if t != JrgType::Unit { self.emit(format!("store {} {}, ptr {}", t.llvm_ty(), v.text, tujuan)); }
+                    }
+                    self.terminate(format!("br label %{}", ok));
+                    if !terakhir { self.start_block(lanjut); }
+                }
+                self.start_block(ok);
+                for (n, s, t) in bersama { self.define_local(&n, s, t); }
                 Ok(())
             }
             Pattern::Or { pats, .. } => {
@@ -607,6 +698,16 @@ impl Codegen {
         }
     }
 
+    /// Pola varian atas nilai yang tipenya pasti bukan enum (bukan bertag atau kotak) — acuannya tidak pernah cocok.
+    fn pola_varian_mustahil(pat: &Pattern, ty: &JrgType) -> bool {
+        match pat {
+            Pattern::Enum { .. } => !matches!(ty, JrgType::Enum(_) | JrgType::Any | JrgType::Kotak(_)),
+            Pattern::Binding { inner, .. } => Self::pola_varian_mustahil(inner, ty),
+            Pattern::Or { pats, .. } => !pats.is_empty() && pats.iter().all(|p| Self::pola_varian_mustahil(p, ty)),
+            _ => false,
+        }
+    }
+
     fn test_enum_tag(&mut self, place: &str, ty: &JrgType, variant: &EnumVariantLayout, on_fail: &str) {
         let tagp = self.fresh("etp.");
         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 0", tagp, ty.llvm_ty(), place));
@@ -655,69 +756,10 @@ impl Codegen {
         Ok(r)
     }
 
-    fn literal_pattern_cond(&mut self, lit: &LitKind, place: &str, ty: &JrgType) -> Result<String, String> {
-        if *ty == JrgType::Any {
-            let bulat = matches!(lit, LitKind::Int(_));
-            return self.kondisi_pola_any(lit, bulat, place, &|cg, p, t| cg.literal_pattern_cond(lit, p, t));
-        }
+    fn literal_pattern_cond(&mut self, lit: &LitKind, place: &str, ty: &JrgType, span: Span) -> Result<String, String> {
         let v = self.load_place(place, ty);
-        match lit {
-            LitKind::Int(n) => {
-                if ty.is_float() {
-                    let target = fmt_hexfloat(*n as f64);
-                    let r = self.fresh("plc.");
-                    self.emit(format!(
-                        "{} = fcmp{} oeq {} {}, {}",
-                        r,
-                        self.fast_math_flag(),
-                        ty.llvm_ty(),
-                        v.text,
-                        target
-                    ));
-                    Ok(r)
-                } else {
-                    let r = self.fresh("plc.");
-                    self.emit(format!("{} = icmp eq {} {}, {}", r, ty.llvm_ty(), v.text, n));
-                    Ok(r)
-                }
-            }
-            LitKind::Float(f) => {
-                let target = fmt_hexfloat(*f);
-                let r = self.fresh("plc.");
-                self.emit(format!(
-                    "{} = fcmp{} oeq {} {}, {}",
-                    r,
-                    self.fast_math_flag(),
-                    ty.llvm_ty(),
-                    v.text,
-                    target
-                ));
-                Ok(r)
-            }
-            LitKind::Bool(b) => {
-                let r = self.fresh("plc.");
-                self.emit(format!("{} = icmp eq i8 {}, {}", r, v.text, if *b { 1 } else { 0 }));
-                Ok(r)
-            }
-            LitKind::Str(s) | LitKind::RawStr(s) => {
-                self.ensure_extern("declare i32 @jrg_str_eq(ptr, i64, ptr, i64)", "jrg_str_eq");
-                let sv = self.intern_string(s);
-                let (ap, al) = self.split_str(&v);
-                let (bp, bl) = self.split_str(&sv);
-                let r0 = self.fresh("plc0.");
-                self.emit(format!("{} = call i32 @jrg_str_eq(ptr {}, i64 {}, ptr {}, i64 {})", r0, ap, al, bp, bl));
-                let r = self.fresh("plc.");
-                self.emit(format!("{} = icmp ne i32 {}, 0", r, r0));
-                Ok(r)
-            }
-            LitKind::Rune(c) => {
-                let r = self.fresh("plc.");
-                self.emit(format!("{} = icmp eq {} {}, {}", r, ty.llvm_ty(), v.text, *c as u32));
-                Ok(r)
-            }
-            LitKind::Imag(_) => Err("pola bilangan kompleks tidak didukung".into()),
-            LitKind::Nil => Err("pola `nil` tidak didukung".into()),
-        }
+        let sama = self.bandingkan_eq_literal(v, lit, span)?;
+        Ok(self.to_i1(&sama))
     }
 
     fn range_pattern_cond(&mut self, lo: &Option<Box<Pattern>>, hi: &Option<Box<Pattern>>, inclusive: bool, place: &str, ty: &JrgType) -> Result<String, String> {
@@ -835,6 +877,10 @@ impl Codegen {
             }
             if let Some(en) = self.tables.enums.get(&segments[0]).cloned() {
                 if en.variants.iter().any(|v| v.name == segments[1] && matches!(v.kind, EnumVariantKind::Unit)) {
+                    if self.param_enum(&segments[0]).is_some() {
+                        let inst = self.instans_ktor(&segments[0], &segments[1], &[], _expected)?;
+                        return self.build_enum_unit_variant(&inst, &segments[1]);
+                    }
                     return self.build_enum_unit_variant(&segments[0], &segments[1]);
                 }
             }
@@ -847,6 +893,9 @@ impl Codegen {
                 return self.nilai_metode(&segments[0], &decl, _expected, span);
             }
         }
+        if segments.len() == 2 {
+            if let Some(r) = self.nilai_bawaan(&jalur, _expected, span) { return r; }
+        }
         if segments.len() == 2 && crate::vm::ada_builtin(&jalur) {
             return Err(crate::llvm::galat::tandai(span, format!(
                 "`{}` dipakai sebagai NILAI (tanpa dipanggil), dan backend `--emit-llvm` belum \
@@ -857,12 +906,65 @@ impl Codegen {
         if let Some(p) = self.penjelasan_bukan_nilai(&jalur) {
             return Err(crate::llvm::galat::tandai(span, p));
         }
-        Err(format!("[{}:{}] path `{}` tidak dikenal", span.lo.0, span.hi.0, jalur))
+        let ekor = segments.last().map(|s| s.as_str()).unwrap_or("");
+        Err(crate::llvm::galat::tandai(span, crate::llvm::galat::pesan_path_acuan(&jalur, self.program_punya_nama(ekor))))
+    }
+
+    /// Nama telanjang yang dideklarasikan program (fungsi atau konstanta), untuk kalimat path acuan.
+    pub(crate) fn program_punya_nama(&self, nama: &str) -> bool {
+        self.tables.functions.contains_key(nama) || self.tables.consts.contains_key(nama)
     }
 }
 
 impl Codegen {
     /// Tipe enum yang disebut sebuah pola varian, kalau ia enum TIDAK generik milik program.
+    /// Isi kotak sebagai enum `et` persis (kata-tagnya harus milik `et`), di tempat baru.
+    fn buka_buram_pola(&mut self, et: &JrgType, place: &str, on_fail: &str) -> String {
+        let kata = self.kata_buram(et);
+        self.pakai_buram = true;
+        let v = self.load_place(place, &JrgType::Any);
+        let (w, p) = self.bagian_buram(&v);
+        let cocok = self.fresh("pbe.");
+        self.emit(format!("{} = icmp eq i32 {}, {}", cocok, w, kata));
+        self.branch_or_fail(cocok, on_fail);
+        let isi = self.load_place(&p, et);
+        self.spill_to_place(&isi)
+    }
+
+    /// Isi kotak diubah ke instans keluarga `sasaran` lewat `@sym`; bukan anggota keluarga = gagal.
+    fn buka_keluarga(&mut self, sym: &str, sasaran: &JrgType, place: &str, on_fail: &str) -> String {
+        let v = self.load_place(place, &JrgType::Any);
+        let out = self.alloca_typed("kel.", sasaran);
+        let ok = self.fresh("kel.");
+        self.emit(format!("{} = call i1 @{}(%JrgAny {}, ptr {})", ok, sym, v.text, out));
+        self.branch_or_fail(ok, on_fail);
+        out
+    }
+
+    fn uji_varian_unit(&mut self, name: &str, place: &str, et: &JrgType, on_fail: &str) -> Result<(), String> {
+        let JrgType::Enum(n) = et else { return Err("varian unit tanpa enum".into()) };
+        let v = self.types.enums.get(n).and_then(|l| l.variant(name).cloned())
+            .ok_or_else(|| format!("enum `{}` tidak punya variant `{}`", n, name))?;
+        self.test_enum_tag(place, et, &v, on_fail);
+        Ok(())
+    }
+
+    /// Enum pemilik varian unit `name` (`None` → `Option`); dua pemilik = galat, bukan tebakan.
+    fn pemilik_varian_unit(&self, name: &str) -> Result<Option<String>, String> {
+        if name == "_" { return Ok(None); }
+        if name == "None" { return Ok(Some("Option".to_string())); }
+        let mut pemilik: Vec<&String> = self.tables.enums.iter()
+            .filter(|(_, e)| e.variants.iter().any(|v| v.name == name && matches!(v.kind, EnumVariantKind::Unit)))
+            .map(|(n, _)| n).collect();
+        pemilik.sort();
+        match pemilik.as_slice() {
+            [] => Ok(None),
+            [satu] => Ok(Some((*satu).clone())),
+            banyak => Err(format!("pola `{}` atas nilai bertag: variannya dimiliki {} enum — tulis `Enum::{}`",
+                name, banyak.len(), name)),
+        }
+    }
+
     fn enum_dari_pola(&mut self, pty: &TypeExpr) -> Option<JrgType> {
         // Di pola, `package` memegang nama ENUM-nya dan `name` variannya (`Pindah::Tetap`).
         let TypeExpr::Named(nt) = pty else { return None };

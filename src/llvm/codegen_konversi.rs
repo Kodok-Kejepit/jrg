@@ -13,7 +13,7 @@ use super::types::JrgType;
 
 /// Tempat nilai di dalam kalimat acuan: karakter pakai-pribadi yang tidak pernah
 /// muncul di kalimat mana pun, jadi pemisahannya tidak bisa meleset.
-const PENANDA: &str = "\u{E000}";
+pub(crate) const PENANDA: &str = "\u{E000}";
 
 /// Sasaran sebuah konversi eksplisit.
 #[derive(Clone)]
@@ -59,7 +59,7 @@ impl Sasaran {
 
 /// Cara nilai aslinya ditulis di kalimat — sama dengan yang ditulis acuan.
 #[derive(Clone)]
-enum Cetak {
+pub(crate) enum Cetak {
     Bulat(Val),
     Pecahan(Val),
     /// Karakternya sendiri, bukan kodenya.
@@ -525,7 +525,7 @@ impl Codegen {
 
     /// Kalau `syarat` benar, jalur `gagal` — yang harus berakhir gagal — diambil;
     /// kalau tidak, pemancaran berlanjut di blok baru.
-    fn gagal_bila(&mut self, syarat: &str, gagal: impl FnOnce(&mut Self)) {
+    pub(crate) fn gagal_bila(&mut self, syarat: &str, gagal: impl FnOnce(&mut Self)) {
         let l_gagal = self.fresh_label("kvgagal.");
         let l_lanjut = self.fresh_label("kvlanjut.");
         self.terminate_unlikely_true(syarat, &l_gagal, &l_lanjut);
@@ -574,9 +574,41 @@ impl Codegen {
         }
     }
 
+    /// Seperti `panik_tipe_any`, untuk kalimat acuan yang lain untuk struct (`pesan("struct:N")`): awalan
+    /// `struct:` dari nama saat jalan dibuang dan templat struct-nya yang dipakai.
+    pub(crate) fn panik_tipe_any_struct(&mut self, v: &Val, pesan: impl Fn(&str) -> String) {
+        let Ok(nama) = self.typeof_any(v) else { return self.panik(&pesan("nilai")) };
+        let awalan = "struct:";
+        let (p, l) = self.split_str(&nama);
+        let a = self.intern_string(awalan);
+        let (ap, _) = self.split_str(&a);
+        self.ensure_extern("declare i32 @memcmp(ptr, ptr, i64)", "memcmp");
+        let (cukup, sama, nol, ya) = (self.fresh("pts."), self.fresh("pts."), self.fresh("pts."), self.fresh("pts."));
+        let (l_cek, l_struct, l_lain) = (self.fresh_label("pts.cek."), self.fresh_label("pts.st."), self.fresh_label("pts.lain."));
+        self.emit(format!("{} = icmp uge i64 {}, {}", cukup, l, awalan.len()));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", cukup, l_cek, l_lain));
+        self.start_block(l_cek);
+        self.emit(format!("{} = call i32 @memcmp(ptr {}, ptr {}, i64 {})", sama, p, ap, awalan.len()));
+        self.emit(format!("{} = icmp eq i32 {}, 0", nol, sama));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", nol, l_struct, l_lain));
+        self.start_block(l_struct);
+        let (op, ol) = (self.alloca_raw("pts.p.", "ptr", None), self.alloca_raw("pts.l.", "i64", None));
+        let (p2, l2) = (self.fresh("pts."), ya);
+        self.emit(format!("{} = getelementptr i8, ptr {}, i64 {}", p2, p, awalan.len()));
+        self.emit(format!("{} = sub i64 {}, {}", l2, l, awalan.len()));
+        self.emit(format!("store ptr {}, ptr {}", p2, op));
+        self.emit(format!("store i64 {}, ptr {}", l2, ol));
+        match self.join_str(&op, &ol) {
+            Ok(inti) => self.panik_sisip(&pesan(&format!("{}{}", awalan, PENANDA)), &Cetak::Teks(inti)),
+            Err(_) => self.panik(&pesan("nilai")),
+        }
+        self.start_block(l_lain);
+        self.panik_sisip(&pesan(PENANDA), &Cetak::Teks(nama));
+    }
+
     /// Gagal dengan `pesan`, nilainya disisipkan di tempat penanda. Kalimat
     /// tanpa penanda (mis. teks kosong) dicetak apa adanya.
-    fn panik_sisip(&mut self, pesan: &str, cetak: &Cetak) {
+    pub(crate) fn panik_sisip(&mut self, pesan: &str, cetak: &Cetak) {
         let Some((pre, suf)) = pesan.split_once(PENANDA) else {
             self.panik(pesan);
             return;

@@ -133,7 +133,7 @@ fn unduh(url: &str, ke: &Path, judul: &str) -> Result<(), String> {
     } else {
         return Err("butuh `curl` atau `wget` untuk mengunduh\n  bantuan: `sudo apt install curl`".into());
     };
-    let o = jrgc::putar::jalankan(&mut c, judul).map_err(|e| format!("gagal menjalankan pengunduh: {}", jrgc::host::galat_io(&e)))?;
+    let o = crate::putar::jalankan(&mut c, judul).map_err(|e| format!("gagal menjalankan pengunduh: {}", crate::host::galat_io(&e)))?;
     if !o.status.success() {
         let _ = std::fs::remove_file(ke);
         return Err(format!("unduhan {} gagal: {}", url, String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")));
@@ -144,7 +144,7 @@ fn unduh(url: &str, ke: &Path, judul: &str) -> Result<(), String> {
 fn sha1_berkas(p: &Path) -> Result<String, String> {
     let (prog, arg): (&str, &[&str]) = if ada("sha1sum") { ("sha1sum", &[]) } else if ada("shasum") { ("shasum", &["-a", "1"]) }
         else { return Err("butuh `sha1sum` atau `shasum` untuk memeriksa sidik unduhan".into()) };
-    let o = Command::new(prog).args(arg).arg(p).output().map_err(|e| jrgc::host::galat_io(&e))?;
+    let o = Command::new(prog).args(arg).arg(p).output().map_err(|e| crate::host::galat_io(&e))?;
     Ok(String::from_utf8_lossy(&o.stdout).split_whitespace().next().unwrap_or("").to_string())
 }
 
@@ -158,7 +158,7 @@ fn pasang(sdk: &Path, p: &Paket) -> Result<(), String> {
     let ke = tujuan(sdk, p);
     if ke.join("source.properties").is_file() { eprintln!("[jrgm] {} sudah ada", p.jalur); return Ok(()); }
     let t = tembolok();
-    std::fs::create_dir_all(&t).map_err(|e| format!("{}: {}", t.display(), jrgc::host::galat_io(&e)))?;
+    std::fs::create_dir_all(&t).map_err(|e| format!("{}: {}", t.display(), crate::host::galat_io(&e)))?;
     let zip = t.join(&p.url);
     if !zip.is_file() || sha1_berkas(&zip)? != p.sha1 {
         unduh(&format!("{}{}", DASAR, p.url), &zip, &format!("mengunduh {} ({} MB)", p.jalur, p.ukuran / 1_000_000))?;
@@ -171,17 +171,17 @@ fn pasang(sdk: &Path, p: &Paket) -> Result<(), String> {
     if !ada("unzip") { return Err("butuh `unzip` untuk membuka paket\n  bantuan: `sudo apt install unzip`".into()); }
     let sementara = sdk.join(".jrgm-sementara");
     let _ = std::fs::remove_dir_all(&sementara);
-    std::fs::create_dir_all(&sementara).map_err(|e| jrgc::host::galat_io(&e))?;
+    std::fs::create_dir_all(&sementara).map_err(|e| crate::host::galat_io(&e))?;
     let mut c = Command::new("unzip");
     c.arg("-q").arg(&zip).arg("-d").arg(&sementara);
-    let o = jrgc::putar::jalankan(&mut c, &format!("membuka {}", p.jalur)).map_err(|e| jrgc::host::galat_io(&e))?;
+    let o = crate::putar::jalankan(&mut c, &format!("membuka {}", p.jalur)).map_err(|e| crate::host::galat_io(&e))?;
     if !o.status.success() { return Err(format!("unzip {} gagal: {}", p.url, String::from_utf8_lossy(&o.stderr))); }
     // Isi arsip satu folder (`android-ndk-r26d/`, `android-15/`): folder itu yang jadi tujuannya.
-    let isi: Vec<PathBuf> = std::fs::read_dir(&sementara).map_err(|e| jrgc::host::galat_io(&e))?.flatten().map(|e| e.path()).collect();
+    let isi: Vec<PathBuf> = std::fs::read_dir(&sementara).map_err(|e| crate::host::galat_io(&e))?.flatten().map(|e| e.path()).collect();
     let akar = if isi.len() == 1 && isi[0].is_dir() { isi[0].clone() } else { sementara.clone() };
-    if let Some(d) = ke.parent() { std::fs::create_dir_all(d).map_err(|e| jrgc::host::galat_io(&e))?; }
+    if let Some(d) = ke.parent() { std::fs::create_dir_all(d).map_err(|e| crate::host::galat_io(&e))?; }
     let _ = std::fs::remove_dir_all(&ke);
-    std::fs::rename(&akar, &ke).map_err(|e| format!("memindah {} ke {}: {}", akar.display(), ke.display(), jrgc::host::galat_io(&e)))?;
+    std::fs::rename(&akar, &ke).map_err(|e| format!("memindah {} ke {}: {}", akar.display(), ke.display(), crate::host::galat_io(&e)))?;
     let _ = std::fs::remove_dir_all(&sementara);
     eprintln!("[jrgm] {} terpasang di {}", p.jalur, ke.display());
     Ok(())
@@ -196,7 +196,7 @@ fn tawar_pasang_sistem(program: &str, apt: &str, pkg: &str, ya: bool) -> Result<
     if !tanya(&format!("`{}` belum ada. Pasang sekarang ({} {})?", program, alat, args.join(" ")), ya) {
         return Err(format!("`{}` dibutuhkan; pasang dulu: {} {}", program, alat, args.join(" ")));
     }
-    let st = Command::new(alat).args(&args).status().map_err(|e| jrgc::host::galat_io(&e))?;
+    let st = Command::new(alat).args(&args).status().map_err(|e| crate::host::galat_io(&e))?;
     if !st.success() { return Err(format!("`{} {}` gagal", alat, args.join(" "))); }
     Ok(())
 }
@@ -225,10 +225,10 @@ pub(crate) fn android(o: &Opsi) -> Result<(), String> {
         tawar_pasang_sistem(prog, apt, pkg, o.ya)?;
     }
     let t = tembolok();
-    std::fs::create_dir_all(&t).map_err(|e| jrgc::host::galat_io(&e))?;
+    std::fs::create_dir_all(&t).map_err(|e| crate::host::galat_io(&e))?;
     let kat = t.join("repository2-3.xml");
     unduh(KATALOG, &kat, "mengunduh katalog Android")?;
-    let xml = std::fs::read_to_string(&kat).map_err(|e| jrgc::host::galat_io(&e))?;
+    let xml = std::fs::read_to_string(&kat).map_err(|e| crate::host::galat_io(&e))?;
     let semua = urai_katalog(&xml, os, arch);
     let platform_tertinggi = terbaru(&semua, "platforms;android-").ok_or("katalog tanpa platform Android")?;
     let tinggi = platform_tertinggi.jalur.trim_start_matches("platforms;android-").parse::<u32>().unwrap_or(35);
@@ -262,7 +262,7 @@ pub(crate) fn android(o: &Opsi) -> Result<(), String> {
         let terpasang = Command::new("rustup").args(["target", "list", "--installed"]).output().map(|o| String::from_utf8_lossy(&o.stdout).to_string()).unwrap_or_default();
         let kurang: Vec<&str> = ["aarch64-linux-android", "x86_64-linux-android"].into_iter().filter(|t| !terpasang.lines().any(|l| l.trim() == *t)).collect();
         if !kurang.is_empty() && tanya(&format!("Target Rust {} belum ada (dipakai `jrgm apk`). Pasang?", kurang.join(", ")), o.ya) {
-            let st = Command::new("rustup").args(["target", "add"]).args(&kurang).status().map_err(|e| jrgc::host::galat_io(&e))?;
+            let st = Command::new("rustup").args(["target", "add"]).args(&kurang).status().map_err(|e| crate::host::galat_io(&e))?;
             if !st.success() { return Err("`rustup target add` gagal".into()); }
         }
     } else {

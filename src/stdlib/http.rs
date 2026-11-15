@@ -60,6 +60,11 @@ pub fn register(vm: &mut Vm) {
         _ => Err("http::unduh(url: string, berkas: string)".to_string()),
     });
 
+    vm.def("http::hanya_publik", |a| match a {
+        [Bool(b)] => { crate::dok::klien::atur_hanya_publik(*b); Ok(Unit) }
+        _ => Err("http::hanya_publik(aktif: bool)".to_string()),
+    });
+
     // Helpers
     vm.def("http::url_encode", |a| match a.get(0) {
         Some(Str(s)) => Ok(Str(Arc::new(url_encode(&s)))),

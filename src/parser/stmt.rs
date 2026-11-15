@@ -6,6 +6,13 @@ impl Parser {
     // ── Block ─────────────────────────────────────────────────────────────
 
     pub(crate) fn parse_block(&mut self) -> Result<Block, ParseError> {
+        self.masuk_sarang()?;
+        let r = self.parse_block_inti();
+        self.dalam -= 1;
+        r
+    }
+
+    fn parse_block_inti(&mut self) -> Result<Block, ParseError> {
         let lo = self.span_lo();
         self.expect(&TokenKind::LBrace)?;
         let mut stmts = Vec::new();

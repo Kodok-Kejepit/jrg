@@ -163,7 +163,7 @@ impl Vm {
                 let bagian_enum = v.bagian_enum().map(|(_, var, p)| (var.to_string(), p.cloned()));
                 let isi: Vec<(String, VmValue)> = {
                     let g = m.lock().unwrap();
-                    let mut kunci: Vec<String> = g.keys().cloned().collect();
+                    let mut kunci: Vec<String> = g.keys().map(|k| k.to_string()).collect();
                     kunci.sort();
                     kunci.into_iter().map(|k| { let v = g[&k].clone(); (k, v) }).collect()
                 };
@@ -481,7 +481,9 @@ impl Vm {
 
         let hasil = std::thread::Builder::new()
             .name("jrg-tugas".to_string())
+            .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                crate::interpreter::catat_puncak_stack();
                 let mut vm = crate::vm::vm::Vm::new();
                 // Global pemanggil disalin, BUKAN dibagi: `VmValue` agregat sudah berupa
                 // handle ber-Arc di VM, jadi yang perlu dibagi tetap terbagi, sementara yang …

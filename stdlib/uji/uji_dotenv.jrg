@@ -1,0 +1,38 @@
+package main
+import "std/dotenv"
+
+fn test_parse() {
+    let t = "# komentar\nA=1\nexport B = dua kata  # komentar\nC='$HOME #bukan'\nD=\"baris\\nbaru \\\"k\\\" \\\\\"\nE=\nF=a#b\nG = \"x\" # ok\r\nH=${A}\n"
+    let d = dotenv::parse(t).unwrap()
+    assert_eq(d["A"], "1")
+    assert_eq(d["B"], "dua kata")
+    assert_eq(d["C"], "$HOME #bukan")
+    assert_eq(d["D"], "baris\nbaru \"k\" \\")
+    assert_eq(d["E"], "")
+    assert_eq(d["F"], "a#b")
+    assert_eq(d["G"], "x")
+    assert_eq(d["H"], "${A}")
+    assert_eq(len(dict::keys(d)), 8)
+}
+
+fn test_yang_ambigu_ditolak() {
+    assert_eq(dotenv::parse("A=1\nA=2\n").unwrap_err(), "baris 2: kunci `A` ditulis dua kali")
+    assert_eq(dotenv::parse("A='x\n").unwrap_err(), "baris 1: kutip tidak ditutup (nilai banyak baris tidak didukung, tulis \\n)")
+    assert_eq(dotenv::parse("A=\"x\" y\n").unwrap_err(), "baris 1: ada teks sesudah kutip penutup")
+    assert_eq(dotenv::parse("A=\"\\q\"\n").unwrap_err(), "baris 1: escape `\\q` tidak dikenal (yang ada: \\n \\t \\\" \\\\)")
+    assert_eq(dotenv::parse("1A=x\n").unwrap_err(), "baris 1: kunci `1A` tidak sah — huruf ASCII, angka dan `_`, tidak diawali angka")
+    assert_eq(dotenv::parse("A-B=x\n").unwrap_err(), "baris 1: kunci `A-B` tidak sah — huruf ASCII, angka dan `_`, tidak diawali angka")
+    assert_eq(dotenv::parse("tanpa\n").unwrap_err(), "baris 1: harusnya `KUNCI=nilai`")
+    assert_eq(dotenv::parse("A=a\u0000b\n").unwrap_err(), "baris 1: memuat karakter kendali")
+}
+
+fn test_muat_tidak_menimpa() {
+    let f = fs::temp_dir() + "/jrg-uji-dotenv-" + str(time::now_ms())
+    env::set("JRG_UJI_DOTENV_ADA", "lama")
+    fs::write(f, "JRG_UJI_DOTENV_ADA=baru\nJRG_UJI_DOTENV_BARU=isi\n")
+    assert_eq(dotenv::muat(f).unwrap(), ["JRG_UJI_DOTENV_BARU"])
+    assert_eq(env::get("JRG_UJI_DOTENV_ADA").unwrap(), "lama")
+    assert_eq(env::get("JRG_UJI_DOTENV_BARU").unwrap(), "isi")
+    fs::delete(f)
+    assert(dotenv::muat(f).is_err())
+}

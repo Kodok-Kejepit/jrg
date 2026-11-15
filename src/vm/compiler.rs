@@ -31,6 +31,8 @@ pub(crate) type CR<T> = Result<T, CompileError>;
 thread_local! {
     /// Lihat catatannya di `compile_unit`.
     pub(crate) static BOLEH_JALUR_ARR: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// Sama untuk `dict::set`/`dict::remove`: unit ini tidak mengimpor modul bernama `dict`.
+    pub(crate) static BOLEH_JALUR_DICT: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 
     /// Unit yang SEDANG dikompilasi: nama miliknya sendiri dan import-nya.
     static UNIT: RefCell<Unit> = RefCell::new(Unit::default());
@@ -351,6 +353,7 @@ struct Konteks {
     struct_def: HashMap<String, StructDefInfo>,
     bukan_nilai: HashMap<String, String>,
     jalur_arr: bool,
+    jalur_dict: bool,
 }
 
 fn konteks_kini() -> Konteks {
@@ -361,6 +364,7 @@ fn konteks_kini() -> Konteks {
         struct_def: STRUCT_DEFS.with(|r| r.borrow().clone()),
         bukan_nilai: BUKAN_NILAI_UNIT.with(|r| r.borrow().clone()),
         jalur_arr: BOLEH_JALUR_ARR.with(|f| f.get()),
+        jalur_dict: BOLEH_JALUR_DICT.with(|f| f.get()),
     }
 }
 
@@ -373,6 +377,7 @@ fn pasang_konteks(k: Konteks) -> Konteks {
         struct_def: STRUCT_DEFS.with(|r| r.replace(k.struct_def)),
         bukan_nilai: BUKAN_NILAI_UNIT.with(|r| r.replace(k.bukan_nilai)),
         jalur_arr: BOLEH_JALUR_ARR.with(|f| f.replace(k.jalur_arr)),
+        jalur_dict: BOLEH_JALUR_DICT.with(|f| f.replace(k.jalur_dict)),
     }
 }
 
@@ -684,6 +689,7 @@ impl Compiler {
         // Jalur cepat `arr::push(a, x)` dkk mengenali fungsinya dari NAMA: sah selama unit
         // ini tidak mengimpor modul bernama `arr`, yang ekspornya menang atas bawaan.
         BOLEH_JALUR_ARR.with(|f| f.set(!impor.contains_key("arr")));
+        BOLEH_JALUR_DICT.with(|f| f.set(!impor.contains_key("dict")));
 
         let chunk_name = namespace
             .map(|name| format!("<module:{}>", name))
@@ -983,7 +989,14 @@ impl Compiler {
             } else if !matches!(milik_unit("main"), Some((_, Milik::Fungsi))) {
                 c.emit_tolak(crate::interpreter::PESAN_MAIN_BUKAN_FN);
             } else {
-                c.emit_bawaan("__periksa_hasil_main__")?;
+                let kembali = crate::interpreter::kembali_main(file.items.iter().find_map(|it| match it {
+                    Item::Fn(f) if f.name == "main" => f.ret_type.as_ref(), _ => None }));
+                let pemeriksa = match kembali {
+                    crate::interpreter::KembaliMain::Tolak(pesan) => { c.emit_tolak(&pesan); "__periksa_hasil_main__" }
+                    crate::interpreter::KembaliMain::Kode => "__kode_main__",
+                    crate::interpreter::KembaliMain::Buang => "__periksa_hasil_main__",
+                };
+                c.emit_bawaan(pemeriksa)?;
                 let ni = c.chunk.add_name("main");
                 c.chunk.emit_arg(OpCode::LoadGlobal, ni);
                 c.chunk.emit_arg(OpCode::Call, 0);
@@ -1116,7 +1129,7 @@ impl Compiler {
             FnBody::Block(blk) => {
                 let saudara_lama = c.saudara.len();
                 c.hoist_fn_bersarang(&blk.stmts)?;
-                for s in &blk.stmts { c.compile_stmt(s)?; }
+                c.compile_stmts(&blk.stmts)?;
                 if let Some(tail) = &blk.tail {
                     c.compile_expr(tail)?;
                     c.chunk.emit(OpCode::Return);
@@ -1143,17 +1156,34 @@ impl Compiler {
 
     // ── Block helpers ─────────────────────────────────────────────────────
 
+    /// Pernyataan berurutan; `let r = arr::pop(a)` yang `a`-nya ditimpa pernyataan berikutnya memindahkan
+    /// `a` (`capture::pindah_sebelum_ditimpa`, definisi yang sama dengan interpreter).
+    pub(crate) fn compile_stmts(&mut self, stmts: &[Stmt]) -> CR<()> {
+        for (i, s) in stmts.iter().enumerate() {
+            match crate::interpreter::capture::pindah_sebelum_ditimpa(s, stmts.get(i + 1)) {
+                Some(a) if self.resolve_local(&a).is_some() => {
+                    self.konsumsi_penerima = Some(a);
+                    let hasil = self.compile_stmt(s);
+                    self.konsumsi_penerima = None;
+                    hasil?;
+                }
+                _ => self.compile_stmt(s)?,
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) fn compile_block_stmts(&mut self, blk: &Block) -> CR<()> {
         let saudara_lama = self.saudara.len();
         self.hoist_fn_bersarang(&blk.stmts)?;
-        for s in &blk.stmts { self.compile_stmt(s)?; }
-        // Fungsi bersarang cuma terlihat di bloknya sendiri.
-        self.saudara.truncate(saudara_lama);
+        self.compile_stmts(&blk.stmts)?;
         // tail expression (block value) — compile tapi langsung pop
         if let Some(tail) = &blk.tail {
             self.compile_expr(tail)?;
             self.chunk.emit(OpCode::Pop);
         }
+        // Fungsi bersarang cuma terlihat di bloknya sendiri — ekornya TERMASUK.
+        self.saudara.truncate(saudara_lama);
         Ok(())
     }
 
@@ -1295,7 +1325,7 @@ impl Compiler {
         // hoist). Tanpa baris ini deklarasinya jadi no-op SENYAP.
         let saudara_lama = self.saudara.len();
         self.hoist_fn_bersarang(&blk.stmts)?;
-        for s in &blk.stmts { self.compile_stmt(s)?; }
+        self.compile_stmts(&blk.stmts)?;
         if let Some(tail) = &blk.tail {
             self.compile_expr(tail)?;
         } else {

@@ -358,6 +358,19 @@ const BENTUK_TUMBUH_LAIN: &[(&str, &str)] = &[
     ("field lokal, `p.xs = p.xs.push(i)`",
      "package main\nstruct P { pub xs: array }\npub fn main() { var p = P { xs: [] }\n \
       for i in {n} { p.xs = p.xs.push(i) }\n assert_eq(len(p.xs), {n}) }\n"),
+    ("field lokal, `p.xs = arr::push(p.xs, i)`",
+     "package main\nstruct P { pub xs: array }\npub fn main() { var p = P { xs: [] }\n \
+      for i in {n} { p.xs = arr::push(p.xs, i) }\n assert_eq(len(p.xs), {n}) }\n"),
+    ("field lokal, `p.d = dict::set(p.d, k, i)`",
+     "package main\nstruct P { pub d: dict }\npub fn main() { var p = P { d: dict::new() }\n \
+      for i in {n} { p.d = dict::set(p.d, str(i), i) }\n assert_eq(len(p.d), {n}) }\n"),
+    ("field lokal, `p.d = dict::remove(p.d, k)`",
+     "package main\nstruct P { pub d: dict }\npub fn main() { var p = P { d: dict::new() }\n \
+      for i in {n} { p.d[str(i)] = i }\n for i in {n} { p.d = dict::remove(p.d, str(i)) }\n assert_eq(len(p.d), 0) }\n"),
+    ("field privat di method, `self.d = dict::set(self.d, k, x)`",
+     "package main\nstruct P { d: dict }\nimpl P { fn baru() { return P { d: dict::new() } }\n \
+      fn tambah(self, x) { self.d = dict::set(self.d, str(x), x)\n return self }\n fn n(self) { return len(self.d) } }\n\
+      pub fn main() { var p = P::baru()\n for i in {n} { p = p.tambah(i) }\n assert_eq(p.n(), {n}) }\n"),
     ("elemen, `m[1] = m[1] + [i]`",
      "package main\npub fn main() { var m = [[], []]\n for i in {n} { m[1] = m[1] + [i] }\n assert_eq(len(m[1]), {n}) }\n"),
     ("isi dict, `d[\"a\"] = d[\"a\"] + [i]`",
@@ -369,6 +382,10 @@ const BENTUK_TUMBUH_LAIN: &[(&str, &str)] = &[
     ("field privat di method, `self.xs += [x]`",
      "package main\nstruct P { xs: array }\nimpl P { fn baru() { return P { xs: [] } }\n \
       fn tambah(self, x) { self.xs += [x]\n return self }\n fn n(self) { return len(self.xs) } }\n\
+      pub fn main() { var p = P::baru()\n for i in {n} { p = p.tambah(i) }\n assert_eq(p.n(), {n}) }\n"),
+    ("field privat di method, `self.xs = arr::push(self.xs, x)`",
+     "package main\nstruct P { xs: array }\nimpl P { fn baru() { return P { xs: [] } }\n \
+      fn tambah(self, x) { self.xs = arr::push(self.xs, x)\n return self }\n fn n(self) { return len(self.xs) } }\n\
       pub fn main() { var p = P::baru()\n for i in {n} { p = p.tambah(i) }\n assert_eq(p.n(), {n}) }\n"),
     ("field privat di method, `self.xs = self.xs.push(x)`",
      "package main\nstruct P { xs: array }\nimpl P { fn baru() { return P { xs: [] } }\n \
@@ -402,7 +419,10 @@ fn membaca_satu_nilai_tidak_ikut_ukuran_koleksi_di_vm() {
          for i := 0; i < 20000; i = i + 1 {{ s = s + {baca} }}\n assert(s >= 0) }}\n", n = n, baca = baca);
     for baca in ["(dict::has(d, \"k1\") $ 1 : 0)", "(dict::get(d, \"k1\") ?? 0)", "dict::len(d)",
                  "(arr::get(a, 0) ?? 0)", "(arr::first(a) ?? 0)", "(arr::last(a) ?? 0)", "arr::get_or(a, 0, 1)",
-                 "(a.is_empty() $ 1 : 0)"] {
+                 "(a.is_empty() $ 1 : 0)",
+                 // Fase AMAN-35: pencarian yang ketemu di depan dan awalan/akhiran dulu menyalin seluruh array.
+                 "(arr::contains(a, 1) $ 1 : 0)", "(arr::index_of(a, 2) ?? 0)", "(a.starts_with([0, 1]) $ 1 : 0)",
+                 "(a.ends_with([5]) $ 1 : 0)"] {
         let kecil = vm_tercepat(&sumber(baca, 1000), 2);
         let besar = vm_tercepat(&sumber(baca, 16000), 2);
         let rasio = besar / kecil.max(1e-6);
@@ -463,4 +483,43 @@ fn bentuk_panas_dikompilasi_jadi_instruksi_gabungan() {
     }
     let banyak = badan.matches("Instruction {").count();
     assert!(banyak <= 56, "fungsi uji sekarang {} instruksi (52 sesudah PACU-5, 100-an sebelum PACU-4):\n{}", banyak, badan);
+}
+
+/// Fase AMAN-35: kembaran `membaca_teks_tidak_ikut_panjangnya` di `--vm` — dulu tiap `str::` menyalin teksnya
+/// lewat jembatan nilai (O(panjang) per panggilan), dan `s[i]` membuat `Vec<char>` seluruh teks.
+#[test]
+fn membaca_teks_tidak_ikut_panjangnya_di_vm() {
+    fn sumber_teks(baca: &str, n: usize) -> String {
+        format!("package main\npub fn main() {{ let s = str::repeat(\"ab\", {n})\n var k = 0\n \
+                 for i := 0; i < 20000; i = i + 1 {{ if {baca} {{ k = k + 1 }} }}\n assert(k >= 0) }}\n", n = n, baca = baca)
+    }
+    const BACA_TEKS: &[&str] = &["str::starts_with(s, \"ab\")", "str::ends_with(s, \"ab\")", "!str::is_empty(s)",
+        "str::char_at(s, 3) == 'b'", "s[3] == 'b'"];
+    for baca in BACA_TEKS {
+        let kecil = vm_tercepat(&sumber_teks(baca, 5000), 2);
+        let besar = vm_tercepat(&sumber_teks(baca, 320000), 2);
+        let rasio = besar / kecil;
+        assert!(rasio < 12.0,
+            "`{}`: teks 64x lebih panjang membuat 20 ribu pembacaan {:.1}x lebih lama di --vm ({:.1} → {:.1} ms)",
+            baca, rasio, kecil * 1e3, besar * 1e3);
+    }
+}
+
+/// Fase AMAN-43 (butir antrean "pop dua pernyataan kuadrat"): `pop` atas larik yang tidak dibaca lagi
+/// sebelum ditimpa memindahkannya (`capture::pindah_sebelum_ditimpa`) — dulu 56–69x untuk 8x n di --vm.
+#[test]
+fn pop_yang_ditimpa_tetap_linear_di_vm() {
+    for (nama, bentuk) in [
+        ("dua pernyataan `let r = arr::pop(a); a = r[0]`", "let r = arr::pop(a)\n a = r[0]\n s += r[1].unwrap_or(0)"),
+        ("dua pernyataan `let r = a.pop(); a = r[0]`", "let r = a.pop()\n a = r[0]\n s += r[1].unwrap_or(0)"),
+        ("bongkar `a, x = a.pop()`", "var x = Option::None\n a, x = a.pop()\n s += x.unwrap_or(0)"),
+    ] {
+        let sumber = |n: usize| format!("package main\npub fn main() {{ var a = []\n for i in 0..{n} {{ a = arr::push(a, i) }}\n var s = 0\n \
+             for i in 0..{n} {{ {bentuk} }}\n assert_eq(len(a), 0)\n wok(s) }}\n", n = n, bentuk = bentuk);
+        let kecil = vm_tercepat(&sumber(4000), 3);
+        let besar = vm_tercepat(&sumber(32000), 3);
+        let rasio = besar / kecil.max(1e-6);
+        assert!(rasio < 24.0, "{} di --vm: n=4000 {:.3}s, n=32000 {:.3}s (rasio {:.1}x, ambang 24x; linear ~8x, \
+            kuadratik ~64x)", nama, kecil, besar, rasio);
+    }
 }

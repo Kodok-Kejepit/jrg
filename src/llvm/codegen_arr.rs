@@ -113,9 +113,25 @@ impl Codegen {
 
     /// `arr::push(a, x)` — array baru dengan `x` di ujung.
     fn arr_push(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
-        let (koleksi, elem) = self.arg_koleksi(&args[0], "push", span)?;
-        let x = self.codegen_expr(&args[1], Some(&elem))?;
-        let x = self.coerce(&x, &elem);
+        // `arr::push([], x)`: literal kosong tidak punya jenis elemen, jadi ia ikut `x` (tanpa efek, urutan aman).
+        let (koleksi, elem, x) = if matches!(&args[0], Expr::Array { elems, .. } if elems.is_empty()) {
+            let x = self.codegen_expr(&args[1], None)?;
+            let elem = super::codegen_any::luruh(&x.ty);
+            let koleksi = self.codegen_expr(&args[0], Some(&JrgType::Slice(Box::new(elem.clone()))))?;
+            (koleksi, elem, x)
+        } else {
+            let (koleksi, elem) = self.arg_koleksi(&args[0], "push", span)?;
+            let x = self.codegen_expr(&args[1], Some(&elem))?;
+            (koleksi, elem, x)
+        };
+        let (koleksi, elem, x) = if super::codegen_any::ganti_jenis_isi(&elem, &x.ty) {
+            let k = self.coerce(&koleksi, &JrgType::Slice(Box::new(JrgType::Any)));
+            let x = self.coerce(&x, &JrgType::Any);
+            (k, JrgType::Any, x)
+        } else {
+            let x = self.coerce(&x, &elem);
+            (koleksi, elem, x)
+        };
 
         // Bungkus `x` jadi array satu elemen, lalu sambung.
         let satu_ty = JrgType::Array(Box::new(elem.clone()), 1);
@@ -140,16 +156,23 @@ impl Codegen {
     /// `arr::__sebar` — turunan parser untuk `[...x]`; pesannya menyebut `...`, bukan nama ini.
     fn arr_sebar(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         let mut sisi = Vec::with_capacity(2);
-        for e in args {
-            let v = self.codegen_expr(e, None)?;
+        // Benih `[]` milik `[...x]`: tipenya ikut sisi kanan (tanpa efek, jadi kanan boleh dulu).
+        let benih = matches!(args.first(), Some(Expr::Array { elems, .. }) if elems.is_empty());
+        let urut: Vec<&Expr> = if benih { vec![&args[1], &args[0]] } else { args.iter().collect() };
+        for e in urut {
+            let harap = match (benih, sisi.first()) {
+                (true, Some(Val { ty: JrgType::Array(t, _) | JrgType::Slice(t), .. })) => Some(JrgType::Slice(t.clone())),
+                _ => None,
+            };
+            let v = self.codegen_expr(e, harap.as_ref())?;
             if !matches!(v.ty, JrgType::Array(_, _) | JrgType::Slice(_)) {
                 return Err(super::galat::tandai(span,
                     crate::interpreter::pesan_sebar_bukan_array(&v.ty.nama_typeof())));
             }
             sisi.push(v);
         }
-        let kanan = sisi.pop().expect("arity 2 sudah diperiksa");
-        let kiri = sisi.pop().expect("arity 2 sudah diperiksa");
+        let (mut kanan, mut kiri) = (sisi.pop().expect("arity 2 sudah diperiksa"), sisi.pop().expect("arity 2 sudah diperiksa"));
+        if benih { std::mem::swap(&mut kanan, &mut kiri); }
         self.gabung_nilai(&BinaryOp::Add, kiri, kanan, span)
     }
 
@@ -433,18 +456,17 @@ impl Codegen {
             JrgType::Array(_, n) => Some(*n),
             _ => None,
         };
-        match panjang_pasti {
-            Some(n) if n >= 1 => {}
-            _ => return Err(super::galat::tandai(span, format!(
-                "`arr::{}` butuh array yang panjangnya sudah pasti dan tidak nol\n\
-                 bantuan: pakai array berukuran tetap, mis. `var a: [3]int = …`\n\
-                 catatan: pada koleksi kosong jawabannya `nil`, dan `nil` belum \
-                 punya perwujudan di backend `--emit-llvm` — jadi yang bisa \
-                 dilayani cuma yang pasti berisi",
-                nama))),
-        }
+        let kosong = crate::interpreter::pesan_koleksi_kosong(
+            &format!("arr::{}", nama), if minimum { "nilai terkecil" } else { "nilai terbesar" });
+        if panjang_pasti == Some(0) { return Err(super::galat::tandai(span, kosong)); }
 
         let (ptr, len) = self.bagian_koleksi_pub(&koleksi, &elem);
+        // Panjang yang baru diketahui saat jalan: kosong gagal dengan kalimat acuan.
+        if panjang_pasti.is_none() {
+            let nol = self.fresh("extz.");
+            self.emit(format!("{} = icmp eq i64 {}, 0", nol, len));
+            self.gagal_bila(&nol, |cg| cg.panik(&kosong));
+        }
         let ety = elem.llvm_ty();
         let akum = self.alloca_typed("ext.", &elem);
         let awal = self.fresh("ext0.");
@@ -453,7 +475,12 @@ impl Codegen {
 
         let op = if minimum { BinaryOp::Lt } else { BinaryOp::Gt };
         // NaN tidak terbanding dengan apa pun: dua elemen atau lebih, salah satunya NaN, gagal.
-        let jaga_nan = matches!(elem, JrgType::F64 | JrgType::F32) && panjang_pasti.map_or(false, |n| n >= 2);
+        let jaga_nan = matches!(elem, JrgType::F64 | JrgType::F32) && panjang_pasti.map_or(true, |n| n >= 2);
+        // Satu elemen tidak pernah dibandingkan: NaN sendirian adalah jawabannya.
+        let dua = match panjang_pasti {
+            Some(_) => None,
+            None => { let d = self.fresh("extd."); self.emit(format!("{} = icmp sge i64 {}, 2", d, len)); Some(d) }
+        };
         let pesan = crate::interpreter::pesan_min_max_tak_sebanding(
             &format!("arr::{}", nama), "float", "float");
         self.loop_koleksi(&ptr, &len, &elem, |cg, nilai| {
@@ -461,6 +488,10 @@ impl Codegen {
             if jaga_nan {
                 let nan = cg.fresh("extn.");
                 cg.emit(format!("{} = fcmp uno {} {}, {}", nan, ety, nilai.text, kini.text));
+                let nan = match &dua {
+                    Some(d) => { let r = cg.fresh("extnd."); cg.emit(format!("{} = and i1 {}, {}", r, nan, d)); r }
+                    None => nan,
+                };
                 let (gagal, lanjut) = (cg.fresh_label("ext.nan"), cg.fresh_label("ext.ok"));
                 cg.terminate(format!("br i1 {}, label %{}, label %{}, !prof !0", nan, gagal, lanjut));
                 cg.start_block(gagal);

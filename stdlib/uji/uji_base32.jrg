@@ -1,0 +1,31 @@
+package main
+import "std/base32"
+
+fn test_vektor_rfc4648() {
+    let v = [["", ""], ["f", "MY======"], ["fo", "MZXQ===="], ["foo", "MZXW6==="], ["foob", "MZXW6YQ="],
+        ["fooba", "MZXW6YTB"], ["foobar", "MZXW6YTBOI======"]]
+    for _, p in v {
+        assert_eq(base32::encode(p[0]), p[1])
+        assert_eq(base32::decode_bytes(p[1]).unwrap(), str::bytes(p[0]))
+    }
+    assert_eq(base32::encode([0, 255, 128]), "AD7YA===")
+}
+
+fn test_bolak_balik() {
+    var b = []
+    for _, i in range(300) {
+        assert_eq(base32::decode_bytes(base32::encode(b)).unwrap(), b)
+        b = arr::push(b, (i * 37 + 11) % 256)
+    }
+}
+
+fn test_bentuk_lain_ditolak() {
+    assert_eq(base32::decode_bytes("my======").unwrap_err(), "base32: karakter di posisi 0 bukan A-Z/2-7 (huruf kecil tidak diterima)")
+    assert_eq(base32::decode_bytes("MY").unwrap_err(), "base32: panjang 2 bukan kelipatan 8 — padding `=` wajib")
+    assert_eq(base32::decode_bytes("MZ======").unwrap_err(), "base32: bit sisa di blok mulai posisi 0 bukan nol — ejaan kedua dari byte yang sama")
+    assert_eq(base32::decode_bytes("MY======MZXW6===").unwrap_err(), "base32: padding di posisi 2 sebelum akhir data")
+    assert_eq(base32::decode_bytes("M=Y=====").unwrap_err(), "base32: `=` di posisi 1 diikuti huruf — padding cuma boleh di ujung")
+    assert_eq(base32::decode_bytes("MZXW6Y==").unwrap_err(), "base32: 2 tanda `=` di satu blok tidak mungkin (yang sah: 0, 1, 3, 4, 6)")
+    assert(base32::decode_bytes("MZXW 6YQ=").is_err())
+    assert(base32::decode_bytes("MZXW6YQ1").is_err())
+}

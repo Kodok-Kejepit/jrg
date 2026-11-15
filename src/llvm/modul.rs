@@ -50,6 +50,7 @@ pub const NAMA_LAPIS: &str = "<lapis>";
 pub fn muat(utama: &ParsedFile, jalur: &[PathBuf]) -> Result<Vec<UnitLlvm>, String> {
     use crate::ruang_tipe::UNIT_UTAMA;
     let mut p = Pemuat { unit: vec![None], selesai: HashMap::new(), sedang: Vec::new(), ruang: Default::default() };
+    p.ruang.const_lokal_jadi_let = true;
     p.ruang.klaim(UNIT_UTAMA, UNIT_UTAMA, utama);
     let (alias, daftar) = p.impor(utama, jalur)?;
     let mut utama = utama.clone();

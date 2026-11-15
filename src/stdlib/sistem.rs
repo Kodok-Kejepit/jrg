@@ -92,6 +92,8 @@ pub fn register(vm: &mut Vm) {
     vm.def("env::set", |a| lewat(a, |v| Interpreter::dispatch_sysenv_inner(&NativeFnKind::EnvSet, v)));
     vm.def("env::args", |a| lewat(a, |v| Interpreter::dispatch_sysenv_inner(&NativeFnKind::EnvArgs, v)));
     vm.def("env::exe", |a| lewat(a, |v| Interpreter::dispatch_sysenv_inner(&NativeFnKind::EnvExe, v)));
+    vm.def("env::os", |a| lewat_hasil(a, |_| Ok(Value::teks(nama_os()))));
+    vm.def("env::arch", |a| lewat_hasil(a, |_| Ok(Value::teks(nama_arch()))));
 
     // ── rand:: ──
     vm.def("rand::int", |a| lewat(a, |v| Interpreter::dispatch_rand_inner(&NativeFnKind::RandInt, v)));
@@ -107,7 +109,13 @@ pub fn register(vm: &mut Vm) {
     vm.def("crypto::base64_encode", |a| lewat_hasil(a, crate::dok::crypto::f_base64_encode));
     vm.def("crypto::base64_decode", |a| lewat_hasil(a, crate::dok::crypto::f_base64_decode));
     vm.def("crypto::aes_decrypt_bytes", |a| lewat_hasil(a, crate::dok::crypto::f_aes_decrypt_bytes));
+    vm.def("crypto::seal", |a| lewat_hasil(a, crate::dok::crypto::f_seal));
+    vm.def("crypto::unseal", |a| lewat_hasil(a, crate::dok::crypto::f_unseal));
+    vm.def("crypto::unseal_bytes", |a| lewat_hasil(a, crate::dok::crypto::f_unseal_bytes));
     vm.def("crypto::base64_decode_bytes", |a| lewat_hasil(a, crate::dok::crypto::f_base64_decode_bytes));
+    vm.def("crypto::base64url_encode", |a| lewat_hasil(a, crate::dok::crypto::f_base64url_encode));
+    vm.def("crypto::base64url_decode", |a| lewat_hasil(a, crate::dok::crypto::f_base64url_decode));
+    vm.def("crypto::base64url_decode_bytes", |a| lewat_hasil(a, crate::dok::crypto::f_base64url_decode_bytes));
     vm.def("crypto::hex_decode_bytes", |a| lewat_hasil(a, crate::dok::crypto::f_hex_decode_bytes));
     vm.def("crypto::random_hex", |a| lewat_hasil(a, crate::dok::crypto::f_random_hex));
     vm.def("crypto::random_int", |a| lewat_hasil(a, crate::dok::crypto::f_random_int));
@@ -120,4 +128,20 @@ pub fn register(vm: &mut Vm) {
     vm.def("file::delete", |a| lewat(a, |v| Interpreter::dispatch_file_inner(&NativeFnKind::FileDelete, v)));
     vm.def("file::read_lines", |a| lewat(a, |v| Interpreter::dispatch_file_inner(&NativeFnKind::FileReadLines, v)));
     vm.def("file::list_dir", |a| lewat(a, |v| Interpreter::dispatch_file_inner(&NativeFnKind::FileListDir, v)));
+}
+
+/// Sistem operasi tempat biner ini DIBANGUN untuk berjalan; satu daftar nama dengan `jrg_os` 26 di runtime LLVM.
+pub fn nama_os() -> &'static str {
+    match std::env::consts::OS {
+        o @ ("linux" | "android" | "macos" | "windows" | "freebsd") => o,
+        _ => "tak-dikenal",
+    }
+}
+
+/// Arsitektur prosesor biner ini; satu daftar nama dengan `jrg_os` 27 di runtime LLVM.
+pub fn nama_arch() -> &'static str {
+    match std::env::consts::ARCH {
+        a @ ("x86_64" | "aarch64" | "arm" | "x86" | "riscv64") => a,
+        _ => "tak-dikenal",
+    }
 }

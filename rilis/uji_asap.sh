@@ -1,5 +1,5 @@
 #!/bin/sh
-# Uji asap atas biner JADI: versi, konformans di dua mesin, siklus `jrgm`, `--emit-llvm` lewat
+# Uji asap atas biner JADI: versi, konformans di tiga mesin, siklus `jrgm`, `--emit-llvm` lewat
 # pustaka jadi. Untuk runner tanpa suite penuh (suite memakai PTY, `unshare`, Xvfb).
 # Pakai: sh rilis/uji_asap.sh <direktori-biner> <versi>
 set -eu
@@ -21,6 +21,13 @@ echo "== konformans (interpreter dan --vm) =="
 for f in "$akar"/tests/conformance/*.jrg; do
   cek "$jrgc" "$f"
   cek "$jrgc" "$f" --vm
+done
+
+echo "== konformans --jit sama dengan --vm (biasa dan stres) =="
+for f in "$akar"/tests/conformance/*.jrg; do
+  a=$("$jrgc" "$f" --vm 2>&1 || true); b=$("$jrgc" "$f" --jit 2>&1 || true); c=$(JRG_JIT_AMBANG=0 "$jrgc" "$f" --jit 2>&1 || true)
+  if [ "$a" = "$b" ] && [ "$a" = "$c" ]; then echo "  ok: --jit $(basename "$f")"
+  else echo "  GAGAL: --jit $(basename "$f") beda dengan --vm" >&2; gagal=$((gagal + 1)); fi
 done
 
 echo "== jrgm new / build / run / test =="

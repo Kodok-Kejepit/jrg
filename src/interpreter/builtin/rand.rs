@@ -34,8 +34,8 @@ impl Interpreter {
         match kind {
             RandInt => {
                 if args.len() < 2 { return runtime_err!("rand::int butuh (lo, hi) — inklusif dua sisi, mis. rand::int(1, 6)"); }
-                let lo = crate::interpreter::eval_expr::nilai_ke_i128(&args[0])?;
-                let hi = crate::interpreter::eval_expr::nilai_ke_i128(&args[1])?;
+                let lo = crate::interpreter::eval_expr::bulat_untuk("rand::int", &args[0])?;
+                let hi = crate::interpreter::eval_expr::bulat_untuk("rand::int", &args[1])?;
                 if hi < lo { return runtime_err!("rand::int: hi ({}) harus >= lo ({})", hi, lo); }
                 let acak = ((random_u64() as u128) << 64) | random_u64() as u128;
                 Ok(Value::Int(crate::interpreter::acak_dalam_rentang(lo, hi, acak)))
@@ -71,7 +71,7 @@ impl Interpreter {
                     Value::Array(a) => a,
                     o => return runtime_err!("{}", crate::interpreter::pesan_arg_harus_array("rand::sample", 1, &o.type_name())),
                 };
-                let n = crate::interpreter::eval_expr::nilai_ke_usize(&args[1])?.min(arr.len());
+                let n = crate::interpreter::eval_expr::cacah_untuk("rand::sample", &args[1])?.min(arr.len());
                 let mut idxs: Vec<usize> = (0..arr.len()).collect();
                 fisher_yates_shuffle(&mut idxs);
                 Ok(Value::Array(idxs.into_iter().take(n).map(|i| arr[i].clone()).collect()))

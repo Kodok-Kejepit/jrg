@@ -221,25 +221,7 @@ pub fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
     sha256(&outer)
 }
 
-fn crc32_table() -> &'static [u32; 256] {
-    static TABLE: OnceLock<[u32; 256]> = OnceLock::new();
-    TABLE.get_or_init(|| {
-        let mut table = [0u32; 256];
-        for i in 0..256u32 {
-            let mut c = i;
-            for _ in 0..8 { c = if c & 1 != 0 { 0xEDB88320 ^ (c >> 1) } else { c >> 1 }; }
-            table[i as usize] = c;
-        }
-        table
-    })
-}
-
-pub fn crc32(input: &[u8]) -> u32 {
-    let table = crc32_table();
-    let mut crc: u32 = 0xFFFFFFFF;
-    for &b in input { crc = table[((crc ^ b as u32) & 0xFF) as usize] ^ (crc >> 8); }
-    crc ^ 0xFFFFFFFF
-}
+pub use crate::kompres::crc32;
 
 pub fn hex_encode(input: &[u8]) -> String {
     let mut s = String::with_capacity(input.len() * 2);
@@ -250,21 +232,34 @@ pub fn hex_encode(input: &[u8]) -> String {
 // ─── Wrapper native (Value-level) untuk hashing ─────────────────────────
 
 pub fn f_md5(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(hex_encode(&md5(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::md5")?))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&md5(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::md5")?)))))
 }
 pub fn f_sha1(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(hex_encode(&sha1(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha1")?))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&sha1(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha1")?)))))
 }
 pub fn f_sha256(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(hex_encode(&sha256(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha256")?))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&sha256(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha256")?)))))
 }
 pub fn f_sha512(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(hex_encode(&sha512(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha512")?))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&sha512(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::sha512")?)))))
 }
 pub fn f_hmac_sha256(args: &[Value]) -> Result<Value, String> {
     let key = isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::hmac_sha256")?;
     let msg = isi_byte(args.get(1).unwrap_or(&Value::Nil), "crypto::hmac_sha256")?;
-    Ok(Value::Str(hex_encode(&hmac_sha256(&key, &msg))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&hmac_sha256(&key, &msg)))))
+}
+/// Perbandingan yang waktunya tidak bergantung pada isinya — satu definisi untuk sesi, sandi, `unseal`
+/// dan `crypto::compare_digest`. Panjang yang beda langsung `false`: panjang tanda tangan bukan rahasia.
+pub fn sama_waktu_tetap(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let beda = a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y));
+    std::hint::black_box(beda) == 0
+}
+/// `crypto::compare_digest(a, b)`: padanan `hmac.compare_digest` Python, untuk tanda tangan dan token.
+pub fn f_compare_digest(args: &[Value]) -> Result<Value, String> {
+    let a = isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::compare_digest")?;
+    let b = isi_byte(args.get(1).unwrap_or(&Value::Nil), "crypto::compare_digest")?;
+    Ok(Value::Bool(sama_waktu_tetap(&a, &b)))
 }
 pub fn f_crc32(args: &[Value]) -> Result<Value, String> {
     let s = isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::crc32")?;
@@ -292,6 +287,9 @@ pub fn base64_encode_bytes(input: &[u8]) -> String {
     out
 }
 
+/// Base64 (RFC 4648) dengan SATU ejaan per isi: spasi di ujung boleh, di tengah cuma CR/LF (baris MIME); `=` cuma
+/// di blok terakhir; bit sisa wajib nol. Dulu `aGk=aGk=` terbaca `hihi` dan `aGl=` sama dengan `aGk=` — dua pembaca
+/// bisa membaca satu teks berbeda (kelas CVE-2026-3446). Posisi di pesan adalah posisi karakter di teks asli.
 pub fn base64_decode_str(input: &str) -> Result<Vec<u8>, String> {
     fn val(c: u8) -> Option<u32> {
         match c {
@@ -301,22 +299,84 @@ pub fn base64_decode_str(input: &str) -> Result<Vec<u8>, String> {
             b'+' => Some(62), b'/' => Some(63), _ => None,
         }
     }
-    let clean: Vec<u8> = input.bytes().filter(|&b| !b.is_ascii_whitespace()).collect();
+    let awal = input.chars().count() - input.trim_start().chars().count();
+    let isi = input.trim();
+    let mut clean: Vec<(usize, u8)> = Vec::with_capacity(isi.len());
+    for (i, ch) in isi.chars().enumerate() {
+        let pos = awal + i;
+        match ch {
+            '\r' | '\n' => {}
+            ' ' | '\t' => return Err(format!("base64_decode: spasi di posisi {} — di tengah data cuma ganti baris yang boleh", pos)),
+            c if c.is_ascii() && (val(c as u8).is_some() || c == '=') => clean.push((pos, c as u8)),
+            c => return Err(format!("base64_decode: karakter `{}` di posisi {} bukan base64 (A-Z a-z 0-9 + /)",
+                crate::kutip_inti::kutip(c.to_string()), pos)),
+        }
+    }
     if clean.is_empty() { return Ok(Vec::new()); }
-    if clean.len() % 4 != 0 { return Err("base64_decode: panjang input tidak valid (harus kelipatan 4)".to_string()); }
+    if clean.len() % 4 != 0 {
+        return Err(format!("base64_decode: panjang {} bukan kelipatan 4 — padding `=` wajib", clean.len()));
+    }
+    let blok_akhir = clean.len() / 4 - 1;
     let mut out = Vec::with_capacity(clean.len() / 4 * 3);
-    for chunk in clean.chunks(4) {
-        let pad = chunk.iter().filter(|&&c| c == b'=').count();
-        let c0 = val(chunk[0]).ok_or("base64_decode: karakter tidak valid")?;
-        let c1 = val(chunk[1]).ok_or("base64_decode: karakter tidak valid")?;
-        let c2 = if chunk[2] == b'=' { 0 } else { val(chunk[2]).ok_or("base64_decode: karakter tidak valid")? };
-        let c3 = if chunk[3] == b'=' { 0 } else { val(chunk[3]).ok_or("base64_decode: karakter tidak valid")? };
-        let n = (c0 << 18) | (c1 << 12) | (c2 << 6) | c3;
+    for (b, chunk) in clean.chunks(4).enumerate() {
+        let c: Vec<u8> = chunk.iter().map(|x| x.1).collect();
+        let pad = match (c[2], c[3]) {
+            (b'=', b'=') => 2,
+            (_, b'=') => 1,
+            _ => 0,
+        };
+        if let Some(&(pos, _)) = chunk[..4 - pad].iter().find(|x| x.1 == b'=') {
+            return Err(format!("base64_decode: `=` di posisi {} di tengah data — padding cuma boleh di ujung", pos));
+        }
+        if pad > 0 && b != blok_akhir {
+            return Err(format!("base64_decode: padding di posisi {} sebelum akhir data — dua isi yang disambung?", chunk[4 - pad].0));
+        }
+        let v: Vec<u32> = c[..4 - pad].iter().map(|&x| val(x).unwrap_or(0)).collect();
+        let c2 = if pad < 2 { v[2] } else { 0 };
+        let c3 = if pad < 1 { v[3] } else { 0 };
+        if (pad == 1 && c2 & 0x3 != 0) || (pad == 2 && v[1] & 0xF != 0) {
+            return Err(format!("base64_decode: bit sisa di blok mulai posisi {} bukan nol — ejaan kedua dari byte yang sama", chunk[0].0));
+        }
+        let n = (v[0] << 18) | (v[1] << 12) | (c2 << 6) | c3;
         out.push(((n >> 16) & 0xFF) as u8);
         if pad < 2 { out.push(((n >> 8) & 0xFF) as u8); }
         if pad < 1 { out.push((n & 0xFF) as u8); }
     }
     Ok(out)
+}
+
+/// Base64url tanpa padding (RFC 4648 §5), bentuk untuk URL, cookie dan token.
+pub fn base64url_encode_bytes(b: &[u8]) -> String {
+    base64_encode_bytes(b).replace('+', "-").replace('/', "_").trim_end_matches('=').to_string()
+}
+
+/// Base64url KETAT: cuma `[A-Za-z0-9_-]`, tanpa padding, panjang yang mungkin, bit sisa nol — satu isi, satu ejaan.
+pub fn base64url_decode_str(s: &str) -> Result<Vec<u8>, String> {
+    if let Some((i, c)) = s.chars().enumerate().find(|(_, c)| !(c.is_ascii_alphanumeric() || *c == '-' || *c == '_')) {
+        let lain = if c == '=' { " — base64url di sini tanpa padding `=`" } else if c == '+' || c == '/' { " — itu huruf base64 biasa, pakai `crypto::base64_decode`" } else { "" };
+        return Err(format!("base64url_decode: karakter `{}` di posisi {} bukan base64url (A-Z a-z 0-9 - _){}",
+            crate::kutip_inti::kutip(c.to_string()), i, lain));
+    }
+    if s.len() % 4 == 1 { return Err(format!("base64url_decode: panjang {} tidak mungkin (sisa bagi 4 tidak boleh 1)", s.len())); }
+    let mut t = s.replace('-', "+").replace('_', "/");
+    while t.len() % 4 != 0 { t.push('='); }
+    let b = base64_decode_str(&t).map_err(|e| e.replace("base64_decode:", "base64url_decode:"))?;
+    Ok(b)
+}
+
+pub fn f_base64url_encode(args: &[Value]) -> Result<Value, String> {
+    Ok(Value::Str(std::sync::Arc::new(base64url_encode_bytes(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::base64url_encode")?))))
+}
+pub fn f_base64url_decode(args: &[Value]) -> Result<Value, String> {
+    let s = as_str(args.get(0).unwrap_or(&Value::Nil), "crypto::base64url_decode")?;
+    match base64url_decode_str(s) {
+        Ok(bytes) => Ok(teks_atau_err(bytes, "crypto::base64url_decode", "pakai `crypto::base64url_decode_bytes` untuk mengambil byte-nya")),
+        Err(e) => Ok(err_value(e)),
+    }
+}
+pub fn f_base64url_decode_bytes(args: &[Value]) -> Result<Value, String> {
+    let s = as_str(args.get(0).unwrap_or(&Value::Nil), "crypto::base64url_decode_bytes")?;
+    Ok(match base64url_decode_str(s) { Ok(b) => ok_value(byte_ke_array(b)), Err(e) => err_value(e) })
 }
 
 /// Posisinya posisi KARAKTER (seperti `s[i]`) dan karakternya disebut: dulu dihitung
@@ -339,7 +399,7 @@ pub fn hex_decode_str(input: &str) -> Result<Vec<u8>, String> {
 }
 
 pub fn f_base64_encode(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(base64_encode_bytes(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::base64_encode")?)))
+    Ok(Value::Str(std::sync::Arc::new(base64_encode_bytes(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::base64_encode")?))))
 }
 pub fn f_base64_decode(args: &[Value]) -> Result<Value, String> {
     let s = as_str(args.get(0).unwrap_or(&Value::Nil), "crypto::base64_decode")?;
@@ -354,7 +414,7 @@ pub fn f_base64_decode(args: &[Value]) -> Result<Value, String> {
 fn teks_atau_err(bytes: Vec<u8>, nama: &str, jalan: &str) -> Value {
     let n = bytes.len();
     match String::from_utf8(bytes) {
-        Ok(s) => ok_value(Value::Str(s)),
+        Ok(s) => ok_value(Value::Str(std::sync::Arc::new(s))),
         Err(_) => err_value(format!("{}: hasilnya ({} byte) bukan teks UTF-8 yang sah; {}", nama, n, jalan)),
     }
 }
@@ -385,7 +445,7 @@ pub fn f_hex_decode_bytes(args: &[Value]) -> Result<Value, String> {
     Ok(match hex_decode_str(s) { Ok(b) => ok_value(byte_ke_array(b)), Err(e) => err_value(e) })
 }
 pub fn f_hex_encode(args: &[Value]) -> Result<Value, String> {
-    Ok(Value::Str(hex_encode(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::hex_encode")?)))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::hex_encode")?))))
 }
 pub fn f_hex_decode(args: &[Value]) -> Result<Value, String> {
     let s = as_str(args.get(0).unwrap_or(&Value::Nil), "crypto::hex_decode")?;
@@ -403,6 +463,18 @@ static FALLBACK_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Coba `/dev/urandom` (aman secara kriptografis) dulu; kalau sungguhan tidak
 /// tersedia (platform non-Unix), baru jatuh ke PRNG splitmix64 yang di-seed …
+/// Untuk kripto (kunci, IV, garam, token): sumber OS atau GAGAL — cadangan berbenih jam bisa ditebak.
+pub fn acak_aman(n: usize, siapa: &str) -> Result<Vec<u8>, String> {
+    use std::io::Read;
+    if let Some(dari_host) = crate::host::acak(n) { return Ok(dari_host); }
+    let mut buf = vec![0u8; n];
+    match std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut buf)) {
+        Ok(()) => Ok(buf),
+        Err(e) => Err(format!("{}: sumber acak yang aman (`/dev/urandom`) tidak bisa dibaca: {} — angka dari jam \
+            bisa ditebak, jadi tidak dipakai untuk kripto", siapa, crate::host::galat_io(&e))),
+    }
+}
+
 pub fn secure_random_bytes(n: usize) -> Vec<u8> {
     use std::io::Read;
     if let Some(dari_host) = crate::host::acak(n) { return dari_host; }
@@ -430,14 +502,14 @@ pub fn f_random_hex(args: &[Value]) -> Result<Value, String> {
     let n = match args.get(0) { Some(Value::Int(n)) if *n >= 0 => *n, _ => return Err("crypto::random_hex(n)".to_string()) };
     // Batasnya diperiksa SEBELUM jadi `usize`: `as usize` memotong 2^64+5 jadi 5.
     crate::interpreter::cek_batas_elemen("crypto::random_hex", n)?;
-    Ok(Value::Str(hex_encode(&secure_random_bytes(n as usize))))
+    Ok(Value::Str(std::sync::Arc::new(hex_encode(&acak_aman(n as usize, "crypto::random_hex")?))))
 }
 
 pub fn f_random_int(args: &[Value]) -> Result<Value, String> {
     let lo = match args.get(0) { Some(Value::Int(n)) => *n, _ => return Err("crypto::random_int(min, max)".to_string()) };
     let hi = match args.get(1) { Some(Value::Int(n)) => *n, _ => return Err("crypto::random_int(min, max)".to_string()) };
     if hi < lo { return Err("crypto::random_int: max harus >= min".to_string()); }
-    let bytes = secure_random_bytes(16);
+    let bytes = acak_aman(16, "crypto::random_int")?;
     let mut n: u128 = 0;
     for b in bytes { n = (n << 8) | b as u128; }
     Ok(Value::Int(crate::interpreter::acak_dalam_rentang(lo, hi, n)))
@@ -648,8 +720,8 @@ fn parse_iv16(s: &str, fname: &str) -> Result<[u8; 16], String> {
     let mut iv = [0u8; 16]; iv.copy_from_slice(&bytes); Ok(iv)
 }
 
-pub fn f_aes_gen_key(_args: &[Value]) -> Result<Value, String> { Ok(Value::Str(hex_encode(&secure_random_bytes(32)))) }
-pub fn f_aes_gen_iv(_args: &[Value]) -> Result<Value, String> { Ok(Value::Str(hex_encode(&secure_random_bytes(16)))) }
+pub fn f_aes_gen_key(_args: &[Value]) -> Result<Value, String> { Ok(Value::Str(std::sync::Arc::new(hex_encode(&acak_aman(32, "crypto::aes_gen_key")?)))) }
+pub fn f_aes_gen_iv(_args: &[Value]) -> Result<Value, String> { Ok(Value::Str(std::sync::Arc::new(hex_encode(&acak_aman(16, "crypto::aes_gen_iv")?)))) }
 
 pub fn f_aes_encrypt(args: &[Value]) -> Result<Value, String> {
     let plaintext = isi_byte(args.get(0).unwrap_or(&Value::Nil), "crypto::aes_encrypt")?;
@@ -658,7 +730,7 @@ pub fn f_aes_encrypt(args: &[Value]) -> Result<Value, String> {
     let key = match parse_key32(key_hex, "crypto::aes_encrypt") { Ok(k) => k, Err(e) => return Ok(err_value(e)) };
     let iv = match parse_iv16(iv_hex, "crypto::aes_encrypt") { Ok(v) => v, Err(e) => return Ok(err_value(e)) };
     let ct = aes256_cbc_encrypt(&plaintext, &key, &iv);
-    Ok(ok_value(Value::Str(base64_encode_bytes(&ct))))
+    Ok(ok_value(Value::Str(std::sync::Arc::new(base64_encode_bytes(&ct)))))
 }
 
 pub fn f_aes_decrypt(args: &[Value]) -> Result<Value, String> {
@@ -667,6 +739,62 @@ pub fn f_aes_decrypt(args: &[Value]) -> Result<Value, String> {
             "kunci atau IV-nya mungkin bukan yang dipakai menyandikan; isi biner diambil `crypto::aes_decrypt_bytes`"),
         Err(e) => err_value(e),
     })
+}
+
+// ─── seal/unseal: AES-256-CBC + HMAC-SHA256 (enkripsi lalu MAC) ──────────
+// `aes_encrypt` tanpa MAC: sandi yang diubah tetap dibuka, dan bedanya galat padding dengan
+// berhasil adalah oracle (kelas CVE-2016-2107). Kotak: IV 16 || sandi || tanda 32, base64.
+
+fn kunci_kotak(key_hex: &str, nama: &str) -> Result<([u8; 32], [u8; 32]), String> {
+    let k = parse_key32(key_hex, nama)?;
+    Ok((hmac_sha256(&k, b"jrg-seal-enc"), hmac_sha256(&k, b"jrg-seal-mac")))
+}
+
+/// `crypto::seal(isi, kunci)` → `Result<string>`; IV acak dari OS, di dalam kotaknya.
+pub fn f_seal(args: &[Value]) -> Result<Value, String> {
+    const N: &str = "crypto::seal";
+    let isi = isi_byte(args.get(0).unwrap_or(&Value::Nil), N)?;
+    let key_hex = as_str(args.get(1).unwrap_or(&Value::Nil), N)?;
+    let (ke, km) = match kunci_kotak(key_hex, N) { Ok(k) => k, Err(e) => return Ok(err_value(e)) };
+    let mut iv = [0u8; 16];
+    iv.copy_from_slice(&acak_aman(16, N)?);
+    let mut kotak = iv.to_vec();
+    kotak.extend(aes256_cbc_encrypt(&isi, &ke, &iv));
+    let tanda = hmac_sha256(&km, &kotak);
+    kotak.extend_from_slice(&tanda);
+    Ok(ok_value(Value::Str(std::sync::Arc::new(base64_encode_bytes(&kotak)))))
+}
+
+/// Tanda diperiksa (waktu tetap) SEBELUM didekripsi: kotak yang diubah satu bit tidak pernah dibuka.
+fn buka_kotak(args: &[Value], nama: &str) -> Result<Result<Vec<u8>, String>, String> {
+    let kotak_b64 = as_str(args.get(0).unwrap_or(&Value::Nil), nama)?;
+    let key_hex = as_str(args.get(1).unwrap_or(&Value::Nil), nama)?;
+    Ok((|| {
+        let (ke, km) = kunci_kotak(key_hex, nama)?;
+        let kotak = base64_decode_str(kotak_b64).map_err(|e| format!("{}: {}", nama, e))?;
+        if kotak.len() < 16 + 16 + 32 {
+            return Err(format!("{}: kotaknya terlalu pendek ({} byte) — bukan hasil `crypto::seal`", nama, kotak.len()));
+        }
+        let (isi, tanda) = kotak.split_at(kotak.len() - 32);
+        let harus = hmac_sha256(&km, isi);
+        if !sama_waktu_tetap(&harus, tanda) {
+            return Err(format!("{}: tanda tangan tidak cocok — kuncinya lain, atau kotaknya diubah", nama));
+        }
+        let mut iv = [0u8; 16];
+        iv.copy_from_slice(&isi[..16]);
+        aes256_cbc_decrypt(&isi[16..], &ke, &iv).map_err(|e| format!("{}: {}", nama, e))
+    })())
+}
+
+pub fn f_unseal(args: &[Value]) -> Result<Value, String> {
+    Ok(match buka_kotak(args, "crypto::unseal")? {
+        Ok(b) => teks_atau_err(b, "crypto::unseal", "isi biner diambil `crypto::unseal_bytes`"),
+        Err(e) => err_value(e),
+    })
+}
+
+pub fn f_unseal_bytes(args: &[Value]) -> Result<Value, String> {
+    Ok(match buka_kotak(args, "crypto::unseal_bytes")? { Ok(b) => ok_value(byte_ke_array(b)), Err(e) => err_value(e) })
 }
 
 /// `crypto::aes_decrypt_bytes`: isi yang dibuka sebagai array byte, teks atau bukan.
@@ -684,4 +812,40 @@ fn aes_buka(args: &[Value], nama: &str) -> Result<Result<Vec<u8>, String>, Strin
         let iv = parse_iv16(iv_hex, nama)?;
         aes256_cbc_decrypt(&base64_decode_str(ct_b64)?, &key, &iv)
     })())
+}
+
+#[cfg(test)]
+mod uji_base64 {
+    use super::{base64_decode_str as b64, base64url_decode_str as url, base64url_encode_bytes as url_enc};
+
+    #[test]
+    fn satu_isi_satu_ejaan() {
+        assert_eq!(b64("aGk=").unwrap(), b"hi");
+        assert_eq!(b64(" aGk= \n").unwrap(), b"hi");
+        assert_eq!(b64("aG\r\nk=").unwrap(), b"hi");
+        assert_eq!(b64("").unwrap(), b"");
+        assert_eq!(b64("aGk=aGk=").unwrap_err(), "base64_decode: padding di posisi 3 sebelum akhir data — dua isi yang disambung?");
+        assert_eq!(b64("aGl=").unwrap_err(), "base64_decode: bit sisa di blok mulai posisi 0 bukan nol — ejaan kedua dari byte yang sama");
+        assert_eq!(b64("YR==").unwrap_err(), "base64_decode: bit sisa di blok mulai posisi 0 bukan nol — ejaan kedua dari byte yang sama");
+        assert_eq!(b64("YQ==").unwrap(), b"a");
+        assert_eq!(b64("aG k=").unwrap_err(), "base64_decode: spasi di posisi 2 — di tengah data cuma ganti baris yang boleh");
+        assert_eq!(b64("ab=c").unwrap_err(), "base64_decode: `=` di posisi 2 di tengah data — padding cuma boleh di ujung");
+        assert_eq!(b64("a===").unwrap_err(), "base64_decode: `=` di posisi 1 di tengah data — padding cuma boleh di ujung");
+        assert_eq!(b64("aGk").unwrap_err(), "base64_decode: panjang 3 bukan kelipatan 4 — padding `=` wajib");
+        assert_eq!(b64("aGk-").unwrap_err(), "base64_decode: karakter `-` di posisi 3 bukan base64 (A-Z a-z 0-9 + /)");
+        assert_eq!(b64("é").unwrap_err(), "base64_decode: karakter `é` di posisi 0 bukan base64 (A-Z a-z 0-9 + /)");
+        assert_eq!(url_enc(&[251, 255]), "-_8");
+        assert_eq!(url("-_8").unwrap(), [251, 255]);
+        assert_eq!(url("aGk").unwrap(), b"hi");
+        assert_eq!(url("").unwrap(), b"");
+        assert_eq!(url("aGl").unwrap_err(), "base64url_decode: bit sisa di blok mulai posisi 0 bukan nol — ejaan kedua dari byte yang sama");
+        assert!(url("aGk=").unwrap_err().contains("tanpa padding"));
+        assert!(url("a+b").unwrap_err().contains("pakai `crypto::base64_decode`"));
+        assert_eq!(url("a").unwrap_err(), "base64url_decode: panjang 1 tidak mungkin (sisa bagi 4 tidak boleh 1)");
+        for n in 0..300usize {
+            let isi: Vec<u8> = (0..n).map(|i| (i * 37 + 11) as u8).collect();
+            assert_eq!(b64(&super::base64_encode_bytes(&isi)).unwrap(), isi);
+            assert_eq!(url(&url_enc(&isi)).unwrap(), isi);
+        }
+    }
 }

@@ -4,6 +4,25 @@
 use super::*;
 
 impl Parser {
+    /// Penutup `>` daftar argumen tipe. `>>` (juga `>=`, `>>=`) dibelah di tempat, jadi
+    /// `Option<Option<int>>` menutup dua daftar sekaligus — dulu ditolak di tiga mesin.
+    pub(crate) fn tutup_sudut(&mut self) -> Result<(), ParseError> {
+        let sisa = match self.current().kind {
+            TokenKind::Shr => TokenKind::Gt,
+            TokenKind::GtEq => TokenKind::Eq,
+            TokenKind::ShrEq => TokenKind::GtEq,
+            _ => return self.expect(&TokenKind::Gt).map(|_| ()),
+        };
+        let t = &mut self.tokens[self.pos];
+        t.kind = sisa;
+        t.span.lo = crate::lexer::BytePos(t.span.lo.0 + 1);
+        Ok(())
+    }
+
+    pub(crate) fn di_penutup_sudut(&self) -> bool {
+        matches!(self.current().kind, TokenKind::Gt | TokenKind::Shr | TokenKind::GtEq | TokenKind::ShrEq)
+    }
+
     // ── Type parsing ──────────────────────────────────────────────────────
 
     pub(crate) fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
@@ -96,7 +115,7 @@ impl Parser {
                 };
                 self.expect(&TokenKind::Lt)?;
                 let inner = Box::new(self.parse_type()?);
-                self.expect(&TokenKind::Gt)?;
+                self.tutup_sudut()?;
                 Ok(TypeExpr::Ownership(OwnershipTy { qualifier: qual, inner, span: self.merge_span(lo) }))
             }
             TokenKind::Ident(name) => {
@@ -123,11 +142,11 @@ impl Parser {
                 let args = if self.at_exact(&TokenKind::Lt) {
                     self.advance();
                     let mut a = Vec::new();
-                    while !self.at_exact(&TokenKind::Gt) {
+                    while !self.di_penutup_sudut() {
                         a.push(self.parse_type()?);
                         if !self.eat(&TokenKind::Comma) { break; }
                     }
-                    self.expect(&TokenKind::Gt)?;
+                    self.tutup_sudut()?;
                     a
                 } else { Vec::new() };
                 Ok(TypeExpr::Named(NamedType { package: pkg, modul: None, name: tname, args, span: self.merge_span(lo) }))

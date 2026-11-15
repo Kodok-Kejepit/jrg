@@ -215,9 +215,9 @@ impl Interpreter {
                     let v = fields[&k].clone();
                     match vars.len() {
                         0 => {}
-                        1 => env.define(&vars[0], Value::Str(k.clone())),
+                        1 => env.define(&vars[0], Value::Str(std::sync::Arc::new(k.clone()))),
                         2 => {
-                            env.define(&vars[0], Value::Str(k.clone()));
+                            env.define(&vars[0], Value::Str(std::sync::Arc::new(k.clone())));
                             env.define(&vars[1], v);
                         }
                         _ => return runtime_err!("for-in dict: paling banyak 2 variabel (`for key, nilai in d`)"),
@@ -357,7 +357,10 @@ impl Interpreter {
         crate::profiler::utas_baru();
         let spawn_result = std::thread::Builder::new()
             .name("jrg-goroutine".to_string())
+            // Stack sebesar utas utama: dengan bawaan 2 MB rekursi ±150 tingkat sudah mematikan proses.
+            .stack_size(super::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                super::catat_puncak_stack();
                 // Badan goroutine dilaporkan sebagai `<goroutine>`, nama yang SAMA dengan
                 // yang dipakai VM.
                 crate::profiler::enter("<goroutine>");
@@ -388,9 +391,7 @@ impl Interpreter {
             }
             // Dulu cuma dicetak lalu programnya jalan terus TANPA goroutine-nya.
             Err(e) => Err(Signal::RuntimeError(RuntimeError::new(
-                crate::host::tanpa_thread("goroutine", &e)
-                    .unwrap_or_else(|| format!("goroutine tidak bisa dibuat: {}", e)))
-                .fill_span(sp.span))),
+                crate::interpreter::pesan_goroutine_tak_dibuat(&e)).fill_span(sp.span))),
         }
     }
 
@@ -441,11 +442,13 @@ impl Interpreter {
         }
 
         let n = resolved.len();
+        // Titik mulai acak seragam lewat `rand::int` — fungsi yang sama dengan yang dipanggil bytecode `--vm`.
         let poll_start_offset = || -> usize {
-            if n == 0 { return 0; }
-            crate::host::sejak_epoch()
-                .map(|d| d.subsec_nanos() as usize)
-                .unwrap_or(0) % n
+            if n < 2 { return 0; }
+            match Self::dispatch_rand_inner(&crate::interpreter::builtin::NativeFnKind::RandInt, &[Value::Int(0), Value::Int(n as i128 - 1)]) {
+                Ok(Value::Int(k)) => k as usize,
+                _ => 0,
+            }
         };
 
         loop {

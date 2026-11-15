@@ -44,6 +44,9 @@ pub enum JrgType {
     Masa(Box<JrgType>, bool),
     /// Pegangan `Atomic` (`false`) atau `Mutex` (`true`): penunjuk ke keadaannya di heap.
     Sinkron(bool),
+    /// Field yang menutup siklus tipe rekursif (`enum L { Isi(int, L) }`): penunjuk ke salinan
+    /// MILIKNYA di heap. Cuma ada di tata letak; `load_place`/`get_field_place` membukanya.
+    Kotak(Box<JrgType>),
     /// Return type of an expression that never produces a value because
     /// every path panics/returns/breaks (e.g. the body of `Err(...)?`'s
     /// early-return arm). Unifies with anything.
@@ -114,7 +117,7 @@ impl JrgType {
             JrgType::Struct(name) => format!("%\"{}\"", name),
             JrgType::Enum(name)   => format!("%\"{}\"", name),
             JrgType::Fn(..) => "%JrgFn".to_string(),
-            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) => "ptr".to_string(),
+            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => "ptr".to_string(),
             JrgType::Never => "void".to_string(),
         }
     }
@@ -126,6 +129,11 @@ impl JrgType {
             JrgType::Unit | JrgType::Never => "void".to_string(),
             other => other.llvm_ty(),
         }
+    }
+
+    /// Tipe yang DILIHAT program dari sebuah tempat: `Kotak(T)` dibuka jadi `T`.
+    pub fn tanpa_kotak(&self) -> JrgType {
+        match self { JrgType::Kotak(t) => t.tanpa_kotak(), t => t.clone() }
     }
 
     pub fn is_zero_sized(&self) -> bool {
@@ -161,6 +169,7 @@ impl JrgType {
             JrgType::Chan(e) => format!("chan${}", e.mangle_frag()),
             JrgType::Masa(e, _) => format!("masa${}", e.mangle_frag()),
             JrgType::Sinkron(k) => if *k { "kunci".into() } else { "atom".into() },
+            JrgType::Kotak(t) => format!("kotak${}", t.mangle_frag()),
             JrgType::Never => "never".into(),
         }
     }
@@ -192,6 +201,7 @@ impl JrgType {
             JrgType::Chan(e) => format!("chan<{}>", e.display_name()),
             JrgType::Masa(e, t) => format!("{}<{}>", if *t { "Task" } else { "Future" }, e.display_name()),
             JrgType::Sinkron(k) => if *k { "Mutex".into() } else { "Atomic".into() },
+            JrgType::Kotak(t) => t.display_name(),
             JrgType::Never => "!".into(),
         }
     }
@@ -220,14 +230,15 @@ impl JrgType {
             // dijawab acuannya.
             JrgType::DictCampur(_) => "dict".into(),
             JrgType::Tuple(_) => "tuple".into(),
-            JrgType::Struct(n) => format!("struct:{}", super::generik::dasar(n)),
+            JrgType::Struct(n) => format!("struct:{}", crate::ruang_tipe::bersih(super::generik::dasar(n))),
             // Nama SUMBERNYA, bukan nama termangel: `Option<int>` di backend ini bernama
             // `Option$i64`, tapi `typeof` menjawab sesuatu yang dibaca program — dan …
-            JrgType::Enum(n) => format!("enum:{}", n.split('$').next().unwrap_or(n)),
+            JrgType::Enum(n) => format!("enum:{}", crate::ruang_tipe::bersih(n.split('$').next().unwrap_or(n))),
             JrgType::Fn(..) => "function".into(),
             JrgType::Chan(_) => "channel".into(),
             JrgType::Masa(_, t) => if *t { "struct:Task".into() } else { "struct:Future".into() },
             JrgType::Sinkron(k) => if *k { "mutex".into() } else { "atomic".into() },
+            JrgType::Kotak(t) => t.nama_typeof(),
             JrgType::Never => "unit".into(),
         }
     }
@@ -387,6 +398,83 @@ impl TypeTable {
         self.structs.contains_key(name) || self.enums.contains_key(name)
     }
 
+    /// Rantai tipe yang membuat `nama` memuat dirinya sendiri SEBARIS (field, muatan varian,
+    /// tuple, array tetap), berawal dan berakhir di `nama`; slice, dict dan kotak memutusnya.
+    pub fn siklus_sebaris(&self, nama: &str) -> Option<Vec<String>> {
+        let mut jalur = vec![nama.to_string()];
+        let mut dikunjungi = std::collections::HashSet::new();
+        self.cari_siklus(nama, nama, false, &mut jalur, &mut dikunjungi).then_some(jalur)
+    }
+
+    /// Putus SEMUA siklus sebaris milik `nama`: tiap kali, field pertama `nama` yang jalannya kembali
+    /// ke `nama` disimpan sebagai `Kotak`. Mengembalikan apakah ada yang dikotakkan.
+    pub fn kotakkan_siklus(&mut self, nama: &str) -> bool {
+        fn memuat(t: &JrgType, n: &str) -> bool {
+            match t {
+                JrgType::Struct(m) | JrgType::Enum(m) => m == n,
+                JrgType::Tuple(es) => es.iter().any(|e| memuat(e, n)),
+                JrgType::Array(e, _) => memuat(e, n),
+                _ => false,
+            }
+        }
+        fn kotakkan(t: &mut JrgType, n: &str) -> bool {
+            if !memuat(t, n) { return false; }
+            *t = JrgType::Kotak(Box::new(t.clone()));
+            true
+        }
+        let mut ada = false;
+        while let Some(rantai) = self.siklus_sebaris(nama) {
+            let lanjut = rantai[1].clone();
+            let kena = if let Some(s) = self.structs.get_mut(nama) {
+                s.fields.iter_mut().any(|(_, t)| kotakkan(t, &lanjut))
+            } else if let Some(e) = self.enums.get_mut(nama) {
+                e.variants.iter_mut().any(|v| match &mut v.payload {
+                    EnumPayload::Unit => false,
+                    EnumPayload::Tuple(ts) => ts.iter_mut().any(|t| kotakkan(t, &lanjut)),
+                    EnumPayload::Struct(fs) => fs.iter_mut().any(|(_, t)| kotakkan(t, &lanjut)),
+                })
+            } else { false };
+            if !kena { return ada; }
+            ada = true;
+        }
+        ada
+    }
+
+    /// Apakah `nama` memuat dirinya sendiri lewat jalur apa pun, slice dan dict juga: tampil,
+    /// `==` dan salin-dalamnya harus jadi fungsi, karena penurunan sebaris tidak berujung.
+    pub fn berulang(&self, nama: &str) -> bool {
+        let mut jalur = Vec::new();
+        self.cari_siklus(nama, nama, true, &mut jalur, &mut std::collections::HashSet::new())
+    }
+
+    fn cari_siklus(&self, akar: &str, kini: &str, tembus: bool, jalur: &mut Vec<String>,
+                   dikunjungi: &mut std::collections::HashSet<String>) -> bool {
+        fn anak(t: &JrgType, tembus: bool, out: &mut Vec<String>) {
+            match t {
+                JrgType::Struct(n) | JrgType::Enum(n) => out.push(n.clone()),
+                JrgType::Tuple(es) => for e in es { anak(e, tembus, out) },
+                JrgType::Array(e, _) => anak(e, tembus, out),
+                JrgType::Slice(e) | JrgType::Dict(e) | JrgType::Kotak(e) if tembus => anak(e, tembus, out),
+                _ => {}
+            }
+        }
+        let mut isi = Vec::new();
+        if let Some(s) = self.structs.get(kini) {
+            for (_, t) in &s.fields { anak(t, tembus, &mut isi) }
+        } else if let Some(e) = self.enums.get(kini) {
+            for v in &e.variants { for t in v.payload.field_types() { anak(&t, tembus, &mut isi) } }
+        }
+        for n in isi {
+            if n == akar { jalur.push(n); return true; }
+            if dikunjungi.insert(n.clone()) {
+                jalur.push(n.clone());
+                if self.cari_siklus(akar, &n, tembus, jalur, dikunjungi) { return true; }
+                jalur.pop();
+            }
+        }
+        false
+    }
+
     /// Size in bytes, following ordinary C/LLVM natural-alignment layout rules
     /// (sequential fields, padded to each field's own alignment, total padded to …
     pub fn sizeof(&self, ty: &JrgType) -> u64 {
@@ -432,7 +520,7 @@ impl TypeTable {
                 }
             }
             JrgType::Fn(..) => 16,
-            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) => 8,
+            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => 8,
             JrgType::Never => 0,
         }
     }
@@ -463,7 +551,7 @@ impl TypeTable {
                 None => 4,
             },
             JrgType::Fn(..) => 8,
-            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) => 8,
+            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => 8,
             JrgType::Never => 1,
         }
     }

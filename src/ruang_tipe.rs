@@ -40,6 +40,8 @@ struct Unit {
     tipe: HashMap<String, String>,
     /// Varian → enum pemiliknya (nama yang ditulis) dan bentuknya.
     varian: HashMap<String, (String, Bentuk)>,
+    /// Metode pada `impl Tipe` polos milik unit ini (`(Tipe, metode)`).
+    metode: HashSet<(String, String)>,
     impor: Vec<String>,
 }
 
@@ -49,6 +51,8 @@ pub struct Ruang {
     pemilik: HashMap<String, String>,
     unit: HashMap<String, Unit>,
     nomor: usize,
+    /// LLVM: `const` lokal ditulis ulang jadi `let` supaya semua penyimpul LLVM melihatnya.
+    pub const_lokal_jadi_let: bool,
 }
 
 pub type RuangBersama = Arc<Mutex<Ruang>>;
@@ -81,11 +85,33 @@ impl Ruang {
                 // Trait juga milik unitnya: dulu tiga `trait Suara` di tiga berkas berbagi
                 // satu tabel default di acuan, dan `--vm` menjawab lain.
                 Item::Trait(d) => &d.name,
+                Item::Impl(d) => {
+                    if d.trait_ref.is_none() {
+                        if let TypeExpr::Named(nt) = &d.self_type {
+                            if nt.package.is_none() {
+                                for it in &d.items {
+                                    if let ImplItem::Method(f) = it {
+                                        u.metode.insert((nt.name.clone(), f.name.clone()));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
                 _ => continue,
             };
             if u.tipe.contains_key(n) { continue; }
+            // Nama handle pustaka (`Ptr`, `Task`, `DokRouter`, ...) sudah dipegang `<pustaka>`,
+            // sehingga deklarasi pengguna selalu berlabel bernomor dan tak memalsukan handle asli.
+            let dari_pustaka = crate::interpreter::galat_index::HANDLE_PUSTAKA.contains(&n.as_str());
             let label = match self.pemilik.get(n) {
                 Some(p) if p != id => {
+                    self.nomor += 1;
+                    format!("{}{}{}", n, PENANDA, self.nomor)
+                }
+                None if dari_pustaka => {
+                    self.pemilik.insert(n.clone(), "<pustaka>".to_string());
                     self.nomor += 1;
                     format!("{}{}{}", n, PENANDA, self.nomor)
                 }
@@ -360,6 +386,15 @@ impl Penulis<'_> {
                 if let Some(t) = &mut v.ty { self.anotasi(t); }
                 if let Some(e) = &mut v.init { self.expr(e); }
             }
+            Stmt::Const(c) if self.ruang.const_lokal_jadi_let => {
+                let span = c.span;
+                let l = LetStmt { is_mut: false, ownership: None,
+                    pattern: Pattern::Ident { name: c.name.clone(), is_mut: false, span },
+                    ty: c.ty.take(), init: std::mem::replace(&mut c.value, Box::new(Expr::Error(span))),
+                    lifetime: None, span };
+                *s = Stmt::Let(l);
+                if let Stmt::Let(l) = s { self.let_(l); }
+            }
             Stmt::Const(c) => self.expr(&mut c.value),
             Stmt::Expr(e) => self.expr(e),
             Stmt::Assign(a) => {
@@ -536,6 +571,15 @@ impl Penulis<'_> {
             }
         }
         if self.modul(&seg[0]).is_some() { return; }
+        // `Future::new` dan `Task::spawn` tetap menuju konstruktor pustaka kecuali unit ini
+        // memang mendeklarasikan metode atau varian bernama itu pada `Future`/`Task` miliknya.
+        if seg.len() == 2 && matches!((seg[0].as_str(), seg[1].as_str()), ("Future", "new") | ("Task", "spawn")) {
+            let milik_unit = self.ruang.unit.get(self.id).is_some_and(|u| {
+                u.metode.contains(&(seg[0].clone(), seg[1].clone()))
+                    || u.varian.get(&seg[1]).is_some_and(|(e, _)| e == &seg[0])
+            });
+            if !milik_unit { return; }
+        }
         let kepala = seg[0].clone();
         if let Some(l) = self.label(&kepala, span) { seg[0] = l; }
     }

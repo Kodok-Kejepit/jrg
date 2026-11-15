@@ -1,0 +1,54 @@
+package main
+import "std/graf"
+
+fn contoh() {
+    var g = graf::baru()
+    g = graf::sisi(g, "a", "b", 4)
+    g = graf::sisi(g, "a", "c", 1)
+    g = graf::sisi(g, "c", "b", 2)
+    g = graf::sisi(g, "b", "d", 5)
+    g = graf::sisi(g, "c", "d", 8)
+    g = graf::simpul(g, "sendiri")
+    return g
+}
+
+fn test_bfs_dan_tetangga() {
+    let g = contoh()
+    assert_eq(graf::bfs(g, "a").unwrap(), ["a", "b", "c", "d"])
+    assert_eq(graf::bfs(g, "d").unwrap(), ["d"])
+    assert_eq(graf::tetangga(g, "a"), ["b", "c"])
+    assert_eq(graf::simpul_semua(g), ["a", "b", "c", "d", "sendiri"])
+    assert(graf::bfs(g, "z").is_err())
+}
+
+fn test_jalur_terpendek() {
+    let g = contoh()
+    assert_eq(graf::jalur_terpendek(g, "a", "d").unwrap(), Some((8, ["a", "c", "b", "d"])))
+    assert_eq(graf::jalur_terpendek(g, "a", "a").unwrap(), Some((0, ["a"])))
+    assert_eq(graf::jalur_terpendek(g, "d", "a").unwrap(), None)
+    assert_eq(graf::jalur_terpendek(g, "a", "sendiri").unwrap(), None)
+    let p = graf::sisi(graf::baru(), "x", "y", 0.5)
+    assert_eq(graf::jalur_terpendek(p, "x", "y").unwrap(), Some((0.5, ["x", "y"])))
+}
+
+fn test_topologi() {
+    let g = contoh()
+    let u = graf::urut_topologi(g).unwrap()
+    assert_eq(len(u), 5)
+    for _, n in ["a", "b", "c", "d"] {
+        for _, t in graf::tetangga(g, n) {
+            assert(arr::index_of(u, n).unwrap() < arr::index_of(u, t).unwrap())
+        }
+    }
+    var s = graf::sisi(graf::sisi(graf::sisi(graf::baru(), "p", "q", 1), "q", "r", 1), "r", "q", 1)
+    assert_eq(graf::urut_topologi(s).unwrap_err(), "ada siklus: q → r → q")
+    assert_eq(graf::urut_topologi(graf::sisi(graf::baru(), "x", "x", 1)).unwrap_err(), "ada siklus: x → x")
+    var panjang = graf::baru()
+    for _, i in range(3000) { panjang = graf::sisi(panjang, «n${i}», «n${i + 1}», 1) }
+    assert_eq(len(graf::urut_topologi(panjang).unwrap()), 3001)
+}
+
+fn test_komponen() {
+    let g = graf::sisi(graf::sisi(contoh(), "x", "y", 1), "z", "y", 1)
+    assert_eq(graf::komponen(g), [["a", "b", "c", "d"], ["sendiri"], ["x", "y", "z"]])
+}

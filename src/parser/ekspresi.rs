@@ -103,6 +103,13 @@ impl Parser {
     }
 
     pub(crate) fn parse_expr_with_bp(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
+        self.masuk_sarang()?;
+        let r = self.parse_expr_with_bp_inti(min_bp);
+        self.dalam -= 1;
+        r
+    }
+
+    fn parse_expr_with_bp_inti(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         let lo = self.span_lo();
         let mut lhs = self.parse_prefix()?;
 
@@ -289,6 +296,13 @@ impl Parser {
     }
 
     pub(crate) fn parse_prefix(&mut self) -> Result<Expr, ParseError> {
+        self.masuk_sarang()?;
+        let r = self.parse_prefix_inti();
+        self.dalam -= 1;
+        r
+    }
+
+    fn parse_prefix_inti(&mut self) -> Result<Expr, ParseError> {
         let lo = self.span_lo();
         // Diambil di SINI, oleh token apa pun: cuma prefiks yang langsung menyusul `-`
         // yang boleh melihatnya.

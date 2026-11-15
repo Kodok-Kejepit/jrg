@@ -90,6 +90,11 @@ impl SourceMap {
         }
     }
 
+    /// Nomor baris (1-based) sebuah `Span`, kalau berkasnya termuat.
+    pub fn baris(&self, span: Span) -> Option<usize> {
+        self.locate(span).map(|l| l.line_no)
+    }
+
     /// Baris (1-based), kolom (1-based, dihitung per karakter bukan per
     /// byte supaya sumber ber-Unicode tetap menunjuk ke tempat yang benar),
     /// dan teks baris itu tanpa newline.

@@ -1,0 +1,82 @@
+package std_sandi
+
+// Pemeriksa kata sandi menurut NIST SP 800-63B: yang dinilai PANJANG dan bukan sandi pasaran — tanpa aturan
+// "wajib huruf besar/simbol" (yang mendorong `Sandi123!`). Ditolak: terlalu pendek/panjang, daftar pasaran, deret
+// dan pengulangan, memuat nama pengguna. Unicode dan spasi boleh; panjang dihitung per karakter.
+
+pub const MIN = 8
+pub const MAKS = 128
+
+const _PASARAN = ["password", "123456", "12345678", "123456789", "1234567890", "qwerty", "qwertyuiop", "abc123",
+    "111111", "123123", "iloveyou", "admin", "welcome", "monkey", "dragon", "letmein", "football", "baseball",
+    "sunshine", "princess", "master", "shadow", "superman", "trustno1", "passw0rd", "password1", "password123",
+    "qwerty123", "1q2w3e4r", "zaq12wsx", "asdfghjkl", "000000", "654321", "michael", "jessica", "charlie",
+    "donald", "freedom", "whatever", "starwars", "login", "access", "hello123", "admin123", "root", "toor",
+    "changeme", "default", "guest", "test1234", "rahasia", "sayang", "bismillah", "indonesia", "katasandi",
+    "sandi123", "jakarta", "anjing", "kucing", "cinta", "doraemon", "naruto", "pokemon", "minecraft"]
+
+fn _deret(cs) {
+    if len(cs) < 4 { return false }
+    var naik = true
+    var turun = true
+    var sama = true
+    for _, i in range(1, len(cs)) {
+        let a = cs[i - 1] as int
+        let b = cs[i] as int
+        if b != a + 1 { naik = false }
+        if b != a - 1 { turun = false }
+        if b != a { sama = false }
+    }
+    return naik || turun || sama
+}
+
+// Pola yang diulang (`abcabcabc`, `1212`): teksnya sama dengan potongan pendek yang diulang.
+fn _ulangan(s) {
+    let n = len(str::chars(s))
+    for _, k in range(1, n / 2 + 1) {
+        if n % k == 0 && str::repeat(s[0:k], n / k) == s { return true }
+    }
+    return false
+}
+
+/// `Ok(())` kalau sandinya layak; `Err(alasan)` kalau tidak. `nama` (boleh `""`): nama pengguna/email pemiliknya.
+pub fn periksa(sandi, nama) {
+    if typeof(sandi) != "string" { panik(«sandi::periksa: sandi harus teks, dapat `${typeof(sandi)}`») }
+    let cs = str::chars(sandi)
+    let n = len(cs)
+    if n < MIN { return Err(«terlalu pendek: ${n} karakter, paling sedikit ${MIN}») }
+    if n > MAKS { return Err(«terlalu panjang: ${n} karakter, paling banyak ${MAKS}») }
+    for _, r in cs {
+        let k = r as int
+        if k < 32 || k == 127 { return Err("memuat karakter kendali — tidak bisa diketik ulang dengan andal") }
+    }
+    let kecil = str::lower(sandi)
+    let rapat = str::replace(kecil, " ", "")
+    if arr::contains(_PASARAN, kecil) || arr::contains(_PASARAN, rapat) { return Err("termasuk sandi pasaran yang dicoba lebih dulu oleh penyerang") }
+    if _deret(str::chars(rapat)) { return Err("deret atau pengulangan satu karakter (`aaaa`, `1234`, `abcd`)") }
+    if _ulangan(rapat) { return Err("pola pendek yang diulang (`abcabcabc`)") }
+    if typeof(nama) == "string" && nama != "" {
+        let pokok = str::lower(str::split(nama, "@")[0])
+        if len(str::chars(pokok)) >= 3 && str::contains(kecil, pokok) { return Err("memuat nama pengguna — mudah ditebak siapa pun yang tahu namanya") }
+    }
+    return Ok(())
+}
+
+/// Perkiraan kasar ruang tebakan dalam bit (panjang × log2 ragam jenis karakternya); bukan jaminan, untuk meteran.
+pub fn kekuatan(sandi) {
+    var ragam = 0
+    var kecil = false
+    var besar = false
+    var angka = false
+    var lain = false
+    for _, r in str::chars(sandi) {
+        let c = str(r)
+        if c >= "a" && c <= "z" { kecil = true } else if c >= "A" && c <= "Z" { besar = true } else if c >= "0" && c <= "9" { angka = true } else { lain = true }
+    }
+    if kecil { ragam += 26 }
+    if besar { ragam += 26 }
+    if angka { ragam += 10 }
+    if lain { ragam += 33 }
+    if ragam == 0 { return 0 }
+    return math::floor(len(str::chars(sandi)) as float * math::log2(ragam as float)) as int
+}

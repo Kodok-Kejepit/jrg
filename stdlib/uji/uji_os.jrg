@@ -1,0 +1,38 @@
+package main
+import "std/os"
+
+fn test_nama_dari_daftar_tetap() {
+    assert(arr::contains(["linux", "android", "macos", "windows", "freebsd", "tak-dikenal"], os::nama()))
+    assert(arr::contains(["x86_64", "aarch64", "arm", "x86", "riscv64", "tak-dikenal"], os::arsitektur()))
+    assert_eq(os::windows(), os::nama() == "windows")
+    assert(os::cpu() >= 1)
+    assert(os::sementara() != "")
+    assert_eq(os::pemisah(), os::windows() $ "\\" : "/")
+    let i = os::info()
+    assert_eq(i["os"], os::nama())
+}
+
+fn test_path_tidak_mencari_folder_kerja() {
+    if os::windows() { return }
+    let lama = env::get_or("PATH", "")
+    env::set("PATH", "/usr/bin::.:bin:/bin:/usr/bin:")
+    assert_eq(os::path(), ["/usr/bin", "/bin"])
+    assert_eq(os::path_berbahaya(), ["", ".", "bin", ""])
+    env::set("PATH", lama)
+}
+
+fn test_rumah_dan_termux() {
+    if os::windows() { return }
+    let lama = env::get_or("HOME", "")
+    env::set("HOME", "/rumah/saya")
+    assert_eq(os::rumah().unwrap(), "/rumah/saya")
+    env::set("HOME", "")
+    assert_eq(os::rumah().unwrap_err(), "HOME kosong")
+    env::set("HOME", lama)
+    let p = env::get_or("PREFIX", "")
+    env::set("PREFIX", "/data/data/com.termux/files/usr")
+    assert(os::termux())
+    env::set("PREFIX", "/usr")
+    assert(!os::termux())
+    env::set("PREFIX", p)
+}

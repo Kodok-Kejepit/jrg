@@ -85,6 +85,7 @@ impl Codegen {
         // Tipe parameter closure: dari anotasinya, atau dari tipe yang
         // diharapkan di posisi ini (`fn pakai(f: fn(int) -> int)`).
         let nama_tampil = self.closure_bernama.take();
+        let badan_spawn = std::mem::take(&mut self.spawn_berikut);
         let harap_fn: Option<(Vec<JrgType>, Option<JrgType>)> = match harap {
             Some((ps, r)) if ps.len() == params.len() => Some((ps, r)),
             _ => None,
@@ -170,6 +171,7 @@ impl Codegen {
         let ret = if luruhkan { super::codegen_any::luruh(&ret) } else { ret };
 
         let nama_fn = self.nama_closure_baru();
+        if badan_spawn { self.closure_spawn.insert(nama_fn.clone()); }
         self.tandai_fn_terpakai(&nama_fn);
         self.antre_fn(KerjaFn::Closure {
             nama: nama_fn.clone(),
@@ -268,6 +270,8 @@ impl Codegen {
         // Penyimpul statis menyerah: badannya diturunkan di salinan, seperti fungsi tanpa anotasi.
         self.benih_lokal = tangkap.iter().map(|(n, t, _)| (n.clone(), t.clone())).collect();
         let nama = format!("$duga_closure{}_{}", span.lo.0, span.hi.0);
+        // Salinan penduga memilih unitnya dari nama; closure milik modul diduga di unit modul itu.
+        self.unit_simbol.insert(nama.clone(), self.unit_kini);
         let duga = self.tipe_return_duga(&palsu, &subst, &nama, None, params.len());
         self.benih_lokal.clear();
         if let Ok(t) = duga {
@@ -276,12 +280,17 @@ impl Codegen {
             // memang tidak menghasilkan apa-apa (`|x| wok(x)`).
             if !self.galat_duga.contains_key(&nama) { return Ok(JrgType::Unit); }
         }
-        Err(super::galat::tandai(span,
+        // Yang menghentikan penduga ikut disebut: tanpa itu pemakai cuma tahu "tidak bisa".
+        let sebab = self.galat_duga.get(&nama).map(|g| {
+            let g = super::galat::GalatLlvm::dari_pesan(g).msg;
+            format!("\ncatatan: badannya berhenti di: {}", g.lines().next().unwrap_or(""))
+        }).unwrap_or_default();
+        Err(super::galat::tandai(span, format!(
             "tipe hasil closure ini tidak bisa disimpulkan\n\
              bantuan: pakai closure-nya di tempat yang tipenya sudah diketahui, mis. \
              parameter bertipe `fn(int) -> int`\n\
              catatan: menebak tipe hasil berarti nilainya di-coerce ke tipe yang salah — \
-             itu jawaban salah yang tidak memberi pesan".to_string()))
+             itu jawaban salah yang tidak memberi pesan{}", sebab)))
     }
 
     /// Pancarkan badan sebuah closure sebagai fungsi tersendiri.
@@ -292,6 +301,7 @@ impl Codegen {
         self.mulai_fungsi_kosong(ret.clone());
         self.cur_self_ty = self.ruang_simbol.get(nama).cloned();
         self.tangkapan = nama_naik_ke_heap_ekspr(body);
+        self.ditangkap_closure = crate::interpreter::capture::ditangkap_closure_ekspr(body);
         let masuk_lama = std::mem::replace(
             &mut self.tangkap_masuk, tangkap.iter().map(|(n, _)| n.clone()).collect());
         // Rantai dipasang SELAMA badan ini diturunkan, lalu dikembalikan — badan ini

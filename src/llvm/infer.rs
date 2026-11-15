@@ -124,10 +124,19 @@ impl Codegen {
     /// Tipe variabel PERTAMA sebuah `for … in …`.
     pub(crate) fn tipe_var_loop_pertama(
         &self, iter: &Expr, lokal: &Lokal, subst: &TypeSubst, nama_diri: &str,
-    ) -> JrgType {
-        match self.tipe_ekspresi(iter, lokal, subst, nama_diri) {
-            Some(JrgType::Dict(_)) | Some(JrgType::DictCampur(_)) => JrgType::Str,
-            _ => JrgType::I64,
+    ) -> Option<JrgType> {
+        // Rentang (`0..n`, `range(..)`) selalu bulat; yang lain tak terbaca bisa kunci dict (teks) atau
+        // indeks (bulat) — tidak ditebak.
+        let rentang = match iter {
+            Expr::Range { .. } => true,
+            Expr::Call { func, .. } => matches!(&**func, Expr::Ident(n, _) if n == "range" || n == "range_inclusive"),
+            _ => false,
+        };
+        if rentang { return Some(JrgType::I64); }
+        match self.tipe_ekspresi(iter, lokal, subst, nama_diri)? {
+            JrgType::Dict(_) | JrgType::DictCampur(_) => Some(JrgType::Str),
+            // Nilai bertag diiterasi sebagai array (penurunnya membukanya begitu): indeks bulat.
+            _ => Some(JrgType::I64),
         }
     }
 
@@ -148,6 +157,7 @@ impl Codegen {
     ) {
         for s in &b.stmts {
             self.telusuri_stmt(s, lokal, subst, ketemu, nama_diri);
+            if self.sisa_mati(s, lokal) { return; }
         }
         // Ekor blok fungsi juga menghasilkan nilai return.
         if let Some(t) = &b.tail {
@@ -161,7 +171,26 @@ impl Codegen {
     fn telusuri_ulang(&self, b: &Block, lokal: &mut Lokal, subst: &TypeSubst, ketemu: &mut Option<JrgType>, nama_diri: &str) {
         for s in &b.stmts {
             self.telusuri_stmt(s, lokal, subst, ketemu, nama_diri);
+            if self.sisa_mati(s, lokal) { return; }
         }
+    }
+
+    /// Cabang `if` yang pasti diambil menurut tipe statis (`typeof(x) == ".."`): `Some(None)` = tidak ada.
+    pub(crate) fn cabang_statis<'a>(&self, i: &'a IfStmt, lokal: &Lokal) -> Option<Option<&'a Block>> {
+        let tipe = |n: &str| lokal.get(n).cloned();
+        if self.kondisi_statis(&i.cond, &tipe)? { return Some(Some(&i.then)); }
+        for (init, c, b) in &i.else_ifs {
+            if init.is_some() { return None; }
+            if self.kondisi_statis(c, &tipe)? { return Some(Some(b)); }
+        }
+        Some(i.else_.as_ref())
+    }
+
+    /// Pernyataan ini `if` yang pasti mengambil cabang yang selalu `return`: sisa bloknya mati.
+    fn sisa_mati(&self, s: &Stmt, lokal: &Lokal) -> bool {
+        let i = match s { Stmt::If(i) => i, Stmt::Expr(e) => match &**e { Expr::If(i) => i, _ => return false }, _ => return false };
+        // `return` atau `panik(..)` di ujung cabang yang pasti diambil: blok sesudahnya tidak tercapai.
+        matches!(self.cabang_statis(i, lokal), Some(Some(b)) if super::codegen_statis::blok_menyimpang(b))
     }
 
     pub(crate) fn telusuri_stmt(
@@ -228,6 +257,11 @@ impl Codegen {
                 pilih(ketemu, ty);
             }
             Stmt::Block(b) => self.telusuri_blok(b, lokal, subst, ketemu, nama_diri),
+            Stmt::If(i) if self.cabang_statis(i, lokal).is_some() => {
+                if let Some(Some(b)) = self.cabang_statis(i, lokal) {
+                    self.telusuri_blok(b, lokal, subst, ketemu, nama_diri);
+                }
+            }
             Stmt::If(i) => {
                 self.telusuri_blok(&i.then, lokal, subst, ketemu, nama_diri);
                 for (_, _, blk) in &i.else_ifs {
@@ -244,7 +278,10 @@ impl Codegen {
                     // Variabel loop DIIKAT sebelum badannya ditelusuri.
                     for (k, nama) in vars.iter().enumerate() {
                         let t = if k == 0 {
-                            self.tipe_var_loop_pertama(iter, lokal, subst, nama_diri)
+                            match self.tipe_var_loop_pertama(iter, lokal, subst, nama_diri) {
+                                Some(t) => t,
+                                None => { lokal.remove(nama); continue }
+                            }
                         } else {
                             match self.tipe_ekspresi(iter, lokal, subst, nama_diri) {
                                 Some(JrgType::Array(e, _)) | Some(JrgType::Slice(e)) => *e,
@@ -269,6 +306,22 @@ impl Codegen {
                     }
                 }
             }
+            // `if`/`match` di posisi pernyataan diurai jadi `Stmt::Expr`: `return` di dalamnya
+            // ikut dihitung, ekornya tidak (itu bukan nilai kembalian).
+            Stmt::Expr(e) => match &**e {
+                Expr::If(i) if self.cabang_statis(i, lokal).is_some() => {
+                    if let Some(Some(b)) = self.cabang_statis(i, lokal) {
+                        self.telusuri_ulang(b, lokal, subst, ketemu, nama_diri);
+                    }
+                }
+                Expr::If(i) => {
+                    self.telusuri_ulang(&i.then, lokal, subst, ketemu, nama_diri);
+                    for (_, _, b) in &i.else_ifs { self.telusuri_ulang(b, lokal, subst, ketemu, nama_diri); }
+                    if let Some(b) = &i.else_ { self.telusuri_ulang(b, lokal, subst, ketemu, nama_diri); }
+                }
+                Expr::Block(b) => self.telusuri_ulang(b, lokal, subst, ketemu, nama_diri),
+                _ => {}
+            },
             _ => {}
         }
     }
@@ -287,6 +340,7 @@ impl Codegen {
             Expr::Literal(LitKind::Bool(_), _) => Some(JrgType::Bool),
             Expr::Literal(LitKind::Rune(_), _) => Some(JrgType::Rune),
             Expr::Literal(LitKind::Str(_), _) | Expr::Literal(LitKind::RawStr(_), _) => Some(JrgType::Str),
+            Expr::Literal(LitKind::Nil, _) => Some(JrgType::Nil),
 
             Expr::Ident(n, _) => lokal.get(n).cloned()
                 // Sebuah NAMA FUNGSI juga sebuah nilai. Tanpa lengan ini,
@@ -343,6 +397,11 @@ impl Codegen {
             // `let v = r?` tidak menipekan `v`, dan semua yang memakainya
             // ikut gugur.
             Expr::Propagate { expr, .. } => {
+                // `r.map_err(f)?`: `map_err` tidak menyentuh paruh sukses yang dibuka `?`.
+                let expr = match &**expr {
+                    Expr::Method { obj, method, args, .. } if method == "map_err" && args.len() == 1 => obj,
+                    _ => expr,
+                };
                 let JrgType::Enum(n) = self.tipe_ekspresi(expr, lokal, subst, nama_diri)? else {
                     return None;
                 };
@@ -408,6 +467,11 @@ impl Codegen {
                             && super::codegen_expr::eksponen_negatif_tertulis(rhs).is_some() => Some(JrgType::F64),
                         // Bulat lawan pecahan menjawab pecahan, di sisi mana pun pecahannya.
                         (Some(a), Some(b)) if a.is_int() && b.is_float() => kanan,
+                        // Teks di salah satu sisi `+` menyambung tampilan sisi lainnya (`[1] + "z"`, `1 + "x"`);
+                        // struct/enum di kiri bisa punya `add` sendiri, nilai bertag ditentukan saat jalan.
+                        (Some(a), Some(b)) if *op == BinaryOp::Add && (*a == JrgType::Str || *b == JrgType::Str)
+                            && !matches!(a, JrgType::Struct(_) | JrgType::Enum(_) | JrgType::Any)
+                            && *b != JrgType::Any => Some(JrgType::Str),
                         _ => kiri.or(kanan),
                     }
                 }
@@ -421,6 +485,8 @@ impl Codegen {
                 // Struct/enum/tuple bercampur dengan tipe lain di satu literal: elemennya bertag,
                 // sama dengan penurun literalnya (`[k, Pindah::Tetap]`).
                 let buram = |t: &JrgType| matches!(t, JrgType::Struct(_) | JrgType::Enum(_) | JrgType::Tuple(_));
+                let golongan = |t: &JrgType| match t {
+                    JrgType::Array(..) | JrgType::Slice(_) => 1, JrgType::Dict(_) | JrgType::DictCampur(_) => 2, _ => 0 };
                 // Varian enum lewat path (`modul::Enum::V(..)`, `Enum::V`): golongannya sudah jelas
                 // walau tipe lengkapnya belum terbaca di sini.
                 let varian = |e: &Expr| -> Option<JrgType> {
@@ -435,6 +501,16 @@ impl Codegen {
                 for e in &elems[1..] {
                     match self.tipe_ekspresi(e, lokal, subst, nama_diri).or_else(|| varian(e)) {
                         Some(t) if t != et && (buram(&t) || buram(&et)) =>
+                            return Some(JrgType::Array(Box::new(JrgType::Any), elems.len() as u64)),
+                        // Teks bersama angka/bool (`[2, "b"]`, `[d, i, k]`) juga bertag — sama dengan penurunnya.
+                        Some(t) if t != et && [&t, &et].iter().any(|x| **x == JrgType::Str)
+                            && [&t, &et].iter().any(|x| x.is_numeric() || **x == JrgType::Bool) =>
+                            return Some(JrgType::Array(Box::new(JrgType::Any), elems.len() as u64)),
+                        // Bulat bersama pecahan (`[x as float, kini]`): bulatnya tetap bulat, jadi bertag.
+                        Some(t) if (t.is_int() && et.is_float()) || (t.is_float() && et.is_int()) =>
+                            return Some(JrgType::Array(Box::new(JrgType::Any), elems.len() as u64)),
+                        // Wadah bersama yang bukan wadah sejenis (`[[1, 2], "z"]`, `[[1], {"a": 1}]`): bertag.
+                        Some(t) if golongan(&t) != golongan(&et) && golongan(&t) + golongan(&et) > 0 =>
                             return Some(JrgType::Array(Box::new(JrgType::Any), elems.len() as u64)),
                         _ => {}
                     }
@@ -490,9 +566,20 @@ impl Codegen {
                             if params.len() != 1 { return None; }
                             if let Some(n) = pola_nama(&params[0].pattern) { l2.insert(n, el); }
                             let r = self.tipe_ekspresi(&pembungkus_ekor(body, *span), &l2, subst, nama_diri)?;
-                            return Some(JrgType::Slice(Box::new(r)));
+                            return Some(JrgType::Slice(Box::new(super::codegen_any::luruh(&r))));
                         }
                         None
+                    }
+                    // `r.map_err(|e| ..)`: paruh galatnya dari hasil closure, kalau tata letaknya sudah ada.
+                    ("map_err", Some(JrgType::Enum(n))) if args.len() == 1 => {
+                        let (t, e) = self.result_args.get(n)?.clone();
+                        let Expr::Closure { params, body, span, .. } = &args[0] else { return None };
+                        if params.len() != 1 { return None; }
+                        let mut l2 = lokal.clone();
+                        if let Some(nm) = pola_nama(&params[0].pattern) { l2.insert(nm, e); }
+                        let r = self.tipe_ekspresi(&pembungkus_ekor(body, *span), &l2, subst, nama_diri)?;
+                        let nama = crate::llvm::mangle::mangle_result(&t, &r);
+                        self.result_args.contains_key(&nama).then_some(JrgType::Enum(nama))
                     }
                     ("filter", Some(JrgType::Array(e, _))) => Some(JrgType::Slice(e.clone())),
                     ("filter", Some(JrgType::Slice(e))) => Some(JrgType::Slice(e.clone())),
@@ -512,12 +599,15 @@ impl Codegen {
             Expr::Index { obj, .. } => match self.tipe_ekspresi(obj, lokal, subst, nama_diri)? {
                 JrgType::Array(e, _) | JrgType::Slice(e) => Some(*e),
                 JrgType::Str => Some(JrgType::Rune),
+                // `d[k]` atas dict: tipe nilainya — `v = v[k]` lalu terbaca sebagai pergantian jenis `v`.
+                JrgType::Dict(v) => Some(*v),
+                JrgType::DictCampur(_) => Some(JrgType::Any),
                 _ => None,
             },
 
             Expr::Field { obj, field, .. } => {
                 match self.tipe_ekspresi(obj, lokal, subst, nama_diri)? {
-                    JrgType::Struct(nama) => self.types.structs.get(&nama)?.field_type(field).cloned(),
+                    JrgType::Struct(nama) => self.types.structs.get(&nama)?.field_type(field).map(|t| t.tanpa_kotak()),
                     JrgType::Tuple(ts) => ts.get(field.parse::<usize>().ok()?).cloned(),
                     _ => None,
                 }
@@ -542,6 +632,7 @@ impl Codegen {
                         };
                         let el = el.or_else(|| {
                             self.tipe_ekspresi(args.get(1)?, lokal, subst, nama_diri)
+                                .map(|t| super::codegen_any::luruh(&t))
                         })?;
                         Some(JrgType::Slice(Box::new(el)))
                     }
@@ -574,8 +665,11 @@ impl Codegen {
                     let Expr::Array { elems: kv, .. } = pasang else { return None };
                     if kv.len() != 2 { return None; }
                     let t = self.tipe_ekspresi(&kv[1], lokal, subst, nama_diri)?;
+                    let dict_ = |t: &JrgType| matches!(t, JrgType::Dict(_) | JrgType::DictCampur(_));
                     match &vt {
                         None => vt = Some(t),
+                        // Dua dict berlainan isi: dict bernilai bertag, sama dengan penurunnya.
+                        Some(x) if *x != t && dict_(x) && dict_(&t) => vt = Some(JrgType::Dict(Box::new(JrgType::Any))),
                         // Campur tipe: nilainya dikotak, jadi tipe nilainya
                         // `Any`. Yang memakai jawaban ini cuma butuh tahu ia
                         // sebuah dict.
@@ -649,6 +743,9 @@ impl Codegen {
                 match args.first() {
                     None => Some(JrgType::Dict(Box::new(JrgType::Any))),
                     Some(d) => match self.tipe_ekspresi(d, lokal, subst, nama_diri)? {
+                        JrgType::Dict(v) if args.len() == 3 && self.tipe_ekspresi(&args[2], lokal, subst, nama_diri)
+                            .map_or(false, |t| super::codegen_any::ganti_jenis_isi(&v, &t)) =>
+                            Some(JrgType::Dict(Box::new(JrgType::Any))),
                         t @ (JrgType::Dict(_) | JrgType::DictCampur(_)) => Some(t),
                         _ => None,
                     },
@@ -688,9 +785,21 @@ impl Codegen {
                 }
                 // Rekursi: menyimpulkan tipe `f` dari `return f(..)` butuh
                 // tipe `f` itu sendiri. Digugurkan, tidak ditebak.
-                if n == nama_diri { return None; }
+                if n == nama_diri || nama_diri.strip_prefix('\u{0}') == Some(n.as_str()) { return None; }
                 let f = self.tables.functions.get(&self.k(n))?;
-                self.tipe_dari_anotasi(f.ret_type.as_ref()?, subst)
+                if let Some(te) = f.ret_type.as_ref() {
+                    return self.tipe_dari_anotasi(te, subst);
+                }
+                // Fungsi 0-argumen tanpa anotasi (`fn ubah() { return [8] }`): disimpulkan 1 lapis.
+                if !nama_diri.starts_with('\u{0}') && f.generics.params.is_empty() && f.params.is_empty() {
+                    if let FnBody::Block(b) = &*f.body {
+                        let batas = format!("\u{0}{}", f.name);
+                        let mut ketemu: Option<JrgType> = None;
+                        self.telusuri_blok(b, &mut Lokal::new(), &TypeSubst::new(), &mut ketemu, &batas);
+                        return ketemu.filter(|t| *t != JrgType::Never);
+                    }
+                }
+                None
             }
 
             // Ternary, `if … else`, dan `match`: tipe lengannya, kalau SEMUA lengan terbaca dan

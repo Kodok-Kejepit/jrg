@@ -1,0 +1,27 @@
+package main
+import "std/sandi"
+
+fn test_layak() {
+    assert(sandi::periksa("kuda-lompat-tinggi-sekali", "sari").is_ok())
+    assert(sandi::periksa("Bébé dan 日本 2026", "").is_ok())
+    assert(sandi::periksa("8 karakt", "").is_ok())
+}
+
+fn test_ditolak_dengan_alasan() {
+    assert_eq(sandi::periksa("pendek", "").unwrap_err(), "terlalu pendek: 6 karakter, paling sedikit 8")
+    assert_eq(sandi::periksa(str::repeat("x", 129), "").unwrap_err(), "terlalu panjang: 129 karakter, paling banyak 128")
+    assert_eq(sandi::periksa("Password", "").unwrap_err(), "termasuk sandi pasaran yang dicoba lebih dulu oleh penyerang")
+    assert_eq(sandi::periksa("12345678", "").unwrap_err(), "termasuk sandi pasaran yang dicoba lebih dulu oleh penyerang")
+    assert_eq(sandi::periksa("aaaaaaaa", "").unwrap_err(), "deret atau pengulangan satu karakter (`aaaa`, `1234`, `abcd`)")
+    assert_eq(sandi::periksa("98765432", "").unwrap_err(), "deret atau pengulangan satu karakter (`aaaa`, `1234`, `abcd`)")
+    assert_eq(sandi::periksa("abcdefgh", "").unwrap_err(), "deret atau pengulangan satu karakter (`aaaa`, `1234`, `abcd`)")
+    assert_eq(sandi::periksa("abcabcabc", "").unwrap_err(), "pola pendek yang diulang (`abcabcabc`)")
+    assert_eq(sandi::periksa("sari2026!!", "Sari@contoh.id").unwrap_err(), "memuat nama pengguna — mudah ditebak siapa pun yang tahu namanya")
+    assert_eq(sandi::periksa("baris\nbaru-panjang", "").unwrap_err(), "memuat karakter kendali — tidak bisa diketik ulang dengan andal")
+}
+
+fn test_kekuatan() {
+    assert_eq(sandi::kekuatan(""), 0)
+    assert_eq(sandi::kekuatan("abcdefgh"), 37)
+    assert(sandi::kekuatan("kuda-lompat-tinggi-sekali") > sandi::kekuatan("Ab1!"))
+}

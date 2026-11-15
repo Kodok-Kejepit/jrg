@@ -1,0 +1,73 @@
+package std_uuid
+
+// UUID (RFC 9562) dari sumber acak OS. Pengurainya cuma menerima bentuk kanonik `8-4-4-4-12` — tanpa `{}`,
+// `urn:uuid:` atau versi tanpa tanda hubung — jadi satu UUID punya satu ejaan, dan hasilnya huruf kecil.
+
+const _HEKS = "0123456789abcdef"
+
+fn _nibble(c) {
+    match str::index_of(_HEKS, c) {
+        Some(i) => { return i }
+        None => { return -1 }
+    }
+}
+
+fn _bentuk(h) {
+    return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32]
+}
+
+// Pasang versi di nibble ke-12 dan varian `10xx` di nibble ke-16.
+fn _tandai(h, versi) {
+    let v = _nibble(h[16:17])
+    let varian = _HEKS[8 + v % 4:9 + v % 4]
+    return h[0:12] + str(versi) + h[13:16] + varian + h[17:32]
+}
+
+/// UUID versi 4: 122 bit acak.
+pub fn v4() { return _bentuk(_tandai(crypto::random_hex(16), 4)) }
+
+fn _heks_dari(n, digit) {
+    var s = ""
+    var x = n
+    while len(s) < digit {
+        s = _HEKS[x % 16:x % 16 + 1] + s
+        x = x / 16
+    }
+    return s
+}
+
+/// UUID versi 7: 48 bit milidetik unix lalu bit acak — terurut menurut waktu pembuatannya (antar milidetik).
+pub fn v7() { return v7_dari_ms(time::now_ms()) }
+
+/// UUID versi 7 untuk cap waktu milidetik tertentu (0 sampai 2^48 - 1).
+pub fn v7_dari_ms(ms) {
+    if ms < 0 || ms > 281474976710655 { panik(«uuid::v7_dari_ms: ${ms} di luar 0 sampai 2^48 - 1») }
+    return _bentuk(_tandai(_heks_dari(ms, 12) + crypto::random_hex(10), 7))
+}
+
+/// `Ok(uuid huruf kecil)` kalau `s` berbentuk kanonik, `Err` kalau tidak.
+pub fn parse(s) {
+    if len(s) != 36 {
+        var ringkas = len(s) <= 40 $ «`${s}`» : «(${len(s)} karakter)»
+        for _, r in str::chars(s) { if (r as int) < 32 || (r as int) == 127 { ringkas = «(${len(s)} karakter)» } }
+        return Err(«UUID ${ringkas} harus 36 karakter berbentuk xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx»)
+    }
+    for i, r in str::chars(s) {
+        let c = str::lower(str(r))
+        if i == 8 || i == 13 || i == 18 || i == 23 {
+            if c != "-" { return Err(«UUID: harusnya `-` di posisi ${i}») }
+        } else if _nibble(c) < 0 {
+            return Err(«UUID: karakter di posisi ${i} bukan digit heksadesimal»)
+        }
+    }
+    return Ok(str::lower(s))
+}
+
+/// Versi UUID (angka di nibble ke-13); `Err` kalau bukan UUID kanonik.
+pub fn versi(s) {
+    let u = parse(s)?
+    return Ok(_nibble(u[14:15]))
+}
+
+/// UUID nol (`00000000-0000-0000-0000-000000000000`).
+pub const NIL = "00000000-0000-0000-0000-000000000000"

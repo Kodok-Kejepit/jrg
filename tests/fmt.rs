@@ -213,12 +213,8 @@ fn sumber_rusak_ditolak_bukan_ditulis() {
 
 // ─── Subperintah yang menolak ──────────────────────────────────────────────
 
-fn jrgm() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") { p.pop(); }
-    p.join("jrgm")
-}
+// Dari Cargo, bukan dari letak biner tes: tata letak direktori build berubah antar versi Cargo.
+fn jrgm() -> PathBuf { PathBuf::from(env!("CARGO_BIN_EXE_jrgm")) }
 
 /// `jrgm new --kind web` harus menghasilkan aplikasi yang LANGSUNG MELAYANI,
 /// bukan kerangka yang masih perlu ditambal.
@@ -2163,6 +2159,37 @@ mod sunting {
         assert!(jumlah >= 78, "tes editor tinggal {} (sebelumnya 78)", jumlah);
     }
 
+    /// Modul `std/` yang punya berkas `stdlib/uji/uji_<modul>.jrg` diuji `--uji` di dua mesin, lewat
+    /// `import "std/.."` — jadi yang diuji salinan yang TERTANAM di biner, bukan berkas di disk.
+    #[test]
+    fn uji_modul_std_lulus_di_dua_mesin() {
+        let dir = std::path::Path::new(akar()).join("stdlib/uji");
+        let mut berkas: Vec<std::path::PathBuf> = std::fs::read_dir(&dir).unwrap()
+            .filter_map(|e| e.ok()).map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "jrg"))
+            .collect();
+        berkas.sort();
+        assert!(berkas.len() >= 23, "berkas uji std tinggal {}", berkas.len());
+        let mut jumlah = 0usize;
+        for f in &berkas {
+            for vm in [false, true] {
+                let mut c = Command::new(jrgc());
+                c.arg(f).arg("--uji").arg("--sopan");
+                if vm { c.arg("--vm"); }
+                let o = c.env("JRG_SOPAN", "1").stdin(Stdio::null()).output().unwrap();
+                let t = String::from_utf8_lossy(&o.stdout).to_string();
+                assert!(o.status.success() && t.contains(" 0 gagal"),
+                    "{} (vm={}) gagal:\n{}{}", f.display(), vm, t, String::from_utf8_lossy(&o.stderr));
+                if !vm {
+                    let n = t.lines().filter_map(|b| b.strip_prefix("--- "))
+                        .filter_map(|b| b.split(' ').next()?.parse::<usize>().ok()).next().unwrap_or(0);
+                    jumlah += n;
+                }
+            }
+        }
+        assert!(jumlah >= 85, "tes modul std tinggal {} (sebelumnya 85)", jumlah);
+    }
+
     /// Nama yang tidak dideklarasikan dilaporkan `--periksa` — semuanya, dengan barisnya, di
     /// berkas utama maupun modulnya — dan satu operand yang hilang tetap SATU galat.
     #[test]
@@ -2231,6 +2258,30 @@ mod sunting {
         assert_eq!(baris.len(), 2, "jumlah galat:\n{}", g);
         assert!(baris[0].contains("\t4\t20\tfungsi `f` kebanyakan argumen — dia cuma menerima 2, tapi dikasih 3")
             && baris[1].contains("\t11\t9\tfungsi `g`: parameter `a` (posisi 1) wajib diisi"), "{}", g);
+
+        // Fase ARGUMEN-MODUL: `alias::f(..)` ke fungsi modul, `T::m(..)` milik tipe berkas ini, dan
+        // panggilan di dalam modulnya sendiri; `k.f()` diputuskan saat jalan, jadi tidak dituduh.
+        std::fs::write(dir.join("bantu2.jrg"),
+            "package bantu2\npub fn dua(a, b) { return a + b }\npub fn opsi(a, b = 2) { return a + b }\n\
+             fn sendiri() { return dua(1) }\n").unwrap();
+        std::fs::write(dir.join("argmod.jrg"),
+            "package main\nimport \"bantu2\"\nstruct K { x: int }\nimpl K {\n    fn f(self, n) { return self.x + n }\n    \
+             fn s(n) { return n }\n}\npub fn main() {\n    let k = K { x: 1 }\n    \
+             wok(bantu2::dua(1), bantu2::opsi(1, 2, 3), bantu2::opsi(1))\n    \
+             wok(K::s(1, 2), K::f(k), K::f(k, 1), k.f())\n}\n").unwrap();
+        let (sukses, g) = periksa("argmod.jrg");
+        assert!(!sukses);
+        let baris: Vec<&str> = g.lines().collect();
+        assert_eq!(baris.len(), 5, "jumlah galat:\n{}", g);
+        for (berkas, isi) in [
+            ("bantu2.jrg\t4\t23\t", "fungsi `dua`: parameter `b` (posisi 2) wajib diisi"),
+            ("argmod.jrg\t10\t9\t", "fungsi `dua`: parameter `b` (posisi 2) wajib diisi"),
+            ("argmod.jrg\t10\t25\t", "fungsi `opsi` kebanyakan argumen — dia cuma menerima 2, tapi dikasih 3"),
+            ("argmod.jrg\t11\t9\t", "fungsi `K::s` kebanyakan argumen — dia cuma menerima 1, tapi dikasih 2"),
+            ("argmod.jrg\t11\t21\t", "fungsi `K::f`: parameter `n` (posisi 2) wajib diisi"),
+        ] {
+            assert!(baris.iter().any(|b| b.contains(berkas) && b.contains(isi)), "tidak ada {:?}:\n{}", berkas, g);
+        }
 
         // Sasaran penugasan yang bukan variabel, juga di fungsi yang tidak pernah dipanggil.
         std::fs::write(dir.join("tugas.jrg"),
@@ -2814,6 +2865,92 @@ fn dependensi_git_publish_add_update() {
     let _ = std::fs::remove_dir_all(&akar);
 }
 
+/// Fase AMAN-2: url/rev yang git baca sebagai opsi, nama yang jadi jalur, `jrgm.lock` yang diracun,
+/// nama paket yang lain dari yang diminta, dan path keluar dari salinan paket git — semuanya ditolak.
+#[test]
+fn dependensi_git_tidak_bisa_disisipi() {
+    let j = jrgm();
+    let akar = std::env::temp_dir().join(format!("jrg_dep_aman_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&akar);
+    std::fs::create_dir_all(&akar).unwrap();
+    let jalan = |dir: &Path, args: &[&str]| {
+        let o = Command::new(&j).args(args).current_dir(dir).env("JRGM_TEMBOLOK", akar.join("tembolok"))
+            .env("JRG_SOPAN", "1").env("GIT_COMMITTER_NAME", "u").env("GIT_COMMITTER_EMAIL", "u@j")
+            .env("GIT_AUTHOR_NAME", "u").env("GIT_AUTHOR_EMAIL", "u@j").output().unwrap();
+        (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr))
+    };
+    let git = |dir: &Path, args: &[&str]| {
+        let o = Command::new("git").args(["-c", "user.email=u@j", "-c", "user.name=u"]).args(args)
+            .current_dir(dir).output().unwrap();
+        assert!(o.status.success(), "git {:?}: {}", args, String::from_utf8_lossy(&o.stderr));
+    };
+    let terbit = |nama: &str, isi_toml: Option<&str>| -> String {
+        git(&akar, &["init", "-q", "--bare", &format!("{}.git", nama)]);
+        assert!(jalan(&akar, &["new", nama]).0);
+        let b = akar.join(nama);
+        if let Some(t) = isi_toml {
+            let m = std::fs::read_to_string(b.join("jrgm.toml")).unwrap();
+            // Disisipkan di bawah `[dependencies]` rangkanya: header kedua adalah tabel kembar, ditolak TOML.
+            std::fs::write(b.join("jrgm.toml"), m.replacen("[dependencies]", t, 1)).unwrap();
+        }
+        std::fs::write(b.join("src").join(format!("{}.jrg", nama)), "pub fn satu() { return 1 }\n").unwrap();
+        git(&b, &["init", "-q"]);
+        git(&b, &["add", "-A"]);
+        git(&b, &["commit", "-qm", "awal"]);
+        let pusat = akar.join(format!("{}.git", nama)).display().to_string();
+        git(&b, &["remote", "add", "origin", &pusat]);
+        if isi_toml.is_some() {
+            // `jrgm publish` menolak dependensi path; repositori yang didorong tangan tidak.
+            git(&b, &["tag", "v0.1.0"]);
+            git(&b, &["push", "-q", "origin", "HEAD:refs/heads/utama", "v0.1.0"]);
+        } else {
+            let (ok, t) = jalan(&b, &["publish"]);
+            assert!(ok, "{}", t);
+        }
+        pusat
+    };
+    let pusat = terbit("bantu", None);
+    assert!(jalan(&akar, &["new", "app"]).0);
+    let a = akar.join("app");
+    let jejak = akar.join("disisipi");
+    let racun = format!("--upload-pack=touch {}", jejak.display());
+    let (ok, t) = jalan(&a, &["add", "x", &format!("--git={}", racun)]);
+    assert!(!ok && t.contains("diawali `-`"), "{}", t);
+    let (ok, t) = jalan(&a, &["add", "x", "--git", &pusat, "--rev=--output=/tmp/x"]);
+    assert!(!ok && t.contains("rev"), "{}", t);
+    let (ok, t) = jalan(&a, &["add", "../lari", "--git", &pusat]);
+    assert!(!ok && t.contains("tidak sah"), "{}", t);
+    // Manifes yang ditulis tangan melewati `add`, jadi pemeriksaannya juga di pembaca manifes.
+    let m = std::fs::read_to_string(a.join("jrgm.toml")).unwrap();
+    std::fs::write(a.join("jrgm.toml"), m.replace("[dependencies]", &format!("[dependencies]\nx = {{ git = \"{}\" }}", racun))).unwrap();
+    let (ok, t) = jalan(&a, &["run"]);
+    assert!(!ok && t.contains("diawali `-`"), "{}", t);
+    std::fs::write(a.join("jrgm.toml"), &m).unwrap();
+    assert!(!jejak.exists(), "git menjalankan opsi dari url");
+
+    let (ok, t) = jalan(&a, &["add", "lain", "--git", &pusat, "--version", "0.1.0"]);
+    assert!(!ok && t.contains("paket bernama `bantu`"), "{}", t);
+    std::fs::write(a.join("jrgm.toml"), &m).unwrap();
+    assert!(jalan(&a, &["add", "bantu", "--git", &pusat, "--version", "0.1.0"]).0);
+    let kunci = std::fs::read_to_string(a.join("jrgm.lock")).unwrap();
+    let diracun = kunci.lines().map(|l| match l.rsplit_once(" = ") {
+        Some((k, _)) if k.contains(" @ ") => format!("{} = \"--output=/tmp/x\"", k),
+        _ => l.to_string(),
+    }).collect::<Vec<_>>().join("\n");
+    std::fs::write(a.join("jrgm.lock"), diracun).unwrap();
+    let (ok, t) = jalan(&a, &["run"]);
+    assert!(!ok && t.contains("bukan sidik commit"), "{}", t);
+    let _ = std::fs::remove_file(a.join("jrgm.lock"));
+
+    std::fs::create_dir_all(akar.join("luar")).unwrap();
+    assert!(jalan(&akar.join("luar"), &["new", "rahasia"]).0);
+    let luar = akar.join("luar/rahasia").display().to_string();
+    let pusat2 = terbit("lompat", Some(&format!("[dependencies]\nrahasia = {{ path = \"{}\" }}", luar)));
+    let (ok, t) = jalan(&a, &["add", "lompat", "--git", &pusat2, "--version", "0.1.0"]);
+    assert!(!ok && t.contains("di luar salinan"), "{}", t);
+    let _ = std::fs::remove_dir_all(&akar);
+}
+
 /// `jrgm lint`: galat yang sama dengan `--periksa` membuat kode keluar 1; peringatannya menyebut
 /// import yang tidak dipakai, fungsi yang tidak dipanggil, berkas uji kosong, dan berkas belum rapi.
 #[test]
@@ -2854,5 +2991,33 @@ fn lint_melapor_galat_dan_peringatan() {
     let (ok, t) = jalan(&p, &["lint"]);
     assert!(!ok && t.contains("`hantu` belum dikenal") && t.contains("main.jrg:2:"), "{}", t);
     assert!(t.contains("kosong.jrg tidak punya satu pun fungsi uji") && t.contains("belum rapi"), "{}", t);
+    let _ = std::fs::remove_dir_all(&akar);
+}
+
+/// Fase AMAN-4 (#845): nama dari `py::import("..")` dulu diserahkan ke `pip` apa adanya — `--index-url=..`
+/// jadi opsi pip, dan di jalur cadangan masuk ke kode `python3 -c "import .."`.
+#[test]
+fn paket_python_tidak_jadi_opsi_pip() {
+    let j = jrgm();
+    let akar = std::env::temp_dir().join(format!("jrg_pip_aman_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&akar);
+    std::fs::create_dir_all(&akar).unwrap();
+    let o = Command::new(&j).args(["new", "p"]).current_dir(&akar).output().unwrap();
+    assert!(o.status.success());
+    let p = akar.join("p");
+    for nama in ["--index-url=http://127.0.0.1:1/ x", "os; import os", "x @ http://127.0.0.1:1/x.whl"] {
+        std::fs::write(p.join("src").join("main.jrg"), format!(
+            "package main\npub fn main() {{ let m = py::import(\"{}\")\n wok(m) }}\n", nama)).unwrap();
+        let o = Command::new(&j).arg("build").current_dir(&p).env("JRG_SOPAN", "1").output().unwrap();
+        let teks = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+        assert!(!o.status.success() && teks.contains("tidak sah"), "{}: {}", nama, teks);
+        assert!(!teks.contains("memasang"), "pip sempat dipanggil untuk {}: {}", nama, teks);
+    }
+    let jrgc = j.with_file_name("jrgc");
+    std::fs::write(akar.join("a.jrg"), "package main\npub fn main() { wok(proses::ada(\"--version\"), proses::ada(\"sh\")) }\n").unwrap();
+    for m in [None, Some("--vm")] {
+        let o = Command::new(&jrgc).arg(akar.join("a.jrg")).args(m).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&o.stdout).trim(), "false true", "{:?}", m);
+    }
     let _ = std::fs::remove_dir_all(&akar);
 }

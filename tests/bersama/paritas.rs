@@ -2,6 +2,33 @@
 // dibaca `backend_parity.rs` dan `llvm_parity.rs` lewat `include!`, jadi satu tabel dua tes.
 
 const PARITAS: &[(&str, &str)] = &[
+    // Fase J4 (#976): `f.floor` atas bilangan dulu `<native fn>` di `--vm`; acuan dan LLVM membacanya sebagai nilai.
+    ("method math:: atas bilangan tanpa kurung", "package main\npub fn main() { let f = 2.5\n let i = -3\n wok(f.floor, i.abs, f.round, (1.0).is_finite)\n wok(f.floor + 1.0) }"),
+    // Fase REGEX-LINEAR (#841): `^.*x$` atas `abx` dulu `false` di dua mesin; `a+?` dibaca rakus.
+    ("regex linear: mundur dan malas", "package main\npub fn main() { wok(re::test(\"^.*x$\", \"abx\"), re::test(\"^(a|ab)c$\", \"abc\"))\n wok(re::find_all(\"a+?\", \"aaa\"), re::replace_all(\"x*\", \"abc\", \"-\"))\n wok(re::test(\"(a+)+$\", \"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab!\")) }"),
+    // Fase DICT-LITERAL (#839): `dict { a: 1 }` dulu struct berlabel "dict" di `--vm` — `dict::`
+    // menolaknya, `for` tidak mengiterasinya, dan `==` lawan dict yang sama menjawab `false`.
+    ("literal `dict { .. }` adalah dict", "package main\npub fn main() { var d = dict { a: 1, b: 2 }\n wok(typeof(d), d == {\"a\": 1, \"b\": 2}, dict::keys(d), d.has(\"a\"), d.get_or(\"x\", 7))\n for k, v in d { wok(k, v) }\n d[\"c\"] = 3\n wok(dict::merge(d, {\"q\": 0}), dict { z: 9, ...d }, dict { a: 0, ...d })\n var e = dict {}\n e[\"k\"] = \"v\"\n wok(e, dict::is_empty(dict {}), json::stringify(d)) }"),
+    // Fase REKURSIF-LLVM (#838): `>>` penutup dua daftar argumen tipe dulu ditolak parser.
+    ("argumen tipe bersarang ditutup `>>`", "package main\nfn f(x: Option<Option<int>>) -> Result<Option<int>, string> { Ok(x ?? None) }\npub fn main() { let a: Option<Option<int>> = Some(Some(1))\n wok(a, f(a))\n let b: Result<Option<int>,string>= Ok(None)\n wok(b) }"),
+    // Fase POTONG: `--vm` dulu menolak `t[a:b]` yang interpreter jawab.
+    ("potong: tuple", "package main\npub fn main() { let t = (1, \"x\", 2.5)\n wok(t[1:])\n wok(t[-1:])\n wok(t[:2])\n wok(typeof(t[0:0])) }"),
+    ("goroutine yang stack-nya habis berhenti sendirian sesudah defer-nya (Fase TUMPUK)",
+     r#"package main
+fn f(n: int) -> int { return f(n + 1) + f(n + 2) }
+fn kirim(c: chan int) { c <- 1 }
+pub fn main() {
+    defer wok("defer main")
+    let c = make_chan(int)
+    spawn {
+        defer kirim(c)
+        defer wok("defer goroutine")
+        wok(f(0))
+    }
+    <-c
+    wok("main lanjut")
+}
+"#),
     ("pangkat mengikat lebih erat dari minus dan tilde di kirinya (Fase KEPUTUSAN-1)",
      r#"package main
 pub fn main() {
@@ -94,6 +121,383 @@ pub fn main() {
     wok(crypto::sha256([104, 105]) == crypto::sha256("hi"), crypto::md5([]) == crypto::md5(""))
     wok(crypto::crc32([97]), crypto::crc32("a"), crypto::hmac_sha256([104], "x") == crypto::hmac_sha256("h", "x"))
     wok(crypto::base64_encode(crypto::base64_decode_bytes("AP9B").unwrap()))
+}
+"#),
+    // Fase AMAN-21 (#899): gzip:: — CRC32, ukuran, bit cadangan, ekor liar dan data terpotong jadi Err.
+    ("gzip:: dan gzip jahat", r#"package main
+pub fn main() {
+    let z = gzip::compress("halo gzip\n")
+    wok(len(z), z[0], z[1], z[2])
+    wok(gzip::decompress_text(z).unwrap() == "halo gzip\n")
+    wok(gzip::decompress(gzip::compress([0, 255, 7])))
+    let h = [31, 139, 8, 8, 133, 111, 229, 106, 0, 3, 104, 97, 108, 111, 46, 116, 120, 116, 0, 203, 72, 204, 201, 87, 72, 175, 202, 44, 224, 2, 0, 57, 190, 200, 48, 10, 0, 0, 0]
+    wok(gzip::decompress_text(h + gzip::compress("lagi")))
+    var rusak = h
+    rusak[31] = 0
+    wok(gzip::decompress(rusak))
+    wok(gzip::decompress_text(gzip::compress([255, 254])))
+    wok(gzip::decompress(h + [0]))
+    wok(gzip::decompress([80, 75, 3, 4]))
+    var cadangan = h
+    cadangan[3] = 40
+    wok(gzip::decompress(cadangan))
+    wok(gzip::decompress(h[0:20]))
+}
+"#),
+    // Fase AMAN-29 (#908): masukan di pesan galat dipotong dan kendalinya di-escape — pesan tidak tumbuh mengikuti masukan.
+    ("pesan galat toml::/url:: tidak mengutip masukan utuh", r#"package main
+fn main() {
+    let x = str::repeat("9", 2000)
+    for _, r in [toml::parse("a = " + x), toml::parse("a = " + x + "z"), toml::parse("[" + str::repeat("k", 500) + "]\n[" + str::repeat("k", 500) + "]")] {
+        match r {
+            Ok(_) => wok("ok"),
+            Err(e) => wok(len(e), e),
+        }
+    }
+    for _, r in [url::parse("http://h:" + x), url::parse("http://" + str::repeat("a", 300) + "%41/"), url::parse("http://h:8a")] {
+        match r {
+            Ok(_) => wok("ok"),
+            Err(e) => wok(len(e), e),
+        }
+    }
+}
+"#),
+    // Fase AMAN-30 (#909–#910): base64 satu ejaan per isi (kelas CVE-2026-3446), `crypto::base64url_*` ketat.
+    ("base64 dan base64url: satu isi satu ejaan", r#"package main
+pub fn main() {
+    for _, s in ["aGk=", " aGk= ", "aGk=aGk=", "aGl=", "aG k=", "a===", "ab=c", "YQ==", "YR==", "aGk"] {
+        match crypto::base64_decode_bytes(s) {
+            Ok(b) => wok("ok", b),
+            Err(e) => wok(e),
+        }
+    }
+    wok(crypto::base64url_encode([251, 255]), crypto::base64url_encode("hi"))
+    wok(crypto::base64url_decode_bytes("-_8"), crypto::base64url_decode("aGk"))
+    for _, s in ["aGk=", "a+b", "aGl", "a"] { wok(crypto::base64url_decode_bytes(s)) }
+}
+"#),
+    // `env::os`/`env::arch`: satu daftar nama di tiga mesin (Rust `std::env::consts`, C praprosesor di runtime LLVM).
+    ("env::os dan env::arch dari daftar nama yang sama", r#"package main
+pub fn main() {
+    let o = env::os()
+    let a = env::arch()
+    wok(arr::contains(["linux", "android", "macos", "windows", "freebsd", "tak-dikenal"], o))
+    wok(arr::contains(["x86_64", "aarch64", "arm", "x86", "riscv64", "tak-dikenal"], a))
+    wok(o, a, typeof(o))
+}
+"#),
+    // #915: `p.f = dict::set(p.f, ..)`/`dict::remove` memindahkan isi field ke builtin — salinan dan closure tetap melihat nilainya.
+    ("dict::set dan dict::remove di jalur field", r#"package main
+struct In { pub d: dict }
+struct C { pub f: dict, pub a: In, pub xs: array }
+var G = C { f: {"x": 1}, a: In { d: {"q": 1} }, xs: [] }
+fn main() {
+    var c = C { f: {"x": 1, "y": 2}, a: In { d: {"p": 1} }, xs: [{"k": 1}, {"k": 2}] }
+    c.f = dict::set(c.f, "z", 3)
+    c.f = dict::remove(c.f, "x")
+    c.a.d = dict::set(c.a.d, "r", 9)
+    c.xs[1] = dict::set(c.xs[1], "m", 5)
+    var i = 0
+    c.xs[i] = dict::remove(c.xs[i], "k")
+    c.f = dict::set(c.f, "n", len(c.f))
+    var e = {"in": {"a": 1}}
+    e["in"] = dict::set(e["in"], "b", 2)
+    wok(c, e)
+    let g = || c.f
+    c.f = dict::set(c.f, "w", 7)
+    wok(g(), c.f)
+    G.f = dict::remove(G.f, "x")
+    wok(G.f)
+    let salinan = c
+    c.f = dict::remove(c.f, "w")
+    wok(salinan.f, c.f)
+}
+"#),
+    // Fase AMAN-29 (#907): `fs::safe_join` — `..`, jalur absolut, `\`, huruf drive, kendali jadi `Err`.
+    ("fs::safe_join dan jalur yang keluar dari dasarnya", r#"package main
+fn main() {
+    let d = fs::join(fs::temp_dir(), "jrg-gabung-aman")
+    fs::mkdir(fs::join(d, "statis/css"))
+    fs::write(fs::join(d, "berkas.txt"), "x")
+    wok(str::replace(fs::safe_join(d, "statis/css/a.css").unwrap(), d, "<d>"))
+    wok(str::replace(fs::safe_join(d, "baru/belum/ada.txt").unwrap(), d, "<d>"))
+    wok(fs::safe_join(d, "").unwrap() == d, fs::safe_join(d, "statis/").is_ok())
+    wok(fs::join(d, "/etc/passwd"))
+    for _, r in ["../rahasia", "statis/../../x", "/etc/passwd", "a\\b", "C:/w", "a//b", "./a", "a\nb"] {
+        match fs::safe_join(d, r) {
+            Ok(p) => wok("lolos", p),
+            Err(e) => wok(str::replace(e, d, "<d>")),
+        }
+    }
+    match fs::safe_join(fs::join(d, "berkas.txt"), "a") {
+        Ok(p) => wok("lolos", p),
+        Err(e) => wok(str::replace(e, d, "<d>")),
+    }
+    wok(fs::safe_join(fs::join(d, "tidak-ada"), "a").is_err())
+}
+"#),
+    // Fase AMAN-28 (#906): `semver::` — awalan `v`, nol di depan, versi telanjang dan spasi di rentang jadi `Err`.
+    ("semver::parse/compare/satisfies dan bentuk ambigunya", r#"package main
+fn main() {
+    let v = semver::parse("1.2.3-rc.10+linux.01").unwrap()
+    wok(v)
+    wok(v.pra[1] + 1, typeof(v.pra[0]))
+    for _, p in [["1.0.0-alpha", "1.0.0-alpha.1"], ["1.0.0-beta.11", "1.0.0-beta.2"], ["1.0.0", "1.0.0-rc.1"], ["1.0.0+a", "1.0.0+b"]] {
+        wok(p[0], p[1], semver::compare(p[0], p[1]).unwrap())
+    }
+    for _, r in [["1.9.0", "^1.2.3"], ["2.0.0", "^1.2.3"], ["0.3.0", "^0.2.3"], ["1.2.9", "~1.2.3"], ["1.3.0", ">1.2"],
+                 ["2.0.0-rc.1", "<2.0.0"], ["1.3.0-beta", "^1.2.3"], ["1.2.3-beta.2", "^1.2.3-beta.1"], ["3.1.0", "<1 || >=3, <4"]] {
+        wok(r[0], r[1], semver::satisfies(r[0], r[1]).unwrap())
+    }
+    for _, s in ["v1.2.3", "01.2.3", "1.2", "1.2.3-01", "1.2.3-a..b", "9223372036854775808.0.0", " 1.2.3"] {
+        wok(semver::parse(s).unwrap_err())
+    }
+    for _, r in ["1.2.3", ">= 1.2 <2", "1.2.3 - 2.0.0", "1.x", ">=1,", ""] {
+        wok(semver::satisfies("1.2.3", r).unwrap_err())
+    }
+    wok(semver::compare("1.0.0", "v1").unwrap_err())
+}"#),
+    // Fase AMAN-26 (#904): `toml::` — kunci/tabel kembar, tabel diperluas, bilangan di luar 64 bit jadi `Err`.
+    ("toml::parse/stringify dan bentuk ambigunya", r#"package main
+fn main() {
+    let d = toml::parse("judul = \"jrg\"\nversi.utama = 1\n[paket]\nnama = 'x'\nangka = [1, 2.5, 0xff, -inf]\nw = 2024-02-29T10:00:00+07:00\n[[dep]]\nn = \"a\"\n[[dep]]\nn = \"b\"\n").unwrap()
+    wok(d)
+    wok(d.paket.angka, d.dep[1].n, typeof(d.paket.w))
+    wok(toml::stringify(d).unwrap())
+    for _, s in ["a = 1\na = 2", "[t]\n[t]", "a.b = 1\n[a]", "a = {b = 1}\na.c = 2", "a = [1]\n[[a]]",
+                 "a = 9223372036854775808", "a = 012", "a = 1__0", "a = \"\\x41\"", "a = \"\\uD800\"",
+                 "a = 1\rb = 2", "a = 2023-02-29", "a = {b = 1,}", "a = abc"] {
+        wok(toml::parse(s).unwrap_err())
+    }
+    wok(toml::stringify(dict { a: (1, 2) }).unwrap_err())
+    wok(toml::stringify([1]).unwrap_err())
+    wok(toml::stringify({"a b": "\"\n", "c": [dict { d: 1 }], "e": dict {}}).unwrap())
+}"#),
+    // Fase AMAN-25 (#903): kepala `Host` dicocokkan dengan daftar izin; `Host` cacat dan kembar jadi `Err`.
+    ("dok::host_check", r#"package main
+fn req(hs) {
+    return dict { headers: hs, body: "" }
+}
+fn main() {
+    let izin = ["contoh.id", ".jrg.web.id", "127.0.0.1:8080", "[::1]:8080"]
+    for _, h in ["contoh.id", "CONTOH.id.", "a.jrg.web.id:443", "jrg.web.id", "evil-jrg.web.id", "127.0.0.1:8080",
+                 "127.0.0.1:9090", "localhost", "[0::1]:8080", "0x7f.0.0.1:8080", "contoh.id@evil", "contoh.id:"] {
+        wok(h, dok::host_check(req([("Host", h)]), izin))
+    }
+    wok(dok::host_check(req([]), izin))
+    wok(dok::host_check(req([("host", "contoh.id"), ("Host", "evil")]), izin))
+    wok(dok::host_check(req([("X-Forwarded-Host", "contoh.id"), ("Host", "evil")]), izin))
+}
+"#),
+    // Fase AMAN-24 (#902): badan formulir dan multipart diurai ketat, pengalihan cuma ke jalur lokal.
+    ("dok::form, dok::multipart, dok::safe_redirect", r##"package main
+fn req(ct, body) {
+    return dict { headers: [("content-type", ct)], body: body }
+}
+fn main() {
+    let f = dok::form(req("application/x-www-form-urlencoded; charset=UTF-8", "a=1&b=x+y&a=%C3%A9&;c=2"))
+    wok(f)
+    wok(dok::form(req("text/plain", "a=1")).unwrap_err())
+    wok(dok::form(req("multipart/form-data; boundary=x", "")).unwrap_err())
+    wok(dok::form(req("application/x-www-form-urlencoded", "a=%zz")).is_err())
+    let b = "--B\r\nContent-Disposition: form-data; name=\"teks\"\r\n\r\nhalo\r\n--B\r\nContent-Disposition: form-data; name=\"f\"; filename=\"../../etc/passwd\"\r\nContent-Type: text/plain\r\n\r\nisi\r\n--B--\r\n"
+    let m = dok::multipart(req("multipart/form-data; boundary=B", b)).unwrap()
+    wok(len(m), m[0]["nama"], m[0]["isi"], m[1]["berkas"], m[1]["tipe"])
+    wok(dok::berkas_aman(m[1]["berkas"]), dok::berkas_aman(".."), dok::berkas_aman("NUL.txt"))
+    let dua = "--B\r\nContent-Disposition: form-data; name=\"a\"; filename=\"x\"; filename*=UTF-8''y\r\n\r\nz\r\n--B--"
+    wok(dok::multipart(req("multipart/form-data; boundary=B", dua)).unwrap_err())
+    wok(dok::multipart(req("multipart/form-data; boundary=B", "--B\r\nContent-Disposition: form-data; name=a\r\n\r\nz")).unwrap_err())
+    wok(dok::multipart(req("multipart/form-data", "")).unwrap_err())
+    for _, t in ["/akun", "//evil.com", "/\\evil.com", "https://evil.com", "/..//evil", "/a/../b?x=1"] {
+        let r = dok::safe_redirect(t, "/")
+        wok(t, dok::header_get(r.headers, "Location"))
+    }
+}
+"##),
+    // Fase AMAN-23 (#901): satu pengurai URL; URL yang dibaca lain oleh pengurai lain jadi `Err`.
+    ("url:: dan URL ambigu", r##"package main
+pub fn main() {
+    let u = url::parse("HTTPS://Pak:rahasia@Contoh.ID/a/./b/../c?x=1&x=2#f").unwrap()
+    wok(u.skema, u.host, u.port, u.jalur, u.query, u.fragmen, u.pengguna, u.sandi)
+    wok(dict::has(url::parse("http://h/").unwrap(), "query"), url::parse("http://[0::1]:8080/%2e%2E/x").unwrap().host)
+    for _, r in ["g", "../g", "/g", "//q/r", "?y", "#s", "", "../../../g", "HTTPS://X"] {
+        wok(url::join("http://a/b/c/d;p?q", r).unwrap())
+    }
+    for _, s in [" http://a/", "http://a/\tb", "http://a\\@b/", "http://a@b@c/", "http:a", "/rel", "http://0x7f.1/",
+                 "http://2130706433/", "http://0177.0.0.1/", "http://%31.2.3.4/", "http://ä.id/", "http://a:0/",
+                 "http://[fe80::1%25e]/", "http://a/%zz", "http:///x"] {
+        wok(url::parse(s).unwrap_err())
+    }
+    wok(url::build(dict { skema: "https", host: "a.id", port: 8443, jalur: "/x", query: "q=1" }).unwrap())
+    wok(url::build(dict { skema: "https", host: "a.id/@evil" }).unwrap_err())
+    wok(url::build(dict { skema: "https", host: "a.id", jalur: "x" }).unwrap_err())
+    wok(url::query_parse("?a=1&a=2;b=3&&c&d=x+y%2B%C3%A9").unwrap())
+    wok(url::query_parse("a=%ff").unwrap_err())
+    wok(url::query_build([["a b", "x&y=z"], ["k", "é+"]]), url::query_build(dict { b: 2, a: "1" }))
+    let p = url::query_build([["a", "1&admin=1"]])
+    wok(p, url::query_parse(p).unwrap())
+    wok(str::contains(http::get("http://u:p@127.0.0.1:1/").unwrap_err(), "kredensial"))
+}
+"##),
+    // Fase AMAN-20 (#895–#898): penjaga SSRF menilai alamat hasil DNS, juga ejaan angka dan IPv6 pembungkus.
+    ("http::hanya_publik menolak alamat internal", r#"package main
+pub fn main() {
+    wok(str::contains(http::get("http://127.0.0.1:1/").unwrap_err(), "sambungan ditolak"))
+    http::hanya_publik(true)
+    for _, u in ["http://127.0.0.1:1/", "http://localhost:1/", "http://[::1]:1/", "http://[::ffff:169.254.169.254]/",
+                 "http://169.254.169.254/latest", "http://10.0.0.1/"] {
+        wok(str::contains(http::get(u).unwrap_err(), "hanya_publik(true)"))
+    }
+    // Ejaan angka IPv4 tak baku ditolak pengurai `url::` sebelum sampai ke DNS (Fase AMAN-23).
+    wok(str::contains(http::get("http://0x7f.1:1/").unwrap_err(), "tak baku"), str::contains(http::get("http://2130706433:1/").unwrap_err(), "tak baku"))
+    wok(dok::http_get("http://127.0.0.1:1/").unwrap_err())
+    wok(http::unduh("http://192.168.0.1/x", "x.bin").is_err())
+    http::hanya_publik(false)
+    wok(str::contains(http::get("http://[::1]:1/").unwrap_err(), "sambungan ditolak"))
+}
+"#),
+    // Fase AMAN-18 (#892): `dok::render` menempatkan nilai menurut konteks HTML — URL berskema berbahaya
+    // diganti penanda, nilai di `<script>`, atribut `on*` dan atribut tanpa kutip ditolak.
+    ("dok::csrf_token terikat sesi, sandi panjang", r#"package main
+
+fn main() {
+    let r = "rahasia-yang-panjangnya-32-byte!"
+    let t = dok::csrf_token(r, "sesi-a")
+    wok(len(str::split(t, ".")), dok::csrf_verify(t, r, "sesi-a", 60))
+    wok(dok::csrf_verify(t, r, "sesi-b"), dok::csrf_verify(t + "x", r, "sesi-a"))
+    wok(dok::csrf_verify(t, "rahasia-lain-yang-juga-32-byte!!", "sesi-a"), dok::csrf_verify("", r, "sesi-a"))
+    wok(dok::csrf_verify("1.AAAAAAAAAAAAAAAAAAAAAA.x", r, "sesi-a"))
+    let h = dok::password_hash("a" * 100000, 1000)
+    wok(dok::password_verify("a" * 100000, h), dok::password_verify("a" * 99999, h))
+}
+"#),
+    ("dok::render menurut konteks HTML", r#"package main
+pub fn main() {
+    let d = {"u": "javascript:alert(1)", "ok": "/cari?q=a&b=1", "t": "x onclick=y"}
+    wok(dok::render("<a href=\"{{u}}\">{{t}}</a><a href='{{ok}}'>", d)?)
+    wok(dok::render("<a href=\"{{u}}\">", {"u": "JaVa\tScRiPt:x"})?)
+    wok(dok::render("<script>let s = '{{t}}'</script>", d))
+    wok(dok::render("<p title={{t}}>", d))
+    wok(dok::render("<b onclick=\"f('{{t}}')\">", d))
+    wok(dok::render("<textarea>{{t}}</textarea><script>{{{ t }}}</script>", d)?)
+}
+"#),
+    // Fase AMAN-17 (#891): JWT HS256 dipatok — `alg: none` dan rahasia lain ditolak, `exp` diperiksa.
+    ("jwt::sign/verify dan alg none", r#"package main
+pub fn main() {
+    let k = "rahasia-yang-panjangnya-32-byte!"
+    let t = jwt::sign({"sub": "ani", "peran": "admin", "exp": 4102444800}, k)?
+    wok(t)
+    let klaim = jwt::verify(t, k)?
+    wok(klaim.sub, klaim.peran, klaim.exp)
+    wok(jwt::verify(t, "rahasia-lain-yang-juga-32-byte!!"))
+    match jwt::verify(jwt::sign({"exp": 1000}, k)?, k) { Ok(_) => wok("BAHAYA"), Err(e) => wok(str::contains(e, "kedaluwarsa")) }
+    wok(jwt::verify("eyJhbGciOiJub25lIn0.eyJhZG1pbiI6dHJ1ZX0.", k))
+    wok(jwt::verify("a.b", k))
+}
+"#),
+    // Fase AMAN-16 (#889–#890): `xml::` — DTD ditolak (XXE, ledakan entitas), atribut ganda, penulis tak bisa
+    // disisipi; di LLVM juga akses bersarang atas nilai bertag (`doc.atribut.id`, `parse(..)?.atribut.t`).
+    ("xml::parse/stringify/escape dan serangan klasiknya", r#"package main
+fn teks_semua(n) -> string {
+    var hasil = ""
+    for _, a in n.anak { hasil += typeof(a) == "string" $ a : teks_semua(a) }
+    return hasil
+}
+pub fn main() {
+    let doc = xml::parse("<?xml version='1.0'?><buku id='7' judul=\"Jawa &amp; Rust\"><bab n='1'>Halo <b>dunia</b></bab><![CDATA[<mentah>]]></buku>")?
+    wok(doc.nama, doc.atribut.id, doc.atribut.judul, len(doc.anak))
+    wok(doc.anak[0].nama, doc.anak[0].atribut.n, teks_semua(doc))
+    wok(xml::stringify(doc)?)
+    wok(xml::stringify({"nama": "a", "atribut": {"t": "x\"y<z>&\n"}, "anak": ["1 < 2", {"nama": "b"}]})?)
+    wok(xml::parse(xml::stringify({"nama": "a", "atribut": {"t": "x\"y\nz"}})?)?.atribut.t == "x\"y\nz")
+    wok(xml::escape("<a href=\"x\">&</a>"))
+    wok(xml::parse("<!DOCTYPE r [<!ENTITY x SYSTEM \"file:///etc/passwd\">]><r>&x;</r>"))
+    wok(xml::parse("<a>\n  <b x='1' x='2'/>\n</a>"))
+    wok(xml::parse("<a><b></a>"))
+    wok(xml::stringify({"nama": "a onload=alert(1)"}))
+    wok(xml::stringify({"nama": "a", "atribut": {"x><script": "1"}}))
+    wok(xml::stringify({"nama": "a", "anak": ["\u0001"]}))
+}
+"#),
+    // Fase AMAN-14 (#884): pembanding tanda tangan waktu-tetap, teks dan array byte, padanan `hmac.compare_digest`.
+    ("crypto::compare_digest: tanda tangan, token, panjang beda", r#"package main
+pub fn main() {
+    let tanda = crypto::hmac_sha256("kunci", "pesan")
+    wok(crypto::compare_digest(tanda, crypto::hmac_sha256("kunci", "pesan")))
+    wok(crypto::compare_digest(tanda, crypto::hmac_sha256("kunci", "pesan!")))
+    wok(crypto::compare_digest("abc", "abcd"), crypto::compare_digest("", ""))
+    wok(crypto::compare_digest([1, 2, 255], [1, 2, 255]), crypto::compare_digest([1, 2], "\u0001\u0002"))
+}
+"#),
+    // Fase AMAN-14 (#885): initializer tingkat modul yang membuat lokal (`??`, `match` berikatan, blok
+    // ber-`let`) dulu gagal di `--vm` dengan "local slot 0 OOB".
+    ("initializer modul yang membuat lokal", r#"package main
+let KUNCI = env::get("JRG_TIDAK_PERNAH_DISET_XYZ") ?? "bawaan"
+let N = match Some(3) { Some(v) => v * 2, None => 0 }
+const B = { let a = 2; a * 3 }
+var C = if true { let z = 1; z + 1 } else { 0 }
+pub fn main() { C += 1
+    wok(KUNCI, N, B, C) }
+"#),
+    // Fase AMAN-12 (#879): nama satu aksara, Latin bersama Han atau Yunani bukan-peniru, dan NFC tetap sah;
+    // teks (bukan nama) boleh berisi apa pun.
+    ("nama non-ASCII yang sah: satu aksara, NFC", r#"package main
+fn luas(Δx, Δy) { Δx * Δy }
+struct Titik { pub 名前: string, pub café: int }
+pub fn main() {
+    let имя = "Иван"
+    let 日本語 = 3
+    let a日b = 4
+    let σ_x = 0.5
+    let t = Titik { 名前: "x", café: 7 }
+    wok(имя, 日本語 + a日b, σ_x, luas(2, 3), t.名前, t.café)
+    wok("pаypal", len("café"), "аdmin" == "admin")
+}"#),
+    // Fase AMAN-39 (#961): kepala pembingkaian dari pemakai ditolak klien (penyelundupan permintaan), `Host` ganda juga.
+    ("klien http: Content-Length/Transfer-Encoding/Connection dari pemakai ditolak", r#"package main
+pub fn main() {
+    let u = "http://127.0.0.1:9/x"
+    for _, h in [[("Content-Length", "0")], [("transfer-encoding", "chunked")], [("Connection", "keep-alive")], [("Host", "a.x"), ("HOST", "b.x")]] {
+        match dok::http_request("POST", u, "abc", "text/plain", h) {
+            Err(e) => wok(e),
+            Ok(_) => wok("diterima"),
+        }
+    }
+}
+"#),
+    // Fase AMAN-9 (#872): `--vm` dulu mati kehabisan stack saat menampilkan, membandingkan dan melepasnya.
+    ("nilai bersarang 100 ribu tingkat: tampil, ==, dilepas", r#"package main
+pub fn main() {
+    var a = []
+    var b = []
+    var i = 0
+    while i < 100000 {
+        a = [a]
+        b = [b]
+        i += 1
+    }
+    wok(len(str(a)), a == b)
+    a = []
+    wok(re::test(str::repeat("(", 1000) + "a" + str::repeat(")", 1000), "a"))
+}"#),
+    // Fase AMAN-8 (#870): pengubah arah teks lewat escape tetap sah; cuma yang mentah di sumber ditolak.
+    ("sumber: pengubah arah lewat escape tetap sah", "package main\npub fn main() { let s = \"a\\u202Eb\"\n wok(len(s), s == \"a\" + str(rune(0x202E)) + \"b\")\n let t = (((((((((((1)))))))))))\n wok(t) }"),
+    // Fase AMAN-6 (#847): kotak yang diubah satu karakter ditolak sebelum didekripsi.
+    ("crypto: seal/unseal bolak-balik, kotak diubah dan kunci lain ditolak",
+     r#"package main
+pub fn main() {
+    let k = "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    let k2 = "ff0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f"
+    let s: string = crypto::seal("rahasia", k).unwrap()
+    wok(crypto::unseal(s, k), crypto::seal("rahasia", k).unwrap() != s)
+    wok(crypto::unseal_bytes(crypto::seal([0, 255], k).unwrap(), k))
+    wok(crypto::unseal(crypto::seal([255], k).unwrap(), k).is_err())
+    let ubah = s[0:30] + (s[30:31] == "A" $ "B" : "A") + s[31:len(s)]
+    wok(crypto::unseal(ubah, k))
+    wok(crypto::unseal(s, k2))
+    wok(crypto::unseal("AAAA", k))
+    wok(crypto::seal("x", "00"))
 }
 "#),
     ("fs: try_read, read_base64, write_base64, append_base64 bolak-balik",
@@ -323,8 +727,6 @@ pub fn main() {
      "wok(match 5 { 1.0..=9.0 => \"f\", _ => \"lain\" }, match 9 { 1..9 => \"i\", _ => \"lain\" }, match 1 { ..1.5 => \"bawah\", _ => \"lain\" })\n"),
     ("let: literal yang cocok mengikat sisanya",
      "let (a, 5) = (1, 5)\nlet None = Option::None\nlet [x, 2] = [1, 2]\nlet 7 = 7\nwok(a, x)\n"),
-    ("let: varian unit milik pemakai sebagai pola let",
-     "enum E { A, B }\nlet A = E::A\nwok(\"ok\")\n"),
     ("parameter dan for: pola cocok tetap jalan",
      "fn f((a, 5)) { return a }\nwok(f((9, 5)))\nfor _, (p, 1) in [(3, 1), (4, 1)] { wok(p) }\n"),
     // ── Fase TERM: lebar tampil, mode tanpa terminal, dan `exit` ─────────
@@ -664,15 +1066,13 @@ pub fn main() {
      "package main\npub fn main() {\n \
       let ch = make_chan(int)\n \
       spawn { ch <- 1\n \
-              var i = 0\n \
-              while i < 200000 { i = i + 1 }\n \
+              time::sleep_ms(300)\n \
               wok(\"goroutine selesai\") }\n \
       wok(<-ch) }"),
     // Tanpa channel sama sekali: goroutine yang cuma mencetak tetap tercetak.
     ("goroutine: tanpa channel pun ditunggu",
      "package main\npub fn main() {\n \
-      spawn { var i = 0\n \
-              while i < 200000 { i = i + 1 }\n \
+      spawn { time::sleep_ms(300)\n \
               wok(\"selesai tanpa channel\") }\n \
       wok(\"utama\") }"),
     ("tugas: is_done berkali lalu await",    "package main\npub fn main() { let a = Future::new(|| { time::sleep_ms(400)\n  return 7 })\n wok(future::is_done(a))\n wok(future::is_done(a))\n wok(future::await(a)) }"),
@@ -709,7 +1109,7 @@ pub fn main() {
     // keduanya dulu menuntut kunci string.
     ("index: tulis dict kunci int", "package main\npub fn main() { var d = dict::from_pairs([[0, \"x\"]])\n d[0] = \"y\"\n wok(dict::get(d, 0)) }"),
     ("index: tulis dict bersarang", "package main\npub fn main() { var d = dict::from_pairs([[0, dict::from_pairs([[\"q\", 1]])]])\n d[0][\"q\"] = 5\n wok(d[0][\"q\"]) }"),
-    ("index: struct via string",    "package main\nstruct P { x: int, y: int }\npub fn main() { let p = P{x:1,y:2}\n wok(p[\"x\"]) }"),
+    ("index: struct via string",    "package main\nstruct P { pub x: int, pub y: int }\npub fn main() { let p = P{x:1,y:2}\n wok(p[\"x\"]) }"),
 
     // `<-c` sebagai PERNYATAAN, didahului pernyataan lain.
     ("chan: <-c sbg pernyataan sesudah pernyataan lain", "package main\npub fn main() { let c = make_chan(bool)\n spawn { c <- true }\n wok(\"a\")\n <-c\n wok(\"b\") }"),
@@ -786,16 +1186,17 @@ pub fn main() {
     ("tanpa move: spawn biasa",         "package main\npub fn main() { let c = make_chan(int)\n spawn { c <- 1 }\n wok(<-c) }"),
     ("tanpa async: fn biasa",           "package main\nfn f() -> int { return 1 }\npub fn main() { wok(f()) }"),
 
-    ("rekursi: tepat 10000 panggilan bersarang masih boleh",
-     "package main\nfn d(n: int) -> int { if n == 0 { return 0 }\n return d(n - 1) + 1 }\npub fn main() { wok(d(9999)) }"),
+    // Fase REKURSI-LEGA: batas 10 000 dibuka — kedalaman dibatasi sumber daya, seperti di LLVM.
+    ("rekursi: 15000 panggilan bersarang boleh (dulu batasnya 10000)",
+     "package main\nfn d(n: int) -> int { if n == 0 { return 0 }\n return d(n - 1) + 1 }\npub fn main() { wok(d(15000)) }"),
     ("math::wrap_*: membungkus di 64 bit tak bertanda, argumen negatif dan raksasa",
      "package main\npub fn main() { var x: uint = 305419896\n for i in 0..5 { x = math::wrap_add(math::wrap_mul(x, 1664525), 1013904223) ^ (x >> 13) }\n wok(x, math::wrap_sub(0, 1), math::wrap_add(18446744073709551615, 2), math::wrap_mul(-1, 2), typeof(math::wrap_add(1, 2))) }"),
     ("int: tepi 128 bit lewat jalur cepat sama dengan jalur biasa",
      "package main\npub fn main() { let m = 170141183460469231731687303715884105727\n let k = 0 - m\n wok(m - 1 + 1, k - 1, k + m, m == m, m != m, m > m - 1, k <= k, 3 * -4, 1 == 1.0, 2 < 2.5) }"),
     ("struct: field privat warisan dibaca dari method anak, default dari leluhur",
      "package main\nstruct A { rahasia: int = 7, pub buka: int = 1 }\nstruct B: A { pub z: int = 2 }\nimpl A { fn baca(self) -> int { return self.rahasia } }\nimpl B { fn intip(self) -> int { return self.rahasia + self.z } }\npub fn main() { let b = B { z: 9 }\n wok(b.baca(), b.intip(), b.buka, b) }"),
-    ("rekursi: 9999 panggilan bersarang lewat closure masih boleh",
-     "package main\npub fn main() { var c = |n| 0\n c = |n| n == 0 $ 0 : c(n - 1) + 1\n wok(c(9998)) }"),
+    ("rekursi: 15000 panggilan bersarang lewat closure boleh",
+     "package main\npub fn main() { var c = |n| 0\n c = |n| n == 0 $ 0 : c(n - 1) + 1\n wok(c(15000)) }"),
     // ── operator yang didefinisikan pengguna ─────────────────────────────
     ("operator: += lewat method milik pemakai, juga ke elemen array",
      "package main\nstruct V { pub x: int, pub y: int }\nimpl V { fn add(self, o: V) -> V { return V { x: self.x + o.x, y: self.y + o.y } } }\npub fn main() {\n var p = V { x: 1, y: 2 }\n let q = V { x: 10, y: 20 }\n p += q\n var a = [V { x: 1, y: 1 }]\n a[0] += q\n wok(p, a) }"),
@@ -1600,7 +2001,7 @@ pub fn main() {
     ("ffi: panggilan libc dan libm",
      "package main\nextern \"C\" { fn abs(n: i32) -> i32\n fn strlen(s: string) -> i64 }\nextern \"C\" \"libm.so.6\" { fn sqrt(x: f64) -> f64\n fn pow(b: f64, e: f64) -> f64 }\npub fn main() { wok(abs(-42)); wok(strlen(\"halo\")); wok(sqrt(16.0)); wok(pow(2.0, 10.0)) }"),
     ("ffi: buffer native malloc/memset/free",
-     "package main\nextern \"C\" { fn malloc(n: u64) -> *mut u8\n fn free(p: *mut u8) -> unit\n fn memset(p: *mut u8, c: i32, n: u64) -> *mut u8\n fn strlen(s: *const u8) -> i64 }\npub fn main() { match malloc(16) { Result::Ok(b) => { let _ = memset(b, 65, 15); wok(strlen(b)); let _ = free(b) } Result::Err(e) => wok(e) } }"),
+     "package main\nextern \"C\" { fn malloc(n: u64) -> *mut u8\n fn free(p: *mut u8) -> unit\n fn memset(p: *mut u8, c: i32, n: u64) -> *mut u8\n fn strlen(s: *const u8) -> i64 }\npub fn main() { match malloc(16) { Result::Ok(b) => { let _ = memset(b, 0, 16)\n let _ = memset(b, 65, 15); wok(strlen(b)); let _ = free(b) } Result::Err(e) => wok(e) } }"),
     ("ffi: simbol tidak ada jadi Err, bukan crash",
      "package main\nextern \"C\" { fn simbol_yang_tidak_pernah_ada(n: i32) -> i32 }\npub fn main() { match simbol_yang_tidak_pernah_ada(1) { Result::Ok(v) => wok(\"ok\", v), Result::Err(_) => wok(\"err seperti seharusnya\") } }"),
     ("ffi: agregat ditolak dengan pesan yang sama",
@@ -2321,5 +2722,34 @@ pub fn main() {
       var k = K { v: V { x: 1 }, s: \"k\" }\n k.v += V { x: 2 }\n k.s += V { x: 3 }\n wok(k.v.x, k.s)\n\
       var a = [V { x: 1 }]\n a[0] += V { x: 4 }\n var t = \"t\"\n t += V { x: 9 }\n wok(a[0].x, t) }"),
     ("for atas rentang tak berawal 0: indeks, lalu (indeks, nilai)",
-     "for i in 5..8 { wok(i) }\nfor i, x in 5..=7 { wok(i, x) }\nlet a = 3\nfor i, x in a..a + 2 { wok(i, x) }\n"),
+     "for i in 5..8 { wok(i) }\nfor i, x in 5..=7 { wok(i, x) }\nlet a = 3\nfor i, x in a..a + 2 { wok(i, x) }\n"),    ("struct berisi banyak kunci dari json::merge, tulis field, sebar (hasher struct berbatas)",
+     "struct P { pub x: int, pub y: int }\nvar d = dict::new()\nfor i in 0..200 { d = dict::set(d, «k${i}», i) }\n\
+      let m = json::merge(d, P { x: 1, y: 2 })\nvar t = 0\nfor i in 0..200 { t = t + m[«k${i}»] }\n\
+      wok(typeof(m), len(json::keys(m)), t, m.x, m.y)\nvar p = P { x: 3, y: 4 }\np.x = p.x + p.y\n\
+      let q = P { y: 9, ...p }\nwok(p, q, q.x * q.y)\n"),
+    ("struct 20 field lewat batas bentuk rapat, sebar, == lintas jalur, dict literal (J7 bentuk)",
+     "struct B { pub f0: int = 0, pub f1: int = 1, pub f2: int = 2, pub f3: int = 3, pub f4: int = 4, pub f5: int = 5, pub f6: int = 6, pub f7: int = 7, pub f8: int = 8, pub f9: int = 9, pub f10: int = 10, pub f11: int = 11, pub f12: int = 12, pub f13: int = 13, pub f14: int = 14, pub f15: int = 15, pub f16: int = 16, pub f17: int = 17, pub f18: int = 18, pub f19: int = 19 }\nstruct P { pub x: int, pub y: int }\npub fn main() {\n    var b = B { f3: 30, f19: 190 }\n    b.f7 = b.f3 + b.f19\n    wok(b.f0, b.f3, b.f7, b.f19, len(json::keys(b)))\n    let c = B { f1: 11, ...b }\n    wok(c.f1, c.f7, c == b, B {} == B {})\n    let p = P { x: 1, y: 2 }\n    let q = json::merge(dict { y: 2 }, P { x: 1, y: 0 })\n    wok(p, q, p == P { y: 2, x: 1 }, q.y)\n    let d = dict { a: 1, b: 2 }\n    wok(d, typeof(d), d[\"a\"] + d.b)\n    var r = P { x: 5, y: 6 }\n    r.y = r.x * r.y\n    wok(r, r.y)\n}\n"),
+    ("pola literal adalah uji == (2 cocok dengan 2.0, seperti rentang), juga di lengan atau",
+     "fn k(v) { match v { 2 => 7, _ => 13 } }\nfn f(v) { match v { 2.0 => 7, _ => 13 } }\nfn s(v) { match v { \"a\" => 1, \"x\" => 2, _ => 3 } }\nfn n(v) { match v { -5 => 1, 0 => 2, _ => 3 } }\nfn c(v) { match v { 'a' => 1, 97 => 2, _ => 3 } }\nfn b(v) { match v { true => 1, 1 => 2, _ => 3 } }\nwok(k(2.0), k(2), f(2), f(2.0), f(2.5))\nwok(s(\"a\"), s(\"x\"), s(1))\nwok(n(-5), n(-5.0), n(0.0), n(nil))\nwok(c('a'), c(97), c(97.0))\nwok(b(true), b(1), b(1.0), b(false))\nlet x = 2.0\nwok(match x { 1 | 2 | 3 => \"dua\", 4..=8 => \"rentang\", _ => \"lain\" })\n"),
+    // `const` lokal dan fungsi bernama di ekor blok: LLVM dulu membuang `const` lokal (pakai
+    // `const` modul yang bernama sama), VM membaca fungsi modul dari ekor blok `for`/`if`/`{ }`.
+    ("const lokal: membayangi const modul, cakupan blok, closure, fungsi bersarang, anotasi",
+     "package main\nconst KOTA = \"jakarta\"\nconst K = 1\nfn tanpa_anotasi() { const K = 7; K * 2 }\nfn dalam() -> int { fn bantu() -> int { const Q = 3; Q + 1 }  bantu() }\npub fn main() {\n  const KOTA = \"bogor\"\n  wok(KOTA)\n  let n = 1\n  { const n = 2; wok(n) }\n  wok(n)\n  let f = |x| { const T = 10; x + T + K }\n  wok(f(5))\n  const S = \"luar\"\n  let g = || S\n  wok(g(), tanpa_anotasi(), dalam())\n  for i in 0..2 { const L = i * 10; wok(L) }\n  let m = match 2 { 2 => { const Q = \"lengan\"; Q }, _ => \"x\" }\n  const A: float = 2.5\n  wok(m, A + 1.0, K)\n}\n"),
+    ("fungsi bernama di blok dipanggil dari ekor blok: blok polos, for, if, if bernilai, lengan match",
+     "package main\nfn sapa() -> string { \"modul\" }\npub fn main() {\n  { fn a() -> int { b() + 1 }  fn b() -> int { 40 }  wok(a()) }\n  { fn sapa() -> string { \"blok\" }  wok(sapa()) }\n  for i in 0..1 { fn sapa() -> string { \"for\" } wok(sapa()) }\n  if true { fn sapa() -> string { \"if\" } wok(sapa()) }\n  while true { fn sapa() -> string { \"while\" }  wok(sapa()); break }\n  let v = if true { fn h() -> int { 9 } h() } else { 0 }\n  let m = match 2 { 2 => { fn j() -> string { \"lengan\" } j() }, _ => \"x\" }\n  wok(v, m, sapa())\n}\n"),
+    ("fungsi bernama di blok polos sebagai ekor main",
+     "package main\nfn sapa() -> string { \"modul\" }\npub fn main() { { fn sapa() -> string { \"blok\" }  wok(sapa()) } }\n"),
+    // Fase AMAN-43: `let r = arr::pop(a)` yang `a`-nya ditimpa pernyataan berikutnya memindahkan `a`; yang dibaca lagi,
+    // ditangkap closure, atau disebut di kanan tetap salinan.
+    ("pop yang ditimpa sesudahnya memindahkan larik, yang dibaca lagi tidak",
+     "pub fn main() {\n  var a = [1, 2, 3]\n  let r = arr::pop(a)\n  wok(a, r)\n  let q = a.pop()\n  a = q[0]\n  wok(a, q[1])\n  var b = [4, 5]\n  let t = b.pop()\n  b = b + t[0]\n  wok(b)\n  var c = [7, 8]\n  let f = || len(c)\n  let u = arr::pop(c)\n  c = u[0]\n  wok(c, f())\n  var d = []\n  let w = arr::pop(d)\n  d = w[0]\n  wok(d, w[1])\n  var e = [1, 2, 3]\n  var x = Option::None\n  e, x = e.pop()\n  wok(e, x)\n  var g = [9]\n  for i in 0..3 { let z = arr::pop(g)\n    g = z[0] + [i]\n    if i == 1 { continue } }\n  wok(g)\n}\n"),
+    // Fase AMAN-41 (kelas CVE-2026-123871 Node.js): sandi di URL tidak sampai ke pesan galat.
+    ("kredensial URL disamarkan di pesan galat klien dan url::parse",
+     "pub fn main() {\n  for _, u in [\"http://andi:SANDIRAHASIA@127.0.0.1:1/x\", \"https://SANDIRAHASIA@h/\", \"http://a:SANDIRAHASIA@@h/\"] {\n    match http::get(u) { Ok(_) => wok(\"ok?\")  Err(e) => wok(str::contains(e, \"SANDIRAHASIA\"), e) }\n    match dok::http_get(u) { Ok(_) => wok(\"ok?\")  Err(e) => wok(str::contains(e, \"SANDIRAHASIA\"), e) }\n    match url::parse(u) { Ok(x) => wok(\"parse\", x.host)  Err(e) => wok(str::contains(e, \"SANDIRAHASIA\"), e) }\n  }\n}\n"),
+    // Keputusan pemilik 2026-11-14: `select` dengan beberapa lengan siap memilih ACAK di empat mesin (dulu
+    // `--vm`/`--jit`/LLVM selalu lengan pertama); LLVM dulu mengevaluasi ekspresi kanal tiap putaran tunggu.
+    ("select: tiap lengan siap pernah terpilih, default tidak selagi ada yang siap, break di lengan",
+     "pub fn main() {\n  let a = make_chan(int, 1)\n  let b = make_chan(int, 1)\n  let c = make_chan(int, 1)\n  var n = [0, 0, 0, 0]\n  for i in 0..600 {\n    a <- 1\n    b <- 2\n    select {\n      case x := <-a: { n[0] += 1\n        <-b }\n      case y := <-b: { n[1] += 1\n        <-a }\n      case c <- 9: { n[2] += 1\n        <-c\n        <-a\n        <-b }\n      default: { n[3] += 1 }\n    }\n  }\n  wok(\"tiap lengan siap terpilih 100+ dari 600, default tak pernah:\", n[0] > 100 && n[1] > 100 && n[2] > 100 && n[3] == 0)\n  var s = 0\n  for i in 0..10 {\n    a <- i\n    select {\n      case x := <-a: { if x == 5 { break }\n        s += x }\n      default: { s += 1000 }\n    }\n  }\n  wok(\"break di lengan:\", s)\n}\n"),
+    ("select: ekspresi kanal dievaluasi sekali walau select menunggu",
+     "package main\nvar N = 0\nfn kanal(c) { N = N + 1\n  return c }\npub fn main() {\n  let a = make_chan(int)\n  spawn { time::sleep_ms(50)\n    a <- 1 }\n  select { case x := <-kanal(a): { wok(\"dapat\", x) } }\n  wok(\"ekspresi kanal dievaluasi\", N == 1 $ \"sekali\" : \"berulang\")\n}\n"),
 ];

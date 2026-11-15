@@ -141,7 +141,7 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Rune(char),
-    Str(String),
+    Str(std::sync::Arc<String>),
     Unit,
     Nil,
     Array(Isi),
@@ -239,6 +239,9 @@ pub(crate) fn channel_try_recv(chan: &ChannelHandle) -> Result<Value, bool> {
 }
 
 impl Value {
+    /// Teks baru. Isinya `Arc`: membaca variabel teks berbagi isinya, tidak menyalin (dulu O(panjang)).
+    pub fn teks(s: impl Into<String>) -> Value { Value::Str(std::sync::Arc::new(s.into())) }
+
     /// Apakah nilai ini bisa DIPANGGIL — satu jawaban untuk tiap pintu yang menerima
     /// fungsi; dulu tiap pintu punya daftarnya sendiri dan konstruktor terlewat.
     pub fn bisa_dipanggil(&self) -> bool {
@@ -289,6 +292,9 @@ impl Value {
 
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if crate::interpreter::stack_menipis() == Some(true) {
+            return f.write_str(&crate::interpreter::di_stack_lega(|| self.to_string()));
+        }
         match self {
             Value::Int(n)    => write!(f, "{}", n),
             Value::Float(n)  => {
@@ -381,10 +387,7 @@ pub enum ArgAngka { Bulat(i128), Pecahan(f64), Lain(String) }
 fn bulat_dari(nama: &str, ke: usize, a: &ArgAngka) -> Result<i128, String> {
     match a {
         ArgAngka::Bulat(n) => Ok(*n),
-        ArgAngka::Pecahan(f) => Err(format!(
-            "{}: argumen ke-{} butuh bilangan bulat, dapat pecahan `{}` — kalau memang \
-             mau dipotong, tulis eksplisit: `{} as int`",
-            nama, ke, Value::Float(*f), Value::Float(*f))),
+        ArgAngka::Pecahan(f) => Err(pesan_bukan_bulat_ke(nama, ke, &Value::Float(*f).to_string())),
         ArgAngka::Lain(t) => Err(format!(
             "{}: argumen ke-{} butuh bilangan bulat, dapat `{}`", nama, ke, t)),
     }
@@ -1103,6 +1106,14 @@ pub fn pesan_neg_min() -> String {
             i128::MIN)
 }
 
+/// `main` yang berakhir dengan `Err`/`None` (lewat nilai baliknya atau `?`): satu kalimat untuk
+/// tiga mesin. `isi` sudah berbentuk `": muatan"` atau kosong.
+pub fn pesan_main_gagal(tipe: &str, varian: &str, isi: &str) -> String {
+    format!("program berhenti karena `{}::{}` merambat keluar dari `main`{} — tangani dengan `match` di \
+             dalam `main`, atau pakai `.unwrap_or(...)`, kalau kegagalan ini memang boleh terjadi",
+            tipe, varian, isi)
+}
+
 /// Operator aritmetika integer yang meluap — SATU kalimat; dulu interpreter dan VM
 /// masing-masing punya kalimatnya sendiri untuk kesalahan yang sama.
 pub fn pesan_luber(op: &str, x: i128, y: i128) -> String {
@@ -1145,14 +1156,49 @@ pub fn pesan_koalesensi_bukan_option(tipe: &str) -> String {
              `x == nil $ bawaan : x`", tipe)
 }
 
+/// Thread untuk goroutine tidak bisa dibuat — satu kalimat untuk dua mesin.
+pub fn pesan_goroutine_tak_dibuat(e: &std::io::Error) -> String {
+    crate::host::tanpa_thread("goroutine", e)
+        .unwrap_or_else(|| format!("goroutine tidak bisa dibuat: {}", crate::host::galat_io(e)))
+}
+
+/// Arti nilai kembali `main` menurut ANOTASINYA (keputusan pemilik: `main -> int` adalah kode keluar). Tanpa
+/// anotasi nilai ekornya dibuang — `fs::delete(f)` di baris terakhir tidak boleh jadi kode keluar atau galat.
+pub enum KembaliMain { Buang, Kode, Tolak(String) }
+
+pub fn kembali_main(te: Option<&crate::parser::TypeExpr>) -> KembaliMain {
+    use crate::parser::{PrimTy as P, TypeExpr as T};
+    let nama = match te {
+        None | Some(T::Inferred) => return KembaliMain::Buang,
+        Some(T::Tuple(v)) if v.is_empty() => return KembaliMain::Buang,
+        Some(T::Primitive(P::Unit)) => return KembaliMain::Buang,
+        Some(T::Primitive(p)) => match p {
+            P::F32 | P::F64 | P::F128 => "float",
+            P::C64 | P::C128 => "complex",
+            P::Bool => "bool",
+            P::Rune => "rune",
+            P::Str | P::String_ => "string",
+            _ => return KembaliMain::Kode,
+        }.to_string(),
+        Some(T::Named(n)) if n.name == "Option" || n.name == "Result" => return KembaliMain::Buang,
+        Some(T::Named(n)) => crate::ruang_tipe::bersih(&n.name).to_string(),
+        Some(T::Array(_)) | Some(T::Slice(_)) => "array".to_string(),
+        Some(T::Map(_)) => "dict".to_string(),
+        Some(T::Tuple(_)) => "tuple".to_string(),
+        Some(T::Fn(_)) => "function".to_string(),
+        Some(T::Chan(_)) => "channel".to_string(),
+        Some(_) => "nilai itu".to_string(),
+    };
+    KembaliMain::Tolak(crate::host::pesan_main_bukan_kode(&nama))
+}
+
 /// Rekursi yang melewati batas kedalaman — kalimat yang sama di tiga mesin.
-pub fn pesan_rekursi_dalam(nama: &str, batas: usize) -> String {
-    format!("rekursi terlalu dalam di fungsi `{}` — sudah lebih dari {} panggilan bersarang \
-             dan belum berhenti juga.\n  \
+pub fn pesan_rekursi_dalam(nama: &str) -> String {
+    format!("rekursi terlalu dalam di fungsi `{}` — stack habis sebelum rekursinya berhenti.\n  \
              bantuan: pastikan ada kondisi berhenti (base case) yang PASTI tercapai, \
              dan tiap panggilan rekursif bergerak mendekatinya\n  \
              catatan: kalau memang butuh kedalaman sebesar ini, ubah jadi perulangan \
-             (`while`/`for`) — itu tidak memakai stack per iterasi", nama, batas)
+             (`while`/`for`) — itu tidak memakai stack per iterasi", nama)
 }
 
 /// `a, b = e` dengan `e` yang bukan tuple — satu kalimat untuk tiga mesin.
@@ -1191,6 +1237,26 @@ pub fn pesan_bagi_nol(op: &str, kiri: &str) -> String {
     }
 }
 
+/// Karakter ke-`i` (negatif dari belakang) tanpa `Vec<char>` seluruh teks; `Err(panjang)` di luar batas.
+/// Indeks tak negatif yang ada cuma berjalan sampai ke sana — panjangnya dihitung kalau perlu saja.
+pub fn karakter_ke(s: &str, i: i128) -> Result<char, usize> {
+    if let Ok(j) = usize::try_from(i) {
+        if let Some(c) = s.chars().nth(j) { return Ok(c); }
+    }
+    let n = s.chars().count();
+    match normal_indeks(i, n, false) {
+        Some(j) => s.chars().nth(j).ok_or(n),
+        None => Err(n),
+    }
+}
+
+/// `s[awal..akhir]` dalam KARAKTER (batas sudah diperiksa, `n` panjangnya) sebagai potongan bita.
+pub fn potong_karakter(s: &str, n: usize, awal: usize, akhir: usize) -> &str {
+    if n == s.len() { return &s[awal..akhir]; }
+    let bita = |k: usize| if k >= n { s.len() } else { s.char_indices().nth(k).map_or(s.len(), |(b, _)| b) };
+    &s[bita(awal)..bita(akhir)]
+}
+
 /// Pesan index di luar batas untuk builtin `arr::`.
 /// Index argumen builtin dengan aturan `a[i]`: negatif dihitung dari belakang (`-1` = terakhir).
 /// `sisip` (`insert`) boleh menunjuk satu lewat ujung; di luar itu `None`, tidak pernah dijepit.
@@ -1214,6 +1280,12 @@ pub fn pesan_bukan_bulat(nama: &str, tipe: &str, pecahan: Option<&str>) -> Strin
              tulis eksplisit: `{} as int`", nama, p, p),
         None => format!("{}: butuh bilangan bulat, dapat `{}`", nama, tipe),
     }
+}
+
+/// Seperti [`pesan_bukan_bulat`], untuk builtin yang menyebut NOMOR argumennya (`range`).
+pub fn pesan_bukan_bulat_ke(nama: &str, ke: usize, pecahan: &str) -> String {
+    format!("{}: argumen ke-{} butuh bilangan bulat, dapat pecahan `{}` — kalau memang \
+             mau dipotong, tulis eksplisit: `{} as int`", nama, ke, pecahan, pecahan)
 }
 
 pub fn pesan_ukuran_tak_masuk_akal(nama: &str, apa: &str, dapat: i128) -> String {
@@ -1338,11 +1410,6 @@ pub fn pesan_zip_kurang() -> String {
 
 pub fn pesan_rotate_kurang() -> String {
     "arr::rotate butuh (arr, n) — n>0 geser ke kiri, n<0 ke kanan".to_string()
-}
-
-/// Pesan `arr::rotate` yang diberi `n` bukan bilangan bulat.
-pub fn pesan_rotate_n(tipe: &str) -> String {
-    format!("arr::rotate: `n` harus bilangan bulat, dapat `{}`", tipe)
 }
 
 pub fn pesan_elemen_bukan_angka(nama: &str, tipe: &str) -> String {
@@ -1565,7 +1632,7 @@ pub fn err_value(msg: impl Into<String>) -> Value {
     Value::Enum {
         type_name: "Result".to_string(),
         variant: "Err".to_string(),
-        payload: Some(Box::new(Value::Str(msg.into()))),
+        payload: Some(Box::new(Value::Str(std::sync::Arc::new(msg.into())))),
     }
 }
 

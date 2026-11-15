@@ -42,6 +42,13 @@ pub fn register(vm: &mut Vm) {
     vm.def("dok::session_decode",       |a| lewat_hasil(a, crate::dok::web::session_decode));
     vm.def("dok::password_hash",        |a| lewat_hasil(a, crate::dok::web::password_hash));
     vm.def("dok::password_verify",      |a| lewat_hasil(a, crate::dok::web::password_verify));
+    vm.def("dok::csrf_token",           |a| lewat_hasil(a, crate::dok::web::csrf_token));
+    vm.def("dok::csrf_verify",          |a| lewat_hasil(a, crate::dok::web::csrf_verify));
+    vm.def("dok::form",                 |a| lewat_hasil(a, crate::dok::form::form));
+    vm.def("dok::multipart",            |a| lewat_hasil(a, crate::dok::form::multipart));
+    vm.def("dok::berkas_aman",          |a| lewat_hasil(a, crate::dok::form::berkas_aman));
+    vm.def("dok::safe_redirect",        |a| lewat_hasil(a, crate::dok::form::safe_redirect));
+    vm.def("dok::host_check",           |a| lewat_hasil(a, crate::dok::form::host_check));
     vm.def("dok::render",               |a| lewat_hasil(a, crate::dok::web::render));
     vm.def("dok::render_file",          |a| lewat_hasil(a, crate::dok::web::render_file));
     vm.def("dok::escape_html",          |a| lewat_hasil(a, crate::dok::web::escape_html));

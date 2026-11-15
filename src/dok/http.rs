@@ -4,7 +4,7 @@ use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Mutex, OnceLock};
 
 use crate::interpreter::{err_value, none_value, ok_value, some_value, Interpreter, RuntimeError, Signal, Value};
@@ -96,7 +96,7 @@ pub(crate) fn url_decode_teks(s: &str) -> Option<String> { String::from_utf8(url
 /// dari dua nilai ini terisi, supaya byte biner tidak pernah sampai sebagai teks rusak.
 pub(crate) fn badan_nilai(b: Vec<u8>) -> (Value, Value) {
     match String::from_utf8(b) {
-        Ok(t) => (Value::Str(t), Value::Nil),
+        Ok(t) => (Value::Str(std::sync::Arc::new(t)), Value::Nil),
         Err(e) => (Value::Nil, super::crypto::byte_ke_array(e.into_bytes())),
     }
 }
@@ -138,7 +138,7 @@ fn url_decode_byte(s: &str) -> Vec<u8> {
 
 pub fn url_encode(args: &[Value]) -> Result<Value, String> {
     match args.get(0) {
-        Some(Value::Str(s)) => Ok(Value::Str(url_encode_str(s))),
+        Some(Value::Str(s)) => Ok(Value::Str(std::sync::Arc::new(url_encode_str(s)))),
         other => Err(format!("dok::url_encode(s): butuh string, dapat `{}`",
             other.map(|v| v.type_name()).unwrap_or_else(|| "tidak ada argumen".to_string()))),
     }
@@ -146,7 +146,7 @@ pub fn url_encode(args: &[Value]) -> Result<Value, String> {
 
 pub fn url_decode(args: &[Value]) -> Result<Value, String> {
     match args.get(0) {
-        Some(Value::Str(s)) => url_decode_teks(s).map(Value::Str).ok_or_else(|| format!(
+        Some(Value::Str(s)) => url_decode_teks(s).map(Value::teks).ok_or_else(|| format!(
             "dok::url_decode: byte hasil `%XX` di `{}` bukan teks UTF-8 yang sah", s)),
         other => Err(format!("dok::url_decode(s): butuh string, dapat `{}`",
             other.map(|v| v.type_name()).unwrap_or_else(|| "tidak ada argumen".to_string()))),
@@ -156,12 +156,14 @@ pub fn url_decode(args: &[Value]) -> Result<Value, String> {
 /// Pasangan query; `None` kalau satu `%XX`-nya bukan teks (permintaannya dijawab 400).
 fn parse_query(qs: &str) -> Option<Vec<Value>> {
     if qs.is_empty() { return Some(Vec::new()); }
+    // Batas yang sama dengan `url::query_parse`; lebih dari itu dijawab 400.
+    if qs.split('&').filter(|p| !p.is_empty()).nth(crate::stdlib::url::MAKS_PASANGAN).is_some() { return None; }
     qs.split('&').filter(|p| !p.is_empty()).map(|pair| {
         let (k, v) = match pair.split_once('=') {
             Some((k, v)) => (url_decode_teks(k)?, url_decode_teks(v)?),
             None => (url_decode_teks(pair)?, String::new()),
         };
-        Some(Value::Tuple(vec![Value::Str(k), Value::Str(v)].into()))
+        Some(Value::Tuple(vec![Value::Str(std::sync::Arc::new(k)), Value::Str(std::sync::Arc::new(v))].into()))
     }).collect()
 }
 
@@ -201,7 +203,7 @@ pub fn query_get(args: &[Value]) -> Result<Value, String> {
     for item in arr {
         if let Value::Tuple(t) = item {
             if let (Some(Value::Str(k)), Some(v)) = (t.get(0), t.get(1)) {
-                if k == name { return Ok(some_value(v.clone())); }
+                if k.as_str() == name { return Ok(some_value(v.clone())); }
             }
         }
     }
@@ -209,17 +211,6 @@ pub fn query_get(args: &[Value]) -> Result<Value, String> {
 }
 
 // ─── CLIENT ─────────────────────────────────────────────────────────────
-
-/// `host` atau `host:port` dari sebuah URL. Port yang tidak sah DITOLAK — dulu diam-diam
-/// jadi 80, jadi permintaannya sampai ke layanan lain.
-pub fn urai_host_port(bagian: &str) -> Result<(String, u16), String> {
-    let Some(titik) = bagian.rfind(':') else { return Ok((bagian.to_string(), 80)) };
-    let teks = &bagian[titik + 1..];
-    match teks.parse::<u16>() {
-        Ok(p) if p > 0 => Ok((bagian[..titik].to_string(), p)),
-        _ => Err(format!("port `{}` tidak sah — yang sah 1 sampai 65535", teks)),
-    }
-}
 
 fn http_request_raw(method: &str, url: &str, body: &str, ctype: &str, extra_headers: &[(String, String)]) -> Result<Value, String> {
     let mut kepala: Vec<(String, String)> = Vec::new();
@@ -240,8 +231,8 @@ fn parse_http_response(resp: &[u8]) -> Result<Value, String> {
     for line in head.lines().skip(1) {
         if let Some(colon) = line.find(':') {
             headers.push(Value::Tuple(vec![
-                Value::Str(line[..colon].trim().to_lowercase()),
-                Value::Str(line[colon + 1..].trim().to_string()),
+                Value::Str(std::sync::Arc::new(line[..colon].trim().to_lowercase())),
+                Value::Str(std::sync::Arc::new(line[colon + 1..].trim().to_string())),
             ].into()));
         }
     }
@@ -258,7 +249,7 @@ fn parse_http_response(resp: &[u8]) -> Result<Value, String> {
 
 /// Isi yang DIRENDER (body): nilai apa pun ditampilkan, seperti `wok`.
 fn str_arg(v: Option<&Value>) -> String {
-    match v { Some(Value::Str(s)) => s.clone(), Some(other) => format!("{}", other), None => String::new() }
+    match v { Some(Value::Str(s)) => String::clone(&s.clone()), Some(other) => format!("{}", other), None => String::new() }
 }
 
 /// Argumen opsional yang harus teks (content type): yang salah tipe dulu diam-diam
@@ -266,7 +257,7 @@ fn str_arg(v: Option<&Value>) -> String {
 fn teks_opsional(v: Option<&Value>, fungsi: &str, ke: usize, bawaan: &str) -> Result<String, String> {
     match v {
         None => Ok(bawaan.to_string()),
-        Some(Value::Str(c)) => Ok(c.clone()),
+        Some(Value::Str(c)) => Ok(String::clone(&c.clone())),
         Some(lain) => Err(crate::interpreter::pesan_arg_harus_teks(
             fungsi, &format!("argumen ke-{}", ke), &lain.type_name())),
     }
@@ -318,7 +309,7 @@ pub fn http_request(args: &[Value]) -> Result<Value, String> {
         None => Vec::new(),
         Some(Value::Array(a)) => a.iter().enumerate().map(|(i, v)| match v {
             Value::Tuple(t) if t.len() == 2 => match (&t[0], &t[1]) {
-                (Value::Str(k), Value::Str(val)) => Ok((k.clone(), val.clone())),
+                (Value::Str(k), Value::Str(val)) => Ok((String::clone(k), String::clone(val))),
                 _ => Err(format!("dok::http_request: header ke-{} harus pasangan (nama, nilai) \
                                   yang dua-duanya teks", i)),
             },
@@ -348,7 +339,7 @@ fn make_response_badan(status: i128, body: Vec<u8>, content_type: &str, headers:
     fields.insert("status".to_string(), Value::Int(status));
     fields.insert("body".to_string(), teks);
     fields.insert("body_bytes".to_string(), byte);
-    fields.insert("content_type".to_string(), Value::Str(content_type.to_string()));
+    fields.insert("content_type".to_string(), Value::Str(std::sync::Arc::new(content_type.to_string())));
     fields.insert("headers".to_string(), Value::Array(headers.into()));
     Value::Struct { name: "DokResponse".to_string(), fields: fields.into() }
 }
@@ -398,7 +389,15 @@ pub fn redirect(args: &[Value]) -> Result<Value, String> {
         Some(lain) => return Err(format!(
             "dok::redirect: argumen ke-2 (status) harus bilangan bulat, dapat `{}`", lain.type_name())),
     };
-    Ok(make_response(status, String::new(), "text/plain", vec![Value::Tuple(vec![Value::Str("Location".to_string()), Value::Str(url)].into())]))
+    // Kode lain tidak membuat peramban berpindah, jadi `Location`-nya diam-diam tak terpakai.
+    if !matches!(status, 301 | 302 | 303 | 307 | 308) {
+        return Err(format!("dok::redirect: status {} bukan kode pengalihan — yang sah 301, 302, 303, 307, 308", status));
+    }
+    if let Some(i) = url.bytes().position(|c| c < 0x20 || c == 0x7f) {
+        return Err(format!("dok::redirect: URL tujuannya memuat karakter kendali di posisi {} — kepala `Location` \
+                            bisa disisipi", i));
+    }
+    Ok(make_response(status, String::new(), "text/plain", vec![Value::Tuple(vec![Value::Str(std::sync::Arc::new("Location".to_string())), Value::Str(url)].into())]))
 }
 
 // ─── SERVER: router registry ────────────────────────────────────────────
@@ -438,6 +437,16 @@ struct RouterData {
 static ROUTERS: OnceLock<Mutex<HashMap<u64, RouterData>>> = OnceLock::new();
 fn routers() -> &'static Mutex<HashMap<u64, RouterData>> {
     ROUTERS.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// Jalur yang dibaca SAMA oleh router dan oleh pemeriksa izin di middleware: router membuang segmen kosong dan
+/// mencocokkan sesudah `%XX` dibongkar, jadi `//x`, `/./x` dan `%2F` membuat `starts_with(req.path, "/x")` tidak
+/// melihat rute yang tetap dicocokkan (kelas missing authorization, CWE-862). Bentuk itu ditolak 400 di pintu.
+pub(crate) fn jalur_satu_ejaan(mentah: &str, jalur: &str) -> bool {
+    let kecil = mentah.to_ascii_lowercase();
+    if !jalur.starts_with('/') || jalur.contains('\\') || kecil.contains("%2f") || kecil.contains("%5c") { return false; }
+    let seg: Vec<&str> = jalur[1..].split('/').collect();
+    seg.iter().enumerate().all(|(i, s)| *s != "." && *s != ".." && (!s.is_empty() || i == seg.len() - 1))
 }
 
 fn compile_pattern(path: &str) -> Vec<PatSeg> {
@@ -592,6 +601,35 @@ struct ParsedRequest {
     headers: Vec<(String, String)>,
     query: Vec<Value>,
     body: Vec<u8>,
+    /// Bagian anggaran badan yang dipegang permintaan ini sampai koneksinya selesai.
+    _pesanan: Pesanan,
+}
+
+/// Byte badan yang sedang dipegang semua koneksi; anggarannya `MAKS_BADAN_SERENTAK`.
+static BADAN_TERPAKAI: AtomicUsize = AtomicUsize::new(0);
+/// N badan sebesar `MAKS_BADAN` sekaligus dulu menghabiskan memori, dan alokasi yang gagal menghentikan server.
+pub const MAKS_BADAN_SERENTAK: usize = 256 * 1024 * 1024;
+/// Koneksi hidup paling banyak; sisanya dijawab 503 tanpa membuat utas.
+pub const MAKS_SAMBUNGAN: usize = 512;
+const PENUH: Tolak = (503, "Service Unavailable");
+
+/// Potongan anggaran yang dikembalikan saat dilepas.
+struct Pesanan { hitung: &'static AtomicUsize, n: usize }
+
+impl Pesanan {
+    fn baru(hitung: &'static AtomicUsize) -> Self { Pesanan { hitung, n: 0 } }
+    /// Menambah `k` byte kalau totalnya tetap di bawah `batas`.
+    fn tambah(&mut self, k: usize, batas: usize) -> bool {
+        let ok = self.hitung
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| t.checked_add(k).filter(|b| *b <= batas))
+            .is_ok();
+        if ok { self.n += k; }
+        ok
+    }
+}
+
+impl Drop for Pesanan {
+    fn drop(&mut self) { self.hitung.fetch_sub(self.n, Ordering::AcqRel); }
 }
 
 /// Batas permintaan masuk. Tanpa ini satu klien menentukan berapa memori yang dipesan server.
@@ -599,6 +637,30 @@ const MAKS_BARIS: usize = 8 * 1024;
 const MAKS_HEADER: usize = 100;
 pub const MAKS_BADAN: usize = 64 * 1024 * 1024;
 const TUNGGU_PERMINTAAN: std::time::Duration = std::time::Duration::from_secs(30);
+/// Tiap byte yang datang menambah tenggat seluruh permintaan sebesar 1/`LAJU_MIN` detik.
+const LAJU_MIN: f64 = 4096.0;
+
+/// Batas tunggu per `read` saja dulu bisa ditahan klien yang menetes satu byte tiap 25 s (Slowloris,
+/// kelas CVE-2018-12122) — 512 koneksi seperti itu membuat server menjawab 503 ke semua orang.
+struct Tenggat { s: TcpStream, mulai: std::time::Instant, dibaca: u64, tunggu: std::time::Duration }
+
+impl Tenggat {
+    fn baru(s: TcpStream, tunggu: std::time::Duration) -> Self {
+        Tenggat { s, mulai: std::time::Instant::now(), dibaca: 0, tunggu }
+    }
+}
+
+impl Read for Tenggat {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let batas = self.mulai + self.tunggu + std::time::Duration::from_secs_f64(self.dibaca as f64 / LAJU_MIN);
+        let sisa = batas.saturating_duration_since(std::time::Instant::now());
+        if sisa.is_zero() { return Err(std::io::ErrorKind::TimedOut.into()); }
+        self.s.set_read_timeout(Some(sisa.min(self.tunggu)))?;
+        let n = self.s.read(buf)?;
+        self.dibaca += n as u64;
+        Ok(n)
+    }
+}
 
 /// Permintaan yang ditolak sebelum sampai ke handler: status dan kalimatnya.
 type Tolak = (i128, &'static str);
@@ -608,6 +670,12 @@ fn galat_baca(e: std::io::Error) -> Tolak {
         std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut => (408, "Request Timeout"),
         _ => (400, "Bad Request"),
     }
+}
+
+/// Isi baris tanpa CRLF penutupnya; LF tanpa CR dan CR telanjang di tengah jadi `None` (dibaca lain oleh proxy).
+fn tanpa_crlf(s: &str) -> Option<&str> {
+    let isi = s.strip_suffix("\r\n")?;
+    (!isi.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0)).then_some(isi)
 }
 
 /// Satu baris, paling panjang `MAKS_BARIS` byte; `None` = koneksi sudah ditutup.
@@ -620,19 +688,34 @@ fn baca_baris<R: BufRead>(reader: &mut R, lewat: Tolak) -> Result<Option<String>
 }
 
 fn parse_request<R: BufRead>(reader: &mut R) -> Result<ParsedRequest, Tolak> {
+    parse_request_dgn(reader, &BADAN_TERPAKAI, MAKS_BADAN_SERENTAK)
+}
+
+fn parse_request_dgn<R: BufRead>(reader: &mut R, hitung: &'static AtomicUsize, batas: usize) -> Result<ParsedRequest, Tolak> {
     const SALAH: Tolak = (400, "Bad Request");
     let line = baca_baris(reader, (414, "URI Too Long"))?.ok_or(SALAH)?;
-    let line = line.trim_end();
-    let mut parts = line.split_whitespace();
-    let method = parts.next().unwrap_or("").to_string();
-    let target = parts.next().unwrap_or("/").to_string();
-    if method.is_empty() { return Err(SALAH); }
+    let line = tanpa_crlf(&line).ok_or(SALAH)?;
+    // RFC 9112 §3: tepat `metode SP target SP versi`; tab, spasi ganda, bagian keempat dan bentuk absolut dibaca
+    // lain oleh proxy (kelas request smuggling), jadi ditolak.
+    let mut parts = line.split(' ');
+    let (Some(method), Some(target), Some(versi), None) = (parts.next(), parts.next(), parts.next(), parts.next())
+        else { return Err(SALAH) };
+    if !nama_kepala_sah(method) || !target.starts_with('/') || target.bytes().any(|b| b < 0x21 || b == 0x7f) {
+        return Err(SALAH);
+    }
+    match versi {
+        "HTTP/1.1" | "HTTP/1.0" => {}
+        v if v.starts_with("HTTP/") => return Err((505, "HTTP Version Not Supported")),
+        _ => return Err(SALAH),
+    }
+    let (method, target) = (method.to_string(), target.to_string());
 
     let (raw_path, query_string) = match target.split_once('?') {
         Some((p, q)) => (p.to_string(), q.to_string()),
         None => (target.clone(), String::new()),
     };
     let path = url_decode_teks(&raw_path).ok_or(SALAH)?;
+    if !jalur_satu_ejaan(&raw_path, &path) { return Err(SALAH); }
     let query = parse_query(&query_string).ok_or(SALAH)?;
 
     let besar: Tolak = (431, "Request Header Fields Too Large");
@@ -640,12 +723,22 @@ fn parse_request<R: BufRead>(reader: &mut R) -> Result<ParsedRequest, Tolak> {
     let mut content_length: Option<usize> = None;
     loop {
         let hline = baca_baris(reader, besar)?.ok_or(SALAH)?;
-        let hline = hline.trim_end();
+        let hline = tanpa_crlf(&hline).ok_or(SALAH)?;
         if hline.is_empty() { break; }
         if headers.len() >= MAKS_HEADER { return Err(besar); }
-        if let Some(colon) = hline.find(':') {
-            let k = hline[..colon].trim().to_lowercase();
-            let v = hline[colon + 1..].trim().to_string();
+        // RFC 9112 §5: nama tanpa spasi sebelum `:`, tanpa lipatan baris — dua bentuk yang dibaca lain oleh proxy.
+        let Some(colon) = hline.find(':') else { return Err(SALAH) };
+        if !nama_kepala_sah(&hline[..colon]) { return Err(SALAH); }
+        {
+            let k = hline[..colon].to_lowercase();
+            let v = hline[colon + 1..].trim_matches(|c| c == ' ' || c == '\t').to_string();
+            // RFC 9110 §5.5: kendali selain tab di nilai kepala ditolak, tidak diteruskan ke handler.
+            if v.bytes().any(|b| (b < 0x20 && b != b'\t') || b == 0x7f) { return Err(SALAH); }
+            // RFC 9112 §3.2: `Host` kembar atau tak sah dijawab 400.
+            if k == "host" && (headers.iter().any(|(n, _): &(String, String)| n == "host")
+                || crate::stdlib::url::urai_kepala_host(&v).is_err()) { return Err(SALAH); }
+            // Badan berpotongan belum dibaca server ini: dulu badannya diam-diam kosong.
+            if k == "transfer-encoding" { return Err((501, "Not Implemented")); }
             if k == "content-length" {
                 // Cuma digit: `parse` sendiri menerima `+5`, dan yang tak terbaca dulu dianggap 0.
                 if v.is_empty() || !v.bytes().all(|b| b.is_ascii_digit()) { return Err(SALAH); }
@@ -659,13 +752,25 @@ fn parse_request<R: BufRead>(reader: &mut R) -> Result<ParsedRequest, Tolak> {
     }
 
     // Badan dibaca sebanyak yang DATANG, bukan dipesan dulu sebesar yang diaku klien.
+    // Anggarannya dipesan per potongan yang datang, jadi klien yang diam tidak memegang lebih dari yang ia kirim.
     let mut buf = Vec::new();
+    let mut pesanan = Pesanan::baru(hitung);
     let n = content_length.unwrap_or(0);
-    if n > 0 {
-        (&mut *reader).take(n as u64).read_to_end(&mut buf).map_err(galat_baca)?;
-        if buf.len() != n { return Err(SALAH); }
+    let mut potongan = [0u8; 64 * 1024];
+    while buf.len() < n {
+        let mau = (n - buf.len()).min(potongan.len());
+        let k = reader.read(&mut potongan[..mau]).map_err(galat_baca)?;
+        if k == 0 { return Err(SALAH); }
+        if !pesanan.tambah(k, batas) || buf.try_reserve(k).is_err() { return Err(PENUH); }
+        buf.extend_from_slice(&potongan[..k]);
     }
-    Ok(ParsedRequest { method, path, query_string, headers, query, body: buf })
+    // Badan yang bukan teks jadi array `Value` sebyte satu (`body_bytes`), jadi harganya dihitung sebesar itu.
+    if std::str::from_utf8(&buf).is_err() {
+        let harga = n.saturating_mul(std::mem::size_of::<Value>());
+        if harga.saturating_add(n) > batas { return Err((413, "Payload Too Large")); }
+        if !pesanan.tambah(harga, batas) { return Err(PENUH); }
+    }
+    Ok(ParsedRequest { method, path, query_string, headers, query, body: buf, _pesanan: pesanan })
 }
 
 fn status_reason(status: i128) -> &'static str {
@@ -678,7 +783,7 @@ fn status_reason(status: i128) -> &'static str {
         409 => "Conflict", 410 => "Gone", 413 => "Payload Too Large", 414 => "URI Too Long", 415 => "Unsupported Media Type",
         422 => "Unprocessable Entity", 429 => "Too Many Requests", 431 => "Request Header Fields Too Large",
         500 => "Internal Server Error", 501 => "Not Implemented", 502 => "Bad Gateway",
-        503 => "Service Unavailable", 504 => "Gateway Timeout",
+        503 => "Service Unavailable", 504 => "Gateway Timeout", 505 => "HTTP Version Not Supported",
         _ => "Unknown",
     }
 }
@@ -729,13 +834,21 @@ fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, S
         let path_norm = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
         if !path_norm.starts_with(&prefix_norm) && path != prefix.trim_end_matches('/') { continue; }
         let rel = path.strip_prefix(prefix.as_str()).unwrap_or("").trim_start_matches('/');
-        // Cegah path traversal: tolak segmen ".." mentah-mentah sebelum
-        // menyentuh filesystem sama sekali.
-        if rel.split('/').any(|seg| seg == "..") { return Some((403, "text/plain".to_string(), b"Forbidden".to_vec())); }
-        let full = dir.join(if rel.is_empty() { "index.html" } else { rel });
+        let sasaran = if rel.is_empty() { "index.html" } else { rel };
+        let Some(dasar) = dir.to_str() else { continue };
+        // `gabung_aman` menolak `..`, `\`, NUL, dan tautan simbolik yang keluar dari `dir`.
+        let Ok(penuh) = crate::stdlib::fs::gabung_aman(dasar, sasaran) else {
+            return Some((403, "text/plain".to_string(), b"Forbidden".to_vec()));
+        };
+        let full = Path::new(&penuh);
         if full.is_file() {
-            if let Ok(bytes) = std::fs::read(&full) {
-                let ctype = guess_content_type(&full);
+            if let Ok(m) = std::fs::metadata(full) {
+                if m.len() > MAKS_BADAN as u64 {
+                    return Some((413, "text/plain".to_string(), b"Payload Too Large".to_vec()));
+                }
+            }
+            if let Ok(bytes) = std::fs::read(full) {
+                let ctype = guess_content_type(full);
                 return Some((200, ctype.to_string(), bytes));
             }
         }
@@ -748,7 +861,7 @@ fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, S
 /// Kebalikan pembacaan header di `value_to_response`.
 fn header_ke_value(h: Vec<(String, String)>) -> Vec<Value> {
     h.into_iter()
-        .map(|(k, v)| Value::Tuple(vec![Value::Str(k), Value::Str(v)].into()))
+        .map(|(k, v)| Value::Tuple(vec![Value::Str(std::sync::Arc::new(k)), Value::Str(std::sync::Arc::new(v))].into()))
         .collect()
 }
 
@@ -761,7 +874,7 @@ fn nama_struct(v: &Value) -> &str {
 fn ambil_str(v: &Value, ladang: &str) -> Option<String> {
     match v {
         Value::Struct { fields, .. } => match fields.get(ladang) {
-            Some(Value::Str(s)) => Some(s.clone()),
+            Some(Value::Str(s)) => Some(String::clone(&s.clone())),
             _ => None,
         },
         _ => None,
@@ -773,7 +886,7 @@ fn pasang_params(v: Value, params: Vec<(String, String)>) -> Value {
     let Value::Struct { name, fields } = v else { return v };
     let mut f = (*fields).clone();
     let mut pf: HashMap<String, Value> = HashMap::new();
-    for (k, val) in params { pf.insert(k, Value::Str(val)); }
+    for (k, val) in params { pf.insert(k, Value::Str(std::sync::Arc::new(val))); }
     f.insert("params".to_string(),
         Value::Struct { name: super::json::OBJ_NAME.to_string(), fields: pf.into() });
     Value::Struct { name, fields: f.into() }
@@ -788,22 +901,22 @@ fn value_to_response(v: Value) -> (i128, String, Vec<u8>, Vec<(String, String)>)
                     Ok(b) => b,
                     Err(e) => return (500, "text/plain; charset=utf-8".to_string(), e.into_bytes(), Vec::new()),
                 },
-                (_, Some(Value::Str(s))) => s.clone().into_bytes(),
+                (_, Some(Value::Str(s))) => s.as_bytes().to_vec(),
                 (_, Some(Value::Nil)) | (_, None) => Vec::new(),
                 (_, Some(o)) => format!("{}", o).into_bytes(),
             };
-            let ctype = match fields.get("content_type") { Some(Value::Str(s)) => s.clone(), _ => "text/plain; charset=utf-8".to_string() };
+            let ctype = match fields.get("content_type") { Some(Value::Str(s)) => s.clone(), _ => std::sync::Arc::new("text/plain; charset=utf-8".to_string()) };
             let headers = match fields.get("headers") {
                 Some(Value::Array(a)) => a.iter().filter_map(|v| match v {
                     Value::Tuple(t) if t.len() == 2 => match (&t[0], &t[1]) {
-                        (Value::Str(k), Value::Str(val)) => Some((k.clone(), val.clone())),
+                        (Value::Str(k), Value::Str(val)) => Some((String::clone(k), String::clone(val))),
                         _ => None,
                     },
                     _ => None,
                 }).collect(),
                 _ => Vec::new(),
             };
-            (status, ctype, body, headers)
+            (status, String::clone(&ctype), body, headers)
         }
         Value::Enum { variant, payload, .. } if variant == "Ok" => {
             value_to_response(payload.map(|b| *b).unwrap_or(Value::Nil))
@@ -812,36 +925,36 @@ fn value_to_response(v: Value) -> (i128, String, Vec<u8>, Vec<(String, String)>)
             let msg = payload.map(|b| format!("{}", *b)).unwrap_or_else(|| "error".to_string());
             (500, "text/plain; charset=utf-8".to_string(), msg.into_bytes(), Vec::new())
         }
-        Value::Str(s) => (200, "text/plain; charset=utf-8".to_string(), s.into_bytes(), Vec::new()),
+        Value::Str(s) => (200, "text/plain; charset=utf-8".to_string(), s.as_bytes().to_vec(), Vec::new()),
         other => (200, "text/plain; charset=utf-8".to_string(), format!("{}", other).into_bytes(), Vec::new()),
     }
 }
 
-fn build_request_value(pr: &ParsedRequest, params: Vec<(String, String)>, remote_addr: &str) -> Value {
+fn build_request_value(pr: &ParsedRequest, body: Vec<u8>, params: Vec<(String, String)>, remote_addr: &str) -> Value {
     let mut fields = HashMap::new();
-    fields.insert("method".to_string(), Value::Str(pr.method.clone()));
-    fields.insert("path".to_string(), Value::Str(pr.path.clone()));
-    fields.insert("query_string".to_string(), Value::Str(pr.query_string.clone()));
+    fields.insert("method".to_string(), Value::Str(std::sync::Arc::new(pr.method.clone())));
+    fields.insert("path".to_string(), Value::Str(std::sync::Arc::new(pr.path.clone())));
+    fields.insert("query_string".to_string(), Value::Str(std::sync::Arc::new(pr.query_string.clone())));
     fields.insert("query".to_string(), Value::Array(pr.query.clone().into()));
-    let (teks, byte) = badan_nilai(pr.body.clone());
+    let (teks, byte) = badan_nilai(body);
     fields.insert("body".to_string(), teks);
     fields.insert("body_bytes".to_string(), byte);
-    fields.insert("remote_addr".to_string(), Value::Str(remote_addr.to_string()));
+    fields.insert("remote_addr".to_string(), Value::Str(std::sync::Arc::new(remote_addr.to_string())));
     fields.insert("headers".to_string(), Value::Array(
-        pr.headers.iter().map(|(k, v)| Value::Tuple(vec![Value::Str(k.clone()), Value::Str(v.clone())].into())).collect()
+        pr.headers.iter().map(|(k, v)| Value::Tuple(vec![Value::Str(std::sync::Arc::new(k.clone())), Value::Str(std::sync::Arc::new(v.clone()))].into())).collect()
     ));
     let mut param_fields = HashMap::new();
-    for (k, v) in params { param_fields.insert(k, Value::Str(v)); }
+    for (k, v) in params { param_fields.insert(k, Value::Str(std::sync::Arc::new(v))); }
     fields.insert("params".to_string(), Value::Struct { name: super::json::OBJ_NAME.to_string(), fields: param_fields.into() });
     Value::Struct { name: "DokRequest".to_string(), fields: fields.into() }
 }
 
 fn handle_connection(panggil: &mut PemanggilHandler, router_id: u64, mut stream: TcpStream) {
     let remote_addr = stream.peer_addr().map(|a| a.to_string()).unwrap_or_default();
-    let mut reader = BufReader::new(match stream.try_clone() { Ok(s) => s, Err(_) => return });
+    let salinan = match stream.try_clone() { Ok(s) => s, Err(_) => return };
+    let mut reader = BufReader::new(Tenggat::baru(salinan, TUNGGU_PERMINTAAN));
 
-    // Klien yang diam tidak boleh menahan thread selamanya; batasnya dilepas sesudah permintaan terbaca.
-    stream.set_read_timeout(Some(TUNGGU_PERMINTAAN)).ok();
+    // Klien yang diam atau menetes tidak boleh menahan thread; batasnya dilepas sesudah permintaan terbaca.
     let pr = match parse_request(&mut reader) {
         Ok(p) => p,
         Err((kode, teks)) => { write_response(&mut stream, kode, "text/plain", teks, &[]); return; }
@@ -856,7 +969,9 @@ fn handle_connection(panggil: &mut PemanggilHandler, router_id: u64, mut stream:
 
     // 1) Middleware `sebelum`, urut pemasangan — SEBELUM file statis, supaya
     // sebuah middleware otentikasi benar-benar menutupi semuanya.
-    let mut req_val = build_request_value(&pr, Vec::new(), &remote_addr);
+    let mut pr = pr;
+    let badan = std::mem::take(&mut pr.body);
+    let mut req_val = build_request_value(&pr, badan, Vec::new(), &remote_addr);
     let mut hasil_awal: Option<Value> = None;
     for mw in &router.sebelum {
         match panggil(mw, vec![req_val.clone()]) {
@@ -879,6 +994,11 @@ fn handle_connection(panggil: &mut PemanggilHandler, router_id: u64, mut stream:
             let cocok = router.ws.iter()
                 .find_map(|(segs, h)| match_route(segs, &jalur).map(|p| (h.clone(), p)));
             if let Some((handler, params)) = cocok {
+                if !super::ws::origin_sah(&pr.headers) {
+                    write_response(&mut stream, 403, "text/plain; charset=utf-8",
+                        "Origin WebSocket ditolak: host-nya harus sama dengan Host", &[]);
+                    return;
+                }
                 let s2 = match stream.try_clone() { Ok(s) => s, Err(_) => return };
                 let id = match super::ws::terima(s2, &kunci) { Ok(i) => i, Err(_) => return };
                 let req = pasang_params(req_val.clone(), params);
@@ -962,7 +1082,36 @@ fn handle_connection(panggil: &mut PemanggilHandler, router_id: u64, mut stream:
         }
     }
     let (status, ctype, body, extra_headers) = value_to_response(resp);
+    // Kepala dari handler yang memuat CR/LF menyisipkan kepala lain (`Set-Cookie`) — dijawab 500, tidak dikirim.
+    let salah = std::iter::once(("Content-Type", ctype.as_str()))
+        .chain(extra_headers.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+        .find_map(|(k, v)| kepala_respons_salah(k, v));
+    if let Some(alasan) = salah {
+        crate::host::galat_baris(&format!("dok::serve: {} {}: {}", method_kini, path_kini, alasan));
+        write_response(&mut stream, 500, "text/plain; charset=utf-8", &format!("handler error: {}", alasan), &[]);
+        return;
+    }
     write_response_bytes(&mut stream, status, &ctype, &body, &extra_headers);
+}
+
+/// Token nama kepala menurut RFC 9110 §5.6.2.
+pub(crate) fn nama_kepala_sah(k: &str) -> bool {
+    !k.is_empty() && k.bytes().all(|b| b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b))
+}
+
+/// Alasan sebuah kepala respons tidak boleh dikirim; `None` kalau boleh.
+pub(crate) fn kepala_respons_salah(k: &str, v: &str) -> Option<String> {
+    if !nama_kepala_sah(k) {
+        return Some(format!("nama kepala respons {:?} tidak sah — cuma huruf, angka, dan `-_.!#$%&'*+^`|~`", k));
+    }
+    if v.bytes().any(|b| b == b'\r' || b == b'\n' || b == 0) {
+        return Some(format!("kepala respons `{}` memuat CR, LF atau NUL, yang akan menyisipkan kepala lain — \
+            loloskan dulu nilai dari pemakai (mis. `dok::url_encode`)", k));
+    }
+    if k.eq_ignore_ascii_case("content-length") || k.eq_ignore_ascii_case("transfer-encoding") {
+        return Some(format!("kepala respons `{}` diatur `dok::serve` sendiri dari badannya", k));
+    }
+    None
 }
 
 /// `dok::serve(router, port, host?)` — BLOCKING.
@@ -996,7 +1145,8 @@ pub fn serve_dgn(
         Some(Value::Int(n)) if *n >= 0 && *n <= 65535 => *n as u16,
         _ => return Err(Signal::RuntimeError(RuntimeError::new("dok::serve: port harus int 0..65535"))),
     };
-    let host = match args.get(2) { Some(Value::Str(s)) => s.clone(), _ => "0.0.0.0".to_string() };
+    // Bawaan loopback (keputusan 2026-11-14, seperti Flask/Django/Rails): membuka ke jaringan ditulis `"0.0.0.0"`.
+    let host = match args.get(2) { Some(Value::Str(s)) => s.clone(), _ => std::sync::Arc::new("127.0.0.1".to_string()) };
 
     let addr = format!("{}:{}", host, port);
     let listener = match TcpListener::bind(&addr) {
@@ -1005,25 +1155,119 @@ pub fn serve_dgn(
     };
     eprintln!("[dok] listening on http://{}", addr);
 
+    let hidup = std::sync::Arc::new(AtomicUsize::new(0));
     for incoming in listener.incoming() {
-        let stream = match incoming { Ok(s) => s, Err(_) => continue };
+        let mut stream = match incoming { Ok(s) => s, Err(_) => continue };
+        if hidup.fetch_add(1, Ordering::AcqRel) >= MAKS_SAMBUNGAN {
+            hidup.fetch_sub(1, Ordering::AcqRel);
+            stream.set_write_timeout(Some(std::time::Duration::from_secs(1))).ok();
+            write_response(&mut stream, PENUH.0, "text/plain", PENUH.1, &[("Retry-After".to_string(), "1".to_string())]);
+            continue;
+        }
+        let jaga = Sambungan(hidup.clone());
         // Pemanggilnya dibuat SEBELUM thread lahir, karena pabriknya meminjam
         // keadaan pemanggil (`Interpreter` atau `Vm`) yang tidak ikut pindah.
         let mut pemanggil = buat();
-        std::thread::spawn(move || {
-            handle_connection(&mut pemanggil, router_id, stream);
-        });
+        // Handler JRG berjalan di utas ini: stack-nya sebesar utas utama interpreter.
+        let utas = std::thread::Builder::new()
+            .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
+            .spawn(move || { crate::interpreter::catat_puncak_stack(); let _jaga = jaga; handle_connection(&mut pemanggil, router_id, stream) });
+        if let Err(e) = utas {
+            eprintln!("[dok] tidak bisa membuat utas untuk koneksi baru: {}", crate::host::galat_io(&e));
+        }
     }
 
     Ok(ok_value(Value::Nil))
 }
 
+/// Satu koneksi hidup; hitungannya turun saat utasnya selesai, juga kalau utasnya gagal dibuat.
+struct Sambungan(std::sync::Arc<AtomicUsize>);
+
+impl Drop for Sambungan {
+    fn drop(&mut self) { self.0.fetch_sub(1, Ordering::AcqRel); }
+}
+
 #[cfg(test)]
 mod tes_permintaan {
+    #[test]
+    fn jalur_cuma_satu_ejaan() {
+        use super::jalur_satu_ejaan as j;
+        for (m, p) in [("/", "/"), ("/admin", "/admin"), ("/admin/", "/admin/"), ("/a/b", "/a/b"),
+                       ("/%61dmin", "/admin"), ("/a%20b", "/a b"), ("/f.txt", "/f.txt"), ("/..x", "/..x")] {
+            assert!(j(m, p), "harusnya sah: {}", m);
+        }
+        for (m, p) in [("//admin", "//admin"), ("/a//b", "/a//b"), ("/./admin", "/./admin"), ("/x/../admin", "/x/../admin"),
+                       ("/%2fadmin", "//admin"), ("/a%2Fb", "/a/b"), ("/a%5cb", "/a\\b"), ("/a\\b", "/a\\b"),
+                       ("/admin/.", "/admin/."), ("x", "x")] {
+            assert!(!j(m, p), "harusnya ditolak: {}", m);
+        }
+    }
+
     use super::*;
+
+    /// Tanpa tenggat total, klien ini ditunggu sampai ia sendiri berhenti (3 s) lalu dijawab 400.
+    #[test]
+    fn klien_yang_menetes_dihentikan() {
+        use std::time::{Duration, Instant};
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let a = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            let mut c = TcpStream::connect(a).unwrap();
+            let _ = c.write_all(b"GET / HTTP/1.1\r\n");
+            for _ in 0..60 {
+                if c.write_all(b"X").is_err() { break; }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let (s, _) = l.accept().unwrap();
+        let mulai = Instant::now();
+        let hasil = parse_request(&mut BufReader::new(Tenggat::baru(s, Duration::from_millis(300))));
+        assert_eq!(hasil.err().map(|t| t.0), Some(408));
+        assert!(mulai.elapsed() < Duration::from_secs(2), "{:?}", mulai.elapsed());
+        t.join().ok();
+    }
 
     fn urai(b: &[u8]) -> Result<ParsedRequest, Tolak> { parse_request(&mut std::io::Cursor::new(b)) }
     fn kode(b: &[u8]) -> i128 { urai(b).err().map_or(200, |t| t.0) }
+
+    #[test]
+    fn baris_permintaan_dan_host_yang_ambigu_ditolak() {
+        for b in [&b"GET  / HTTP/1.1\r\n\r\n"[..], b"GET\t/ HTTP/1.1\r\n\r\n", b"GET / HTTP/1.1 x\r\n\r\n",
+                  b"GET /\r\n\r\n", b"GET http://evil/ HTTP/1.1\r\n\r\n", b"GET * HTTP/1.1\r\n\r\n",
+                  b"G(T / HTTP/1.1\r\n\r\n", b"GET / HTTP/1.1\n\n", b"GET / HTTP/1.1\r\nX: a\n\r\n",
+                  b"GET / HTTP/1.1\r\nX: a\rb\r\n\r\n", b"GET / HTTP/1.1\r\nX: a\x00b\r\n\r\n",
+                  b"GET / HTTP/1.1\r\nX: a\x1bb\r\n\r\n", b"GET / FTP/1.1\r\n\r\n",
+                  b"GET / HTTP/1.1\r\nHost: a\r\nHost: b\r\n\r\n", b"GET / HTTP/1.1\r\nHost: a@b\r\n\r\n",
+                  b"GET / HTTP/1.1\r\nHost: a,b\r\n\r\n", b"GET / HTTP/1.1\r\nHost: 127.1\r\n\r\n",
+                  b"GET / HTTP/1.1\r\nHost: a:\r\n\r\n", b"GET / HTTP/1.1\r\nHost: \r\n\r\n",
+                  b"GET / HTTP/1.1\r\nHost: [::1%25lo]\r\n\r\n"] {
+            assert_eq!(kode(b), 400, "{:?}", String::from_utf8_lossy(b));
+        }
+        assert_eq!(kode(b"GET / HTTP/2.0\r\n\r\n"), 505);
+        for b in [&b"GET / HTTP/1.0\r\n\r\n"[..], b"GET /a?b HTTP/1.1\r\nHost: Contoh.ID.:8080\r\n\r\n",
+                  b"GET / HTTP/1.1\r\nHost: [::1]:80\r\nX:\tnilai\t\r\n\r\n"] {
+            assert_eq!(kode(b), 200, "{:?}", String::from_utf8_lossy(b));
+        }
+    }
+
+    #[test]
+    fn kepala_permintaan_yang_dibaca_lain_oleh_proxy_ditolak() {
+        // Badan berpotongan dulu dibaca kosong; tiga bentuk kepala cacat dulu diterima atau dibuang diam-diam.
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhalo!\r\n0\r\n\r\n"), 501);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\nhalo!"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nSampah\r\nContent-Length: 5\r\n\r\nhalo!"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nX-A: 1\r\n  lanjut\r\n\r\n"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nX-A:1\r\nContent-Length: 5\r\n\r\nhalo!"), 200);
+    }
+
+    #[test]
+    fn kepala_respons_tidak_bisa_menyisipkan_kepala_lain() {
+        assert!(super::kepala_respons_salah("Location", "/x\r\nSet-Cookie: a=1").is_some());
+        assert!(super::kepala_respons_salah("X-A", "a\nb").is_some());
+        assert!(super::kepala_respons_salah("X A", "b").is_some());
+        assert!(super::kepala_respons_salah("Content-Length", "5").is_some());
+        assert!(super::kepala_respons_salah("Set-Cookie", "a=1; Path=/").is_none());
+    }
 
     #[test]
     fn panjang_badan_dari_klien_tidak_dipercaya() {
@@ -1051,5 +1295,52 @@ mod tes_permintaan {
         let banyak = |n: usize| format!("GET / HTTP/1.1\r\n{}\r\n", "X: 1\r\n".repeat(n));
         assert_eq!(urai(banyak(MAKS_HEADER).as_bytes()).unwrap().headers.len(), MAKS_HEADER);
         assert_eq!(kode(banyak(MAKS_HEADER + 1).as_bytes()), 431);
+    }
+
+    #[test]
+    fn badan_serentak_berbatas_dan_dikembalikan() {
+        static HITUNG: AtomicUsize = AtomicUsize::new(0);
+        let urai_b = |b: &[u8]| parse_request_dgn(&mut std::io::Cursor::new(b.to_vec()), &HITUNG, 10);
+        let enam = b"POST / HTTP/1.1\r\nContent-Length: 6\r\n\r\nabcdef";
+        let pertama = urai_b(enam).unwrap();
+        assert_eq!(HITUNG.load(Ordering::Acquire), 6);
+        assert_eq!(urai_b(enam).err(), Some(PENUH), "anggaran sudah terpakai");
+        assert_eq!(HITUNG.load(Ordering::Acquire), 6, "yang ditolak mengembalikan bagiannya");
+        drop(pertama);
+        assert_eq!(HITUNG.load(Ordering::Acquire), 0);
+        assert_eq!(urai_b(enam).unwrap().body, b"abcdef");
+        assert_eq!(HITUNG.load(Ordering::Acquire), 0);
+        let biner = |n: usize| [format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", n).into_bytes(), vec![0xff; n]].concat();
+        let muat = 1000 / (1 + std::mem::size_of::<Value>());
+        let p = parse_request_dgn(&mut std::io::Cursor::new(biner(muat)), &HITUNG, 1000).unwrap();
+        assert_eq!(HITUNG.load(Ordering::Acquire), muat * (1 + std::mem::size_of::<Value>()), "biner dihitung seharga array-nya");
+        assert_eq!(parse_request_dgn(&mut std::io::Cursor::new(biner(1)), &HITUNG, 1000).err(), Some(PENUH));
+        drop(p);
+        assert_eq!(parse_request_dgn(&mut std::io::Cursor::new(biner(muat + 1)), &HITUNG, 1000).err(), Some((413, "Payload Too Large")));
+        assert_eq!(HITUNG.load(Ordering::Acquire), 0);
+    }
+
+    #[test]
+    fn berkas_statis_menolak_tautan_simbolik_ke_luar_dan_lintas_jalur() {
+        let akar = std::env::temp_dir().join(format!("jrg-uji-statis-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&akar);
+        let (publik, luar) = (akar.join("publik"), akar.join("luar"));
+        std::fs::create_dir_all(&publik).unwrap();
+        std::fs::create_dir_all(&luar).unwrap();
+        std::fs::write(publik.join("biasa.txt"), b"aman").unwrap();
+        std::fs::write(luar.join("rahasia.txt"), b"bocor").unwrap();
+        let mounts = vec![("/aset".to_string(), publik.clone())];
+        assert_eq!(try_serve_static(&mounts, "/aset/biasa.txt").map(|x| x.0), Some(200));
+        assert_eq!(try_serve_static(&mounts, "/aset/../luar/rahasia.txt").map(|x| x.0), Some(403));
+        assert_eq!(try_serve_static(&mounts, "/aset/a\\b").map(|x| x.0), Some(403));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(luar.join("rahasia.txt"), publik.join("tautan.txt")).unwrap();
+            symlink(&luar, publik.join("folder_luar")).unwrap();
+            assert_eq!(try_serve_static(&mounts, "/aset/tautan.txt").map(|x| x.0), Some(403));
+            assert_eq!(try_serve_static(&mounts, "/aset/folder_luar/rahasia.txt").map(|x| x.0), Some(403));
+        }
+        let _ = std::fs::remove_dir_all(&akar);
     }
 }

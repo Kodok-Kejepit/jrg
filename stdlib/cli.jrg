@@ -1,0 +1,263 @@
+package std_cli
+
+// Pengurai argumen baris perintah. Tidak ada singkatan (`--verb` bukan `--verbose`), opsi yang ditulis dua
+// kali dan nilai yang hilang jadi `Err`, dan sesudah `--` semuanya posisi — nama berkas berawalan `-` tidak
+// pernah dibaca sebagai opsi.
+
+/// Satu opsi yang dideklarasikan; `bawaan` `None` pada opsi bernilai berarti wajib ditulis.
+pub struct Opsi {
+    pub nama: string,
+    pub pendek: string,
+    pub ringkas: string,
+    pub nilai: bool,
+    pub bawaan: Option<string> = None,
+    pub ulang: bool,
+}
+
+pub struct Pengurai {
+    pub nama: string,
+    pub ringkas: string,
+    pub opsi: []Opsi = [],
+    pub posisi: array = [],
+    pub sisa: array = [],
+}
+
+/// Pengurai baru. `-h`/`--help` selalu ada: hasilnya `h["help"] == true`, dan `cli::bantuan(p)` teksnya.
+pub fn baru(nama, ringkas) {
+    return Pengurai { nama: nama, ringkas: ringkas }
+}
+
+fn _nama_sah(n) {
+    if len(n) < 2 || !str::is_lower(n[0:1]) { return false }
+    for _, r in str::chars(n) {
+        let c = str(r)
+        if !(str::is_lower(c) || str::is_numeric(c) || c == "-" || c == "_") { return false }
+    }
+    return true
+}
+
+fn _pendek_sah(s) {
+    return s == "" || (len(s) == 1 && str::is_alphanumeric(s) && s != "h")
+}
+
+fn _periksa_baru(p, nama, pendek) {
+    if !_nama_sah(nama) || nama == "help" {
+        panik(«cli: nama opsi `${nama}` tidak sah — huruf kecil/angka/`-`/`_`, paling sedikit 2 karakter, bukan `help`»)
+    }
+    if !_pendek_sah(pendek) {
+        panik(«cli: nama pendek `${pendek}` tidak sah — satu huruf atau angka (bukan `h`), atau "" kalau tidak ada»)
+    }
+    for _, o in p.opsi {
+        if o["nama"] == nama { panik(«cli: opsi `--${nama}` dideklarasikan dua kali») }
+        if pendek != "" && o["pendek"] == pendek { panik(«cli: nama pendek `-${pendek}` dipakai dua opsi») }
+    }
+    for _, q in p.posisi {
+        if q["nama"] == nama { panik(«cli: nama `${nama}` sudah dipakai argumen posisi») }
+    }
+}
+
+/// Saklar tanpa nilai (`--verbose`, `-v`); hasilnya `bool`.
+pub fn flag(p, nama, pendek, ringkas) {
+    _periksa_baru(p, nama, pendek)
+    var q = p
+    q.opsi = arr::push(q.opsi, Opsi { nama: nama, pendek: pendek, ringkas: ringkas, nilai: false, ulang: false })
+    return q
+}
+
+/// Opsi bernilai (`--output x`, `--output=x`, `-o x`, `-ox`); `bawaan` `None` berarti wajib ditulis.
+pub fn opsi(p, nama, pendek, ringkas, bawaan) {
+    _periksa_baru(p, nama, pendek)
+    var q = p
+    q.opsi = arr::push(q.opsi, Opsi { nama: nama, pendek: pendek, ringkas: ringkas, nilai: true, bawaan: bawaan, ulang: false })
+    return q
+}
+
+/// Opsi bernilai yang boleh diulang (`-I a -I b`); hasilnya array, `[]` kalau tidak ditulis.
+pub fn opsi_ulang(p, nama, pendek, ringkas) {
+    _periksa_baru(p, nama, pendek)
+    var q = p
+    q.opsi = arr::push(q.opsi, Opsi { nama: nama, pendek: pendek, ringkas: ringkas, nilai: true, ulang: true })
+    return q
+}
+
+/// Argumen posisi wajib, diisi berurutan.
+pub fn posisi(p, nama, ringkas) {
+    _periksa_baru(p, nama, "")
+    if len(p.sisa) > 0 { panik(«cli: argumen posisi `${nama}` sesudah pengumpul sisa `${p.sisa[0]["nama"]}`») }
+    var q = p
+    q.posisi = arr::push(q.posisi, dict { nama: nama, ringkas: ringkas })
+    return q
+}
+
+/// Pengumpul argumen posisi sisanya (array, boleh kosong). Paling banyak satu, dan harus yang terakhir.
+pub fn sisa(p, nama, ringkas) {
+    _periksa_baru(p, nama, "")
+    if len(p.sisa) > 0 { panik("cli: pengumpul sisa cuma boleh satu") }
+    var q = p
+    q.sisa = [dict { nama: nama, ringkas: ringkas }]
+    return q
+}
+
+fn _cari(p, nama, pendek) {
+    for _, o in p.opsi {
+        if (nama != "" && o["nama"] == nama) || (pendek != "" && o["pendek"] == pendek) { return Some(o) }
+    }
+    return None
+}
+
+fn _saran(p, n) {
+    for _, o in p.opsi {
+        if str::starts_with(o["nama"], n) || str::starts_with(n, o["nama"]) { return «, maksudnya `--${o["nama"]}`?» }
+    }
+    return ""
+}
+
+fn _isi(hasil, terlihat, o, v, sebut) {
+    var h = hasil
+    var t = terlihat
+    let n = o["nama"]
+    if o["ulang"] {
+        h[n] = arr::push(h[n], v)
+        return Ok((h, t))
+    }
+    if dict::has(t, n) { return Err(«${sebut} ditulis dua kali») }
+    t[n] = true
+    h[n] = v
+    return Ok((h, t))
+}
+
+fn _nilai_berikut(args, i, sebut) {
+    if i + 1 >= len(args) { return Err(«${sebut} butuh nilai») }
+    let v = args[i + 1]
+    if str::starts_with(v, "-") && v != "-" {
+        return Err(«${sebut} butuh nilai, yang ketemu `${v}` — nilai berawalan `-` ditulis `${str::replace(sebut, "`", "")}=${v}`»)
+    }
+    return Ok(v)
+}
+
+/// Urai `args` (tanpa nama program, biasanya `env::args()[1:]`). `Ok(dict)` nama → nilai, atau `Err(teks)`.
+pub fn urai(p, args) {
+    var h = dict::new()
+    var t = dict::new()
+    h["help"] = false
+    for _, o in p.opsi {
+        if o["ulang"] { h[o["nama"]] = [] } else if !o["nilai"] { h[o["nama"]] = false }
+    }
+    var pos = []
+    var i = 0
+    var habis_opsi = false
+    while i < len(args) {
+        let a = args[i]
+        if habis_opsi || a == "-" || !str::starts_with(a, "-") {
+            pos = arr::push(pos, a)
+        } else if a == "--" {
+            habis_opsi = true
+        } else if a == "--help" || a == "-h" {
+            h["help"] = true
+        } else if str::starts_with(a, "--") {
+            var nama = a[2:]
+            var nilai = None
+            match str::index_of(nama, "=") {
+                Some(k) => {
+                    nilai = Some(nama[k + 1:])
+                    nama = nama[0:k]
+                }
+                None => {}
+            }
+            let Some(o) = _cari(p, nama, "") else { return Err(«opsi `--${nama}` tidak dikenal${_saran(p, nama)}») }
+            if !o["nilai"] {
+                if nilai != None { return Err(«`--${nama}` tidak menerima nilai») }
+                match _isi(h, t, o, true, «`--${nama}`») { Ok((a1, a2)) => { h = a1; t = a2 } Err(e) => { return Err(e) } }
+            } else {
+                var v = ""
+                match nilai {
+                    Some(x) => { v = x }
+                    None => {
+                        match _nilai_berikut(args, i, «`--${nama}`») { Ok(x) => { v = x; i += 1 } Err(e) => { return Err(e) } }
+                    }
+                }
+                match _isi(h, t, o, v, «`--${nama}`») { Ok((a1, a2)) => { h = a1; t = a2 } Err(e) => { return Err(e) } }
+            }
+        } else {
+            // Gugus pendek: `-vq`, `-ofile`, `-o file`, `-vo file`.
+            let cs = str::chars(a[1:])
+            var j = 0
+            while j < len(cs) {
+                let c = str(cs[j])
+                if c == "h" {
+                    h["help"] = true
+                    j += 1
+                    continue
+                }
+                let Some(o) = _cari(p, "", c) else { return Err(«opsi `-${c}` tidak dikenal (di `${a}`)») }
+                let sebut = «`-${c}`»
+                if !o["nilai"] {
+                    match _isi(h, t, o, true, sebut) { Ok((a1, a2)) => { h = a1; t = a2 } Err(e) => { return Err(e) } }
+                    j += 1
+                } else {
+                    var v = ""
+                    if j + 1 < len(cs) {
+                        v = str::join(cs[j + 1:], "")
+                        if str::starts_with(v, "=") { v = v[1:] }
+                    } else {
+                        match _nilai_berikut(args, i, sebut) { Ok(x) => { v = x; i += 1 } Err(e) => { return Err(e) } }
+                    }
+                    match _isi(h, t, o, v, sebut) { Ok((a1, a2)) => { h = a1; t = a2 } Err(e) => { return Err(e) } }
+                    j = len(cs)
+                }
+            }
+        }
+        i += 1
+    }
+    if h["help"] { return Ok(h) }
+    for _, o in p.opsi {
+        if o["nilai"] && !o["ulang"] && !dict::has(t, o["nama"]) {
+            match o["bawaan"] {
+                Some(b) => { h[o["nama"]] = b }
+                None => { return Err(«opsi `--${o["nama"]}` wajib ditulis») }
+            }
+        }
+    }
+    if len(pos) < len(p.posisi) {
+        return Err(«argumen `${p.posisi[len(pos)]["nama"]}` belum ditulis»)
+    }
+    for k, q in p.posisi { h[q["nama"]] = pos[k] }
+    let lebih = pos[len(p.posisi):]
+    if len(p.sisa) > 0 {
+        h[p.sisa[0]["nama"]] = lebih
+    } else if len(lebih) > 0 {
+        return Err(«argumen berlebih: `${lebih[0]}`»)
+    }
+    return Ok(h)
+}
+
+/// Teks bantuan dari deklarasinya.
+pub fn bantuan(p) {
+    var baris = «pemakaian: ${p.nama} [opsi]»
+    for _, q in p.posisi { baris = baris + « <${q["nama"]}>» }
+    for _, q in p.sisa { baris = baris + « [${q["nama"]}...]» }
+    var teks = baris + "\n"
+    if p.ringkas != "" { teks = teks + "\n" + p.ringkas + "\n" }
+    var kiri = []
+    var kanan = []
+    for _, q in p.posisi { kiri = arr::push(kiri, «  <${q["nama"]}>»); kanan = arr::push(kanan, q["ringkas"]) }
+    for _, q in p.sisa { kiri = arr::push(kiri, «  [${q["nama"]}...]»); kanan = arr::push(kanan, q["ringkas"]) }
+    for _, o in p.opsi {
+        var k = "  "
+        if o["pendek"] != "" { k = k + «-${o["pendek"]}, » } else { k = k + "    " }
+        k = k + «--${o["nama"]}»
+        if o["nilai"] { k = k + « <${o["nama"]}>» }
+        var r = o["ringkas"]
+        match o["bawaan"] { Some(b) => { r = r + « (bawaan: ${b})» } None => {} }
+        if o["ulang"] { r = r + " (boleh diulang)" }
+        kiri = arr::push(kiri, k)
+        kanan = arr::push(kanan, r)
+    }
+    kiri = arr::push(kiri, "  -h, --help")
+    kanan = arr::push(kanan, "tampilkan bantuan ini")
+    var lebar = 0
+    for _, k in kiri { if len(k) > lebar { lebar = len(k) } }
+    teks = teks + "\n"
+    for n, k in kiri { teks = teks + str::pad_right(k, lebar + 2) + kanan[n] + "\n" }
+    return teks
+}

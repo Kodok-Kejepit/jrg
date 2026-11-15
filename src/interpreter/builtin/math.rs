@@ -32,6 +32,19 @@ impl Interpreter {
         })
     }
 
+    /// `math::` pecahan satu argumen: operasinya atas `f64`. Satu tabel untuk lengan di bawah dan pintu VM
+    /// (`vm::bawaan`, yang menjawab argumen angka langsung tanpa jembatan nilai).
+    pub(crate) fn unary_f64(kind: &NativeFnKind) -> Option<fn(f64) -> f64> {
+        use NativeFnKind::*;
+        Some(match kind {
+            MathSqrt => f64::sqrt, MathFloor => f64::floor, MathCeil => f64::ceil, MathRound => f64::round,
+            MathTrunc => f64::trunc, MathSin => f64::sin, MathCos => f64::cos, MathTan => f64::tan,
+            MathAsin => f64::asin, MathAcos => f64::acos, MathAtan => f64::atan, MathLn => f64::ln,
+            MathLog10 => f64::log10, MathLog2 => f64::log2, MathExp => f64::exp,
+            _ => return None,
+        })
+    }
+
     /// Satu implementasi `math::` untuk DUA mesin: `--vm` mencapainya lewat
     /// jembatan nilai, jadi jawaban, penolakan, dan kalimatnya tidak bisa …
     pub(crate) fn dispatch_math_lepas(kind: &NativeFnKind, args: &[Value]) -> EvalResult {
@@ -43,6 +56,7 @@ impl Interpreter {
         let angka = |v: &Value| dengan_nama(nama, crate::interpreter::eval_expr::nilai_ke_f64(v));
         let bulat = |v: &Value| dengan_nama(nama, crate::interpreter::eval_expr::nilai_ke_i128(v));
         fn fst(args: &[Value]) -> Value { args.get(0).cloned().unwrap_or(Value::Nil) }
+        if let Some(op) = Self::unary_f64(kind) { return Ok(Value::Float(op(angka(&fst(args))?))); }
         match kind {
             // `checked_abs`: `i128::MIN` tidak punya lawan positif di 128
             // bit, jadi `.abs()` telanjang di situ bikin runtime Rust panik
@@ -56,26 +70,12 @@ impl Interpreter {
                 Value::Float(f) => Ok(Value::Float(f.abs())),
                 other => runtime_err!("math::abs: butuh angka, dapat `{}`", other.type_name()),
             },
-            MathSqrt  => { let f = angka(&fst(args))?; Ok(Value::Float(f.sqrt())) }
             MathPow   => {
                 Ok(Value::Float(angka(&args[0])?.powf(angka(&args[1])?)))
             }
-            MathFloor  => { let f = angka(&fst(args))?; Ok(Value::Float(f.floor())) }
-            MathCeil   => { let f = angka(&fst(args))?; Ok(Value::Float(f.ceil()))  }
-            MathRound  => { let f = angka(&fst(args))?; Ok(Value::Float(f.round())) }
-            MathSin    => { let f = angka(&fst(args))?; Ok(Value::Float(f.sin()))   }
-            MathCos    => { let f = angka(&fst(args))?; Ok(Value::Float(f.cos()))   }
-            MathTan    => { let f = angka(&fst(args))?; Ok(Value::Float(f.tan()))   }
-            MathAsin   => { let f = angka(&fst(args))?; Ok(Value::Float(f.asin()))  }
-            MathAcos   => { let f = angka(&fst(args))?; Ok(Value::Float(f.acos()))  }
-            MathAtan   => { let f = angka(&fst(args))?; Ok(Value::Float(f.atan()))  }
             MathAtan2  => {
                 Ok(Value::Float(angka(&args[0])?.atan2(angka(&args[1])?)))
             }
-            MathLn     => { let f = angka(&fst(args))?; Ok(Value::Float(f.ln()))    }
-            MathLog10  => { let f = angka(&fst(args))?; Ok(Value::Float(f.log10())) }
-            MathLog2   => { let f = angka(&fst(args))?; Ok(Value::Float(f.log2()))  }
-            MathExp    => { let f = angka(&fst(args))?; Ok(Value::Float(f.exp()))   }
             MathMin => {
                 match Self::banding_lepas(args[0].clone(), args[1].clone(), std::cmp::Ordering::Less, false)? {
                     Value::Bool(true) => Ok(args[0].clone()),
@@ -152,7 +152,6 @@ impl Interpreter {
             }
             MathDegrees => { let r = angka(&fst(args))?; Ok(Value::Float(r.to_degrees())) }
             MathRadians => { let d = angka(&fst(args))?; Ok(Value::Float(d.to_radians())) }
-            MathTrunc => { let f = angka(&fst(args))?; Ok(Value::Float(f.trunc())) }
             // Aritmetika yang SENGAJA membungkus di 64 bit tak bertanda (hash, LCG): operator
             // biasa diperiksa di tiga mesin, jadi pembungkusan harus ditulis.
             MathWrapAdd | MathWrapSub | MathWrapMul => {

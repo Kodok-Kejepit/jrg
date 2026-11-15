@@ -80,7 +80,10 @@ impl Codegen {
         let mut badan = s.body.clone();
         // Ekor blok dibuang: goroutine tidak punya hasil.
         if let Some(ekor) = badan.tail.take() { badan.stmts.push(Stmt::Expr(ekor)); }
-        let f = self.closure_tanpa_hasil(&Expr::Block(badan), s.span)?;
+        self.spawn_berikut = true;
+        let f = self.closure_tanpa_hasil(&Expr::Block(badan), s.span);
+        self.spawn_berikut = false;
+        let f = f?;
         let kode = self.fresh("spk.");
         self.emit(format!("{} = extractvalue %JrgFn {}, 0", kode, f.text));
         let env = self.fresh("spe.");
@@ -171,7 +174,11 @@ impl Codegen {
                 _ => {
                     // `try_get` (tanpa menunggu) dan `timeout(f, ms)`: `Some(hasil)` atau `None`.
                     let mikro = if item == "timeout" {
-                        let ms = self.codegen_expr(&args[1], Some(&JrgType::I64))?;
+                        let ms = self.codegen_expr(&args[1], None)?;
+                        if !ms.ty.is_int() && ms.ty != JrgType::Any {
+                            self.panik_statis(&crate::interpreter::tugas::pesan_timeout_ms(nama, &ms.ty.nama_typeof()));
+                            return Ok(Val { text: "undef".into(), ty: JrgType::Enum(self.instantiate_option(&t)) });
+                        }
                         let ms = self.bulat_arg(&ms, "future::timeout", span)?;
                         let u = self.fresh("msu.");
                         self.emit(format!("{} = mul i64 {}, 1000", u, ms.text));
@@ -316,7 +323,10 @@ impl Codegen {
         let (gagal, lanjut) = (self.fresh_label("sel.tutup."), self.fresh_label("sel.buka."));
         self.terminate(format!("br i1 {}, label %{}, label %{}, !prof !0", c, gagal, lanjut));
         self.start_block(gagal);
+        // Acuan tidak menyebut lokasi untuk kalimat ini; lokasi yang tak dimiliki acuan tidak dikarang.
+        let situs_lama = std::mem::replace(&mut self.tanpa_situs, true);
         self.panik(pesan);
+        self.tanpa_situs = situs_lama;
         self.start_block(lanjut);
     }
 
@@ -350,29 +360,101 @@ impl Codegen {
         }
         self.ensure_extern("declare i32 @jrg_chan_try_recv(ptr, ptr, i64)", "jrg_chan_try_recv");
         self.ensure_extern("declare i32 @jrg_chan_try_send(ptr, ptr, i64)", "jrg_chan_try_send");
+        self.ensure_extern("declare i64 @jrg_chan_info(ptr, i32)", "jrg_chan_info");
+        // Kanal dan nilai kirim dievaluasi SEKALI, urut tulis, seperti acuan — dulu tiap putaran tunggu.
+        let mut lengan: Vec<(Val, JrgType, Option<String>, &SelectCase)> = Vec::new();
+        for case in &sel.cases {
+            match case {
+                SelectCase::Recv { chan, span, .. } => {
+                    let (cv, ety) = self.chan_dari(chan, "`select`", *span)?;
+                    lengan.push((cv, ety, None, case));
+                }
+                SelectCase::Send { chan, val, span, .. } => {
+                    let (cv, ety) = self.chan_dari(chan, "`select`", *span)?;
+                    let vp = self.kirim_ke(&cv, &ety, val)?;
+                    lengan.push((cv, ety, Some(vp), case));
+                }
+                SelectCase::Let { span, .. } => {
+                    return Err(super::galat::tandai(*span, "`select` dengan case `let` belum didukung backend `--emit-llvm`"));
+                }
+            }
+        }
+        let m = lengan.len();
+        let j_slot = if m > 1 { Some(self.alloca_raw("selj.", "i64", Some(8))) } else { None };
         let poll_lbl = self.fresh_label("sel.poll.");
         let end_lbl = self.fresh_label("sel.end.");
+        let tidak_ada = self.fresh_label("sel.tiada.");
         self.terminate(format!("br label %{}", poll_lbl));
         self.start_block(poll_lbl.clone());
+        // Kanal tertutup ditolak di SEMUA lengan sebelum satu pun dicoba (urutan acuan).
+        for (cv, _, vp, _) in &lengan {
+            let t = self.fresh("seltt.");
+            self.emit(format!("{} = call i64 @jrg_chan_info(ptr {}, i32 4)", t, cv.text));
+            let mut tutup = self.fresh("selttb.");
+            self.emit(format!("{} = icmp ne i64 {}, 0", tutup, t));
+            // Terima dari kanal tertutup yang masih berisi tetap sah; kirim ke kanal tertutup tidak pernah.
+            if vp.is_none() {
+                let n = self.fresh("seltn.");
+                self.emit(format!("{} = call i64 @jrg_chan_info(ptr {}, i32 5)", n, cv.text));
+                let kosong = self.fresh("seltk.");
+                self.emit(format!("{} = icmp eq i64 {}, 0", kosong, n));
+                let dua = self.fresh("seltd.");
+                self.emit(format!("{} = and i1 {}, {}", dua, tutup, kosong));
+                tutup = dua;
+            }
+            let z = self.fresh("seltz.");
+            self.emit(format!("{} = select i1 {}, i32 2, i32 0", z, tutup));
+            let pesan = if vp.is_some() { crate::antrean::PESAN_KIRIM_TERTUTUP } else { crate::antrean::PESAN_TERIMA_TERTUTUP };
+            self.tolak_tertutup(&z, pesan);
+        }
+        // Dua lengan atau lebih: mulai dari lengan acak (`rand::int` di lapis memakai `jrg_acak63` yang sama).
+        let coba: Vec<String> = (0..m).map(|_| self.fresh_label("sel.coba.")).collect();
+        let uji = self.fresh_label("sel.uji.");
+        if let Some(js) = &j_slot {
+            self.ensure_extern("declare i64 @jrg_acak63()", "jrg_acak63");
+            let a = self.fresh("sela.");
+            self.emit(format!("{} = call i64 @jrg_acak63()", a));
+            let k = self.fresh("selk.");
+            self.emit(format!("{} = urem i64 {}, {}", k, a, m));
+            self.emit(format!("store i64 0, ptr {}", js));
+            self.terminate(format!("br label %{}", uji));
+            self.start_block(uji.clone());
+            let j = self.fresh("selj.");
+            self.emit(format!("{} = load i64, ptr {}", j, js));
+            let masih = self.fresh("selm.");
+            self.emit(format!("{} = icmp ult i64 {}, {}", masih, j, m));
+            let pilih = self.fresh_label("sel.pilih.");
+            self.terminate(format!("br i1 {}, label %{}, label %{}", masih, pilih, tidak_ada));
+            self.start_block(pilih);
+            let kj = self.fresh("selkj.");
+            self.emit(format!("{} = add i64 {}, {}", kj, k, j));
+            let idx = self.fresh("seli.");
+            self.emit(format!("{} = urem i64 {}, {}", idx, kj, m));
+            let j1 = self.fresh("selj1.");
+            self.emit(format!("{} = add i64 {}, 1", j1, j));
+            self.emit(format!("store i64 {}, ptr {}", j1, js));
+            let kasus: Vec<String> = (0..m).map(|i| format!("i64 {}, label %{}", i, coba[i])).collect();
+            self.terminate(format!("switch i64 {}, label %{} [ {} ]", idx, coba[m - 1], kasus.join(" ")));
+        }
 
-        for case in &sel.cases {
-            let next_lbl = self.fresh_label("sel.next.");
+        for (ke, (cv, ety, vp, case)) in lengan.iter().enumerate() {
+            let gagal_lbl = if j_slot.is_some() { uji.clone() } else { self.fresh_label("sel.next.") };
             let body_lbl = self.fresh_label("sel.body.");
+            if j_slot.is_some() { self.start_block(coba[ke].clone()); }
             match case {
-                SelectCase::Recv { names, chan, body, span, .. } => {
-                    let (cv, ety) = self.chan_dari(chan, "`select`", *span)?;
-                    let slot = self.alloca_typed("selrv.", &ety);
+                SelectCase::Recv { names, body, .. } => {
+                    let slot = self.alloca_typed("selrv.", ety);
                     let ok = self.fresh("selok.");
-                    self.emit(format!("{} = call i32 @jrg_chan_try_recv(ptr {}, ptr {}, i64 {})", ok, cv.text, slot, self.types.sizeof(&ety)));
+                    self.emit(format!("{} = call i32 @jrg_chan_try_recv(ptr {}, ptr {}, i64 {})", ok, cv.text, slot, self.types.sizeof(ety)));
                     self.tolak_tertutup(&ok, crate::antrean::PESAN_TERIMA_TERTUTUP);
                     let okb = self.fresh("selokb.");
                     self.emit(format!("{} = icmp eq i32 {}, 1", okb, ok));
-                    self.terminate(format!("br i1 {}, label %{}, label %{}", okb, body_lbl, next_lbl));
+                    self.terminate(format!("br i1 {}, label %{}, label %{}", okb, body_lbl, gagal_lbl));
                     self.start_block(body_lbl);
                     self.push_scope();
                     if let Some(n) = names.first() {
                         if n != "_" {
-                            let v = self.load_place(&slot, &ety);
+                            let v = self.load_place(&slot, ety);
                             let s = self.alloca_local(n, ety.clone());
                             self.emit(format!("store {} {}, ptr {}", ety.llvm_ty(), v.text, s));
                         }
@@ -380,27 +462,27 @@ impl Codegen {
                     self.codegen_stmt_block(body)?;
                     self.pop_scope();
                 }
-                SelectCase::Send { chan, val, body, span } => {
-                    let (cv, ety) = self.chan_dari(chan, "`select`", *span)?;
-                    let vp = self.kirim_ke(&cv, &ety, val)?;
+                SelectCase::Send { body, .. } => {
+                    let vp = vp.clone().unwrap_or_default();
                     let ok = self.fresh("selsok.");
-                    self.emit(format!("{} = call i32 @jrg_chan_try_send(ptr {}, ptr {}, i64 {})", ok, cv.text, vp, self.types.sizeof(&ety)));
+                    self.emit(format!("{} = call i32 @jrg_chan_try_send(ptr {}, ptr {}, i64 {})", ok, cv.text, vp, self.types.sizeof(ety)));
                     self.tolak_tertutup(&ok, crate::antrean::PESAN_KIRIM_TERTUTUP);
                     let okb = self.fresh("selsokb.");
                     self.emit(format!("{} = icmp eq i32 {}, 1", okb, ok));
-                    self.terminate(format!("br i1 {}, label %{}, label %{}", okb, body_lbl, next_lbl));
+                    self.terminate(format!("br i1 {}, label %{}, label %{}", okb, body_lbl, gagal_lbl));
                     self.start_block(body_lbl);
                     self.push_scope();
                     self.codegen_stmt_block(body)?;
                     self.pop_scope();
                 }
-                SelectCase::Let { span, .. } => {
-                    return Err(super::galat::tandai(*span, "`select` dengan case `let` belum didukung backend `--emit-llvm`"));
-                }
+                SelectCase::Let { .. } => unreachable!("ditolak di atas"),
             }
             if !self.is_terminated() { self.terminate(format!("br label %{}", end_lbl)); }
-            self.start_block(next_lbl);
+            if j_slot.is_none() { self.start_block(gagal_lbl); }
         }
+        // Tanpa putaran, lengan terakhir yang gagal jatuh ke sini; dengan putaran, `sel.uji` yang habis.
+        if j_slot.is_none() && !self.is_terminated() { self.terminate(format!("br label %{}", tidak_ada)); }
+        self.start_block(tidak_ada);
 
         if let Some(default_body) = &sel.default {
             self.push_scope();

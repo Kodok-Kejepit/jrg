@@ -15,6 +15,13 @@ impl Codegen {
     /// caller falls through to ordinary user-function lookup); `Some(..)`
     /// once it's committed to handling it (success or a specific error).
     pub fn try_builtin_call(&mut self, name: &str, args: &[Expr], expected: Option<&JrgType>, span: Span) -> Option<Result<Val, String>> {
+        if let Some(r) = self.slot_bulat_pecahan(name, args, expected, span) { return Some(r); }
+        // `fs::chmod(p, 4.5)`: penurun C-nya menolak saat kompilasi; jembatan menjawab kalimat acuan saat jalan.
+        if let Some(("fs", item)) = name.split_once("::") {
+            if args.iter().any(|a| self.pasti_pecahan(a)) {
+                if let Some(r) = self.coba_jembatan("fs", item, args, span) { return Some(r); }
+            }
+        }
         // `arr::…` punya berkasnya sendiri: tiap fungsinya mengembalikan
         // koleksi BARU, jadi semuanya berbagi perkakas penyalinan dan
         // penelusuran yang sama.
@@ -23,6 +30,8 @@ impl Codegen {
         if let Some(r) = self.coba_builtin_jawa(name, args, span) { return Some(r); }
 
         Some(match name {
+            super::uji::JALAN => self.uji_jalan(args, span),
+            super::uji::AKHIR => self.uji_akhir(),
             "wok" => self.builtin_print(args, false, true),
             "wok_" | "fmt::wok_" => self.builtin_print(args, false, false),
             "fmt::wok" => self.builtin_print(args, false, true),
@@ -41,7 +50,7 @@ impl Codegen {
             "range_inclusive" if args.len() == 2 => {
                 let satu = Expr::Literal(crate::parser::LitKind::Int(1), span);
                 let ujung = Expr::Binary { op: BinaryOp::Add, lhs: Box::new(args[1].clone()), rhs: Box::new(satu), span };
-                self.builtin_range(&[args[0].clone(), ujung], span)
+                self.builtin_range_bernama("range_inclusive", &[args[0].clone(), ujung], span)
             }
             "enumerate" | "zip" if self.kunci_lapis("arr", name).is_some() => {
                 let kunci = self.kunci_lapis("arr", name).unwrap_or_default();
@@ -244,6 +253,7 @@ impl Codegen {
         if self.punya_hook_tampil(&v.ty) {
             return self.panggil_hook_tampil(v);
         }
+        if self.lewat_bantu(&v.ty) { return Ok(self.tampil_lewat_bantu(v)); }
         match &v.ty {
             JrgType::Str => Ok(v.clone()),
             JrgType::Fn(..) => Ok(self.tampilan_fungsi(v)),
@@ -621,10 +631,8 @@ impl Codegen {
     pub fn panjang_koleksi(&mut self, v: &Val, span: Span) -> Result<Val, String> {
         match &v.ty {
             JrgType::Str => {
-                self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
                 let (p, l) = self.split_str(v);
-                let r = self.fresh("slen.");
-                self.emit(format!("{} = call i64 @jrg_str_char_count(ptr {}, i64 {})", r, p, l));
+                let r = self.jumlah_karakter(&p, &l);
                 Ok(Val { text: r, ty: JrgType::I64 })
             }
             JrgType::Array(_, n) => Ok(Val { text: n.to_string(), ty: JrgType::I64 }),
@@ -636,6 +644,13 @@ impl Codegen {
             }
             JrgType::Tuple(ts) => Ok(Val { text: ts.len().to_string(), ty: JrgType::I64 }),
             JrgType::Dict(_) => { let (_, n) = self.bagian_dict_mentah(v); Ok(Val { text: n, ty: JrgType::I64 }) }
+            // Channel: isi yang menunggu diterima, sama dengan `chan::len`.
+            JrgType::Chan(_) => {
+                self.ensure_extern("declare i64 @jrg_chan_info(ptr, i32)", "jrg_chan_info");
+                let r = self.fresh("chlen.");
+                self.emit(format!("{} = call i64 @jrg_chan_info(ptr {}, i32 0)", r, v.text));
+                Ok(Val { text: r, ty: JrgType::I64 })
+            }
             // Nilai bertag: panjangnya dibaca menurut tagnya; yang tak berpanjang gagal saat jalan.
             JrgType::Any => {
                 use super::codegen_any::{TAG_DICT, TAG_SLICE, TAG_STR};
@@ -671,6 +686,10 @@ impl Codegen {
 
     /// `range(n)`, `range(a, b)`, `range(a, b, langkah)`.
     fn builtin_range(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
+        self.builtin_range_bernama("range", args, span)
+    }
+
+    fn builtin_range_bernama(&mut self, nama: &str, args: &[Expr], span: Span) -> Result<Val, String> {
         if args.is_empty() || args.len() > 3 {
             return Err(super::galat::tandai(span, format!(
                 "`range` butuh 1..3 argumen, diberi {}", args.len())));
@@ -685,35 +704,42 @@ impl Codegen {
             _ => (nilai(self, &args[0])?, nilai(self, &args[1])?, nilai(self, &args[2])?),
         };
 
-        // Langkah nol akan membuat panjangnya tak berhingga; acuannya
-        // menolaknya, jadi di sini juga — bukan diam-diam menghasilkan
-        // koleksi kosong, yang terlihat seperti jawaban.
+        // Langkah nol dan jumlah elemen: satu definisi dengan acuan (`range_hitung`,
+        // `cek_batas_elemen`), dihitung di 128 bit supaya `akhir - awal` tidak meluap.
         let nol = self.fresh("rgz.");
         self.emit(format!("{} = icmp eq i64 {}, 0", nol, langkah));
         let mati = self.fresh_label("rg.mati.");
         let lanjut = self.fresh_label("rg.lanjut.");
         self.terminate(format!("br i1 {}, label %{}, label %{}", nol, mati, lanjut));
         self.start_block(mati);
-        self.panik("range: langkah tidak boleh 0");
+        let pesan_nol = crate::interpreter::range_hitung(nama, 0, 0, 0, false).unwrap_err();
+        self.panik(&pesan_nol);
         self.start_block(lanjut);
-
-        // panjang = maks(0, ceil((akhir - awal) / langkah))
-        let beda = self.fresh("rgd.");
-        self.emit(format!("{} = sub i64 {}, {}", beda, akhir, awal));
-        let sesuai = self.fresh("rgs.");
-        self.emit(format!("{} = sdiv i64 {}, {}", sesuai, beda, langkah));
-        let sisa = self.fresh("rgm.");
-        self.emit(format!("{} = srem i64 {}, {}", sisa, beda, langkah));
-        let ada_sisa = self.fresh("rgas.");
-        self.emit(format!("{} = icmp ne i64 {}, 0", ada_sisa, sisa));
-        let tambah = self.fresh("rgt.");
-        self.emit(format!("{} = zext i1 {} to i64", tambah, ada_sisa));
-        let kasar = self.fresh("rgk.");
-        self.emit(format!("{} = add i64 {}, {}", kasar, sesuai, tambah));
-        let positif = self.fresh("rgp.");
-        self.emit(format!("{} = icmp sgt i64 {}, 0", positif, kasar));
-        let n = self.fresh("rgn.");
-        self.emit(format!("{} = select i1 {}, i64 {}, i64 0", n, positif, kasar));
+        let lebar = |cg: &mut Self, v: &str| { let r = cg.fresh("rgw."); cg.emit(format!("{} = sext i64 {} to i128", r, v)); r };
+        let (a, b, st) = (lebar(self, &awal), lebar(self, &akhir), lebar(self, &langkah));
+        let ins = |cg: &mut Self, f: String| { let r = cg.fresh("rg."); cg.emit(f.replace("{}", &r)); r };
+        let maju = ins(self, format!("{{}} = icmp sgt i128 {}, 0", st));
+        let lt = ins(self, format!("{{}} = icmp slt i128 {}, {}", a, b));
+        let gt = ins(self, format!("{{}} = icmp sgt i128 {}, {}", a, b));
+        let ada = ins(self, format!("{{}} = select i1 {}, i1 {}, i1 {}", maju, lt, gt));
+        let d1 = ins(self, format!("{{}} = sub i128 {}, {}", b, a));
+        let d2 = ins(self, format!("{{}} = sub i128 {}, {}", a, b));
+        let d = ins(self, format!("{{}} = select i1 {}, i128 {}, i128 {}", maju, d1, d2));
+        let neg = ins(self, format!("{{}} = sub i128 0, {}", st));
+        let abs = ins(self, format!("{{}} = select i1 {}, i128 {}, i128 {}", maju, st, neg));
+        let q = ins(self, format!("{{}} = udiv i128 {}, {}", d, abs));
+        let r = ins(self, format!("{{}} = urem i128 {}, {}", d, abs));
+        let sisa = ins(self, format!("{{}} = icmp ne i128 {}, 0", r));
+        let tambah = ins(self, format!("{{}} = zext i1 {} to i128", sisa));
+        let naik = ins(self, format!("{{}} = add i128 {}, {}", q, tambah));
+        let n128 = ins(self, format!("{{}} = select i1 {}, i128 {}, i128 0", ada, naik));
+        let batas = crate::interpreter::MAKS_ELEMEN;
+        let besar = ins(self, format!("{{}} = icmp ugt i128 {}, {}", n128, batas));
+        let pesan = crate::interpreter::cek_batas_elemen(nama, batas + 1).unwrap_err()
+            .replacen(&(batas + 1).to_string(), super::codegen_konversi::PENANDA, 1);
+        let cetak = super::codegen_konversi::Cetak::Bulat(Val { text: n128.clone(), ty: JrgType::I128 });
+        self.gagal_bila(&besar, |cg| cg.panik_sisip(&pesan, &cetak));
+        let n = ins(self, format!("{{}} = trunc i128 {} to i64", n128));
 
         let buf = self.buffer_baru(&n, &JrgType::I64);
         let i = self.alloca_raw("rgi.", "i64", Some(8));
@@ -748,6 +774,12 @@ impl Codegen {
     fn builtin_typeof(&mut self, args: &[Expr]) -> Result<Val, String> {
         if args.len() != 1 { return Err("`typeof` butuh 1 argumen".into()); }
         let v = self.codegen_expr(&args[0], None)?;
+        self.nama_typeof_val(&v)
+    }
+
+    /// Jawaban `typeof` untuk nilai yang sudah diturunkan.
+    pub(crate) fn nama_typeof_val(&mut self, v: &Val) -> Result<Val, String> {
+        let v = v.clone();
         // Sebuah nilai bertag tidak punya jawaban `typeof` yang statis — jawabannya
         // justru tag yang dibawanya saat jalan.
         if v.ty == JrgType::Any { return self.typeof_any(&v); }
@@ -796,22 +828,22 @@ impl Codegen {
         let cv = self.codegen_expr(&args[0], Some(&JrgType::Bool))?;
         let cv = self.coerce_longgar(&cv, &JrgType::Bool);
         let ci1 = self.to_i1(&cv);
+        // Kalimatnya dari `pesan_assert` acuan; pesan tambahan dievaluasi seperti dulu, sebelum kondisinya diuji.
         let msg = if args.len() >= 2 {
             let m = self.codegen_expr(&args[1], Some(&JrgType::Str))?;
-            if m.ty != JrgType::Str { self.val_to_str(&m)? } else { m }
+            let m = if m.ty != JrgType::Str { self.val_to_str(&m)? } else { m };
+            let awal = self.intern_string(&crate::interpreter::pesan_assert(Some("")));
+            self.str_concat(&awal, &m)?
         } else {
-            self.intern_string("assertion failed")
+            self.intern_string(&crate::interpreter::pesan_assert(None))
         };
         let fail_lbl = self.fresh_label("assertfail.");
         let ok_lbl = self.fresh_label("assertok.");
         self.terminate_unlikely_false(&ci1, &ok_lbl, &fail_lbl);
         self.start_block(fail_lbl);
-        self.ensure_extern(
-            "declare void @jrg_assert_fail(ptr, i64) cold nounwind noreturn",
-            "jrg_assert_fail",
-        );
+        self.ensure_extern("declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
         let (mp, ml) = self.split_str(&msg);
-        self.emit(format!("call void @jrg_assert_fail(ptr {}, i64 {})", mp, ml));
+        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
         self.terminate("unreachable".to_string());
         self.start_block(ok_lbl);
         Ok(Val::unit())
@@ -824,26 +856,44 @@ impl Codegen {
         }
         let lv = self.codegen_expr(&args[0], None)?;
         let rv0 = self.codegen_expr(&args[1], Some(&lv.ty))?;
-        let rv = self.coerce(&rv0, &lv.ty);
-        let eqv = self.cmp_binop_pub_entry(&BinaryOp::Eq, &lv, &rv, span)?;
+        // Dua array beda panjang dibandingkan sebagai slice, seperti `urut_agregat` (dulu ditolak saat kompilasi).
+        let slice = |t: &JrgType| match t {
+            JrgType::Array(e, _) | JrgType::Slice(e) => Some(JrgType::Slice(Box::new(super::codegen_any::luruh(e)))),
+            _ => None,
+        };
+        let (lv_b, rv) = match (slice(&lv.ty), slice(&rv0.ty)) {
+            (Some(a), Some(b)) if a == b && lv.ty != rv0.ty => (self.coerce(&lv, &a), self.coerce(&rv0, &b)),
+            _ => (lv.clone(), self.coerce(&rv0, &lv.ty)),
+        };
+        let eqv = self.cmp_binop_pub_entry(&BinaryOp::Eq, &lv_b, &rv, span)?;
         let i1 = self.to_i1(&eqv);
         let fail_lbl = self.fresh_label("aefail.");
         let ok_lbl = self.fresh_label("aeok.");
         self.terminate_unlikely_false(&i1, &ok_lbl, &fail_lbl);
         self.start_block(fail_lbl);
+        // Kalimat acuan `pesan_assert_eq`: nilai dan tipe kedua sisi, plus argumen ketiga kalau ada.
         let ls = self.val_to_str(&lv)?;
-        let rs = self.val_to_str(&rv)?;
-        let m1 = self.intern_string("assertion failed: `left == right`\n  left: ");
-        let m2 = self.intern_string("\n right: ");
-        let p1 = self.str_concat(&m1, &ls)?;
-        let p2 = self.str_concat(&p1, &m2)?;
-        let full = self.str_concat(&p2, &rs)?;
+        let lt = self.nama_typeof_val(&lv)?;
+        let rs = self.val_to_str(&rv0)?;
+        let rt = self.nama_typeof_val(&rv0)?;
+        let (tp, tl) = match args.get(2) {
+            Some(e) => {
+                let t = self.codegen_expr(e, Some(&JrgType::Str))?;
+                let t = if t.ty != JrgType::Str { self.val_to_str(&t)? } else { t };
+                self.split_str(&t)
+            }
+            None => ("null".to_string(), "-1".to_string()),
+        };
         self.ensure_extern(
-            "declare void @jrg_assert_fail(ptr, i64) cold nounwind noreturn",
-            "jrg_assert_fail",
+            "declare void @jrg_panic_assert_eq(ptr, i64, ptr, i64, ptr, i64, ptr, i64, ptr, i64) cold nounwind noreturn",
+            "jrg_panic_assert_eq",
         );
-        let (mp, ml) = self.split_str(&full);
-        self.emit(format!("call void @jrg_assert_fail(ptr {}, i64 {})", mp, ml));
+        let mut bagian = Vec::new();
+        for v in [&ls, &lt, &rs, &rt] {
+            let (p, l) = self.split_str(v);
+            bagian.push(format!("ptr {}, i64 {}", p, l));
+        }
+        self.emit(format!("call void @jrg_panic_assert_eq({}, ptr {}, i64 {})", bagian.join(", "), tp, tl));
         self.terminate("unreachable".to_string());
         self.start_block(ok_lbl);
         Ok(Val::unit())
@@ -1043,6 +1093,10 @@ impl Codegen {
     /// Argumen angka sebuah `math::`, dengan kalimat acuan untuk yang bukan angka.
     fn angka_math(&mut self, e: &Expr, nama: &str, span: Span) -> Result<Val, String> {
         let v = self.codegen_expr(e, None)?;
+        self.angka_cek(v, nama, span)
+    }
+
+    fn angka_cek(&mut self, v: Val, nama: &str, span: Span) -> Result<Val, String> {
         if !v.ty.is_numeric() && v.ty != JrgType::Never {
             return Err(super::galat::tandai(span, format!(
                 "{}: butuh angka, dapat `{}`", nama, v.ty.nama_typeof())));
@@ -1056,16 +1110,32 @@ impl Codegen {
     fn builtin_minmax(&mut self, args: &[Expr], want_min: bool, span: Span) -> Result<Val, String> {
         let nama = if want_min { "math::min" } else { "math::max" };
         if args.len() != 2 { return Err(format!("[{}:{}] `{}` butuh 2 argumen", span.lo.0, span.hi.0, nama)); }
-        let a = self.angka_math(&args[0], nama, span)?;
-        let b = self.angka_math(&args[1], nama, span)?;
-        // Bulat lawan pecahan: acuan menjawab argumen ASLINYA, jadi tipe hasilnya baru
-        // diketahui saat jalan — backend bertipe statis tidak punya satu tipe untuknya.
-        if a.ty.is_float() != b.ty.is_float() {
-            return Err(super::galat::tandai(span, format!(
-                "`{}` atas bilangan bulat dan pecahan sekaligus belum didukung backend LLVM: \
-                 jawaban acuannya argumen aslinya, jadi tipenya (`int` atau `float`) baru \
-                 diketahui saat jalan\n\
-                 bantuan: samakan tipenya dulu, mis. `{}(x as float, 0.0)`", nama, nama)));
+        let bertag = |cg: &mut Self, e: &Expr| -> Result<Val, String> {
+            let v = cg.codegen_expr(e, None)?;
+            if v.ty == JrgType::Any { Ok(v) } else { cg.angka_cek(v, nama, span) }
+        };
+        let a = bertag(self, &args[0])?;
+        let b = bertag(self, &args[1])?;
+        // Nilai bertag: pembanding umum yang sama dengan `<`/`>` (`a < b $ a : b`), hasilnya argumen aslinya.
+        if a.ty == JrgType::Any || b.ty == JrgType::Any {
+            let op = if want_min { BinaryOp::Lt } else { BinaryOp::Gt };
+            let c = self.urut_any(&op, &a, &b, span)?;
+            let c1 = self.to_i1(&c);
+            let (ka, kb) = (self.kotak_any(&a, span)?, self.kotak_any(&b, span)?);
+            let r = self.fresh("amm.");
+            self.emit(format!("{} = select i1 {}, %JrgAny {}, %JrgAny {}", r, c1, ka.text, kb.text));
+            return Ok(Val { text: r, ty: JrgType::Any });
+        }
+        // Bulat lawan pecahan: acuan menjawab argumen ASLINYA, jadi hasilnya nilai bertag yang
+        // membawa jenis itu (dulu ditolak saat kompilasi). Pembandingnya di pecahan, rumus yang sama.
+        if a.ty.is_float() != b.ty.is_float() && a.ty.is_numeric() && b.ty.is_numeric() {
+            let (fa, fb) = (self.coerce_longgar(&a, &JrgType::F64), self.coerce_longgar(&b, &JrgType::F64));
+            let cmp = self.fresh("fmmc.");
+            self.emit(format!("{} = fcmp {} double {}, {}", cmp, if want_min { "olt" } else { "ogt" }, fa.text, fb.text));
+            let (ka, kb) = (self.kotak_any(&a, span)?, self.kotak_any(&b, span)?);
+            let r = self.fresh("fmm.");
+            self.emit(format!("{} = select i1 {}, %JrgAny {}, %JrgAny {}", r, cmp, ka.text, kb.text));
+            return Ok(Val { text: r, ty: JrgType::Any });
         }
         let b = self.coerce(&b, &a.ty);
         if a.ty.is_float() {
@@ -1280,6 +1350,16 @@ impl Codegen {
     fn builtin_json_tulis(&mut self, e: &Expr, indent: Option<Option<&Expr>>, span: Span) -> Result<Val, String> {
         let v = self.codegen_expr(e, None)?;
         let v = super::codegen_any::samakan_dict(&v);
+        // Struct/enum/tuple milik program (juga di dalam wadah): penyandi `jrgc` lewat jembatan, yang
+        // sama dengan acuan — dulu ditolak saat kompilasi.
+        if matches!(v.ty, JrgType::Struct(_) | JrgType::Enum(_) | JrgType::Tuple(_))
+            || super::codegen_jembatan::mengandung_buram(&v.ty) {
+            let tempat = self.spill_to_place(&v);
+            let mut args = vec![self.lokal_sementara(tempat, v.ty.clone(), span)];
+            if let Some(Some(x)) = indent { args.push(x.clone()); }
+            let nama = if indent.is_some() { "json::pretty" } else { "json::stringify" };
+            return self.panggil_jembatan(nama, None, None, &args, span);
+        }
         let buram = super::codegen_any::tag_untuk(&v.ty) == Some(super::codegen_any::TAG_BURAM);
         let kotak = if buram { Err(String::new()) } else { self.kotak_any(&v, span) };
         // Yang memang TIDAK punya padanan JSON dijawab kalimat dua mesin lain; sisanya celah backend.
@@ -1344,6 +1424,8 @@ impl Codegen {
     fn arg_teks(&mut self, args: &[Expr], nama: &str, span: Span) -> Result<Val, String> {
         if args.len() != 1 { return Err(format!("[{}:{}] `{}` butuh 1 argumen string", span.lo.0, span.hi.0, nama)); }
         let v = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
+        // `rune` diterima di tiap pintu `str::`, seperti di dua mesin acuan: ia satu karakter.
+        if v.ty == JrgType::Rune { return Ok(self.teks_atau_rune(&v)); }
         if v.ty != JrgType::Str {
             return Err(super::galat::tandai(span,
                 crate::interpreter::pesan_arg_harus_teks(nama, "argumen pertama", &v.ty.nama_typeof())));
@@ -1387,16 +1469,25 @@ impl Codegen {
     fn builtin_str1(&mut self, args: &[Expr], fname: &str, span: Span) -> Result<Val, String> {
         if args.len() != 1 { return Err(format!("[{}:{}] `str::*` butuh 1 argumen string", span.lo.0, span.hi.0)); }
         let v0 = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
-        let v = self.coerce(&v0, &JrgType::Str);
+        let v = self.teks_atau_rune(&v0);
         self.builtin_str1_val(&v, fname)
+    }
+
+    /// Argumen teks sebuah `str::`: `rune` adalah teks satu karakter, seperti di acuan (Fase
+    /// TEKS-PERTAMA) — dulu `str::contains(s, s.char_at(1))` ditolak LLVM. Sisanya lewat `coerce`.
+    pub(crate) fn teks_atau_rune(&mut self, v: &Val) -> Val {
+        if v.ty == JrgType::Rune {
+            if let Ok(s) = self.build_display_str(v) { return s; }
+        }
+        self.coerce(v, &JrgType::Str)
     }
 
     fn builtin_str_bool2(&mut self, args: &[Expr], fname: &str, span: Span) -> Result<Val, String> {
         if args.len() != 2 { return Err(format!("[{}:{}] `str::*` butuh 2 argumen string", span.lo.0, span.hi.0)); }
         let a0 = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
-        let a = self.coerce(&a0, &JrgType::Str);
+        let a = self.teks_atau_rune(&a0);
         let b0 = self.codegen_expr(&args[1], Some(&JrgType::Str))?;
-        let b = self.coerce(&b0, &JrgType::Str);
+        let b = self.teks_atau_rune(&b0);
         self.ensure_extern(&format!("declare i32 @{}(ptr, i64, ptr, i64)", fname), fname);
         let (ap, al) = self.split_str(&a);
         let (bp, bl) = self.split_str(&b);
@@ -1410,7 +1501,7 @@ impl Codegen {
     fn builtin_str_repeat(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         if args.len() != 2 { return Err(format!("[{}:{}] `str::repeat` butuh 2 argumen (string, n)", span.lo.0, span.hi.0)); }
         let s0 = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
-        let s = self.coerce(&s0, &JrgType::Str);
+        let s = self.teks_atau_rune(&s0);
         let n0 = self.codegen_expr(&args[1], Some(&JrgType::I64))?;
         let n = self.bulat_arg(&n0, "str::repeat", span)?;
         self.ensure_extern("declare void @jrg_str_repeat(ptr, i64, i64, ptr, ptr)", "jrg_str_repeat");
@@ -1421,14 +1512,22 @@ impl Codegen {
         self.join_str(&outp, &outl)
     }
 
+    /// Pengganti `replace` DITAMPILKAN, seperti acuan (`format!("{}")`): yang bukan teks lewat `::str`.
+    pub(crate) fn teks_tampilan(&mut self, e: &Expr, span: Span) -> Expr {
+        if self.peek_expr_type(e) == Some(JrgType::Str) { return e.clone(); }
+        let jalur = Expr::PathExpr { segments: vec![String::new(), "str".to_string()], span };
+        Expr::Call { func: Box::new(jalur), args: vec![e.clone()], span }
+    }
+
     fn builtin_str_replace(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         if args.len() != 3 { return Err(format!("[{}:{}] `str::replace` butuh 3 argumen (string, dari, ke)", span.lo.0, span.hi.0)); }
         let s0 = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
-        let s = self.coerce(&s0, &JrgType::Str);
+        let s = self.teks_atau_rune(&s0);
         let f0 = self.codegen_expr(&args[1], Some(&JrgType::Str))?;
-        let f = self.coerce(&f0, &JrgType::Str);
-        let t0 = self.codegen_expr(&args[2], Some(&JrgType::Str))?;
-        let t = self.coerce(&t0, &JrgType::Str);
+        let f = self.teks_atau_rune(&f0);
+        let ke = self.teks_tampilan(&args[2], span);
+        let t0 = self.codegen_expr(&ke, Some(&JrgType::Str))?;
+        let t = self.teks_atau_rune(&t0);
         self.ensure_extern("declare void @jrg_str_replace(ptr, i64, ptr, i64, ptr, i64, ptr, ptr)", "jrg_str_replace");
         let (sp, sl) = self.split_str(&s);
         let (fp, fl) = self.split_str(&f);
@@ -1512,6 +1611,11 @@ impl Codegen {
             return Some((|| {
                 let harap = JrgType::Slice(Box::new(JrgType::Str));
                 let a = self.codegen_expr(&args[0], Some(&harap))?;
+                // Nilai bertag: tagnya harus array (diperiksa saat jalan), elemennya ditampilkan lapis.
+                let a = match a.ty {
+                    JrgType::Any => self.buka_terperiksa(&a, &JrgType::Slice(Box::new(JrgType::Any))).unwrap_or(a),
+                    _ => a,
+                };
                 let elem = match &a.ty {
                     JrgType::Array(e, _) | JrgType::Slice(e) => (**e).clone(),
                     lain => return Err(super::galat::tandai(span,
@@ -1531,6 +1635,7 @@ impl Codegen {
                 }
                 let (ptr, len) = self.bagian_koleksi_pub(&a, &elem);
                 let p = self.codegen_expr(&args[1], Some(&JrgType::Str))?;
+                let p = if p.ty == JrgType::Rune { self.teks_atau_rune(&p) } else { p };
                 if p.ty != JrgType::Str {
                     return Err(super::galat::tandai(span,
                         crate::interpreter::pesan_arg_harus_teks("str::join", "pemisahnya", &p.ty.display_name())));

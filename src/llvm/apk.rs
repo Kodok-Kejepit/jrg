@@ -261,7 +261,12 @@ fn cari_alat() -> Result<Alat, String> {
 
 fn jalankan(cmd: &mut Command, apa: &str, verbose: bool) -> Result<(), String> {
     if verbose { eprintln!("[jrgc] {:?}", cmd); }
-    let out = crate::putar::jalankan(cmd, apa).map_err(|e| format!("{}: gagal menjalankan {:?}: {}", apa, cmd.get_program(), e))?;
+    let out = crate::putar::jalankan(cmd, apa).map_err(|e| {
+        match crate::host::skrip_tanpa_penafsir(std::path::Path::new(cmd.get_program())) {
+            Some(k) => format!("{}: {}", apa, k),
+            None => format!("{}: gagal menjalankan {:?}: {}", apa, cmd.get_program(), crate::host::galat_io(&e)),
+        }
+    })?;
     if !out.status.success() {
         return Err(format!("{} gagal:\n{}{}", apa, String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)));
     }
@@ -334,6 +339,7 @@ fn jrgc_android(abi: &Abi, alat: &Alat, verbose: bool) -> Result<PathBuf, String
     if perlu {
         if verbose { eprintln!("[jrgc] membangun jrgc untuk {} — beberapa menit, di-cache setelahnya...", abi.nama); }
         let linker = alat.ndk_bin.join(format!("{}{}-clang", abi.clang, API));
+        if let Some(k) = crate::host::skrip_tanpa_penafsir(&linker) { return Err(k); }
         let besar = abi.rust.to_uppercase().replace('-', "_");
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release", "-j", "1", "--bin", "jrgc", "--target", abi.rust]).current_dir(dir)
@@ -415,6 +421,7 @@ fn bangun_abi(ir_path: &Path, kerja: &Path, abi: &Abi, alat: &Alat, opsi: &OpsiA
     let mut pustaka = vec![so.clone()];
     if super::PAKAI_JEMBATAN.load(std::sync::atomic::Ordering::Relaxed) {
         let linker = alat.ndk_bin.join(format!("{}{}-clang", abi.clang, API));
+        if let Some(k) = crate::host::skrip_tanpa_penafsir(&linker) { return Err(k); }
         let lib = super::ensure_jembatan_untuk(verbose, Some((abi.rust, &linker, &alat.ndk_bin.join("llvm-ar"))))
             .map_err(|e| saran_target(e, abi))?;
         cmd.arg("-L").arg(lib.parent().unwrap_or(Path::new("."))).arg("-ljrgjembatan");
@@ -446,7 +453,7 @@ fn tulis_zip(tujuan: &Path, isi: &[(String, Vec<u8>)]) -> Result<(), String> {
         let dasar = mulai + 30 + nama.len();
         let mut tambah = (rata - dasar % rata) % rata;
         if tambah != 0 && tambah < 6 { tambah += rata; }
-        let crc = crate::canvas::png::crc32(data);
+        let crc = crate::kompres::crc32(data);
         u32le(&mut out, 0x04034b50); u16le(&mut out, 10); u16le(&mut out, 0); u16le(&mut out, 0);
         u16le(&mut out, 0); u16le(&mut out, 0x21);
         u32le(&mut out, crc); u32le(&mut out, data.len() as u32); u32le(&mut out, data.len() as u32);
@@ -530,7 +537,8 @@ fn tanda_tangan_rilis(alat: &Alat, app: &Aplikasi, mentah: &Path, tujuan: &Path,
                     supaya apksigner menanyakannya".into());
     }
     cmd.arg("--out").arg(tujuan).arg(mentah);
-    let st = cmd.status().map_err(|e| format!("gagal menjalankan apksigner: {}", e))?;
+    let st = cmd.status().map_err(|e| crate::host::skrip_tanpa_penafsir(std::path::Path::new(cmd.get_program()))
+        .unwrap_or_else(|| format!("gagal menjalankan apksigner: {}", crate::host::galat_io(&e))))?;
     if !st.success() { return Err("apksigner menolak menandatangani (sandi salah, atau alias tidak ada di kunci itu)".into()); }
     Ok(())
 }
@@ -622,6 +630,7 @@ fn kompilasi_proyek(app: &Aplikasi, abi: &Abi, alat: &Alat, d: &Path, verbose: b
         let crate_nama = nama_crate(&isi).ok_or_else(|| format!("`name` tidak ada di {}", manifes.display()))?;
         let target_dir = d.join(format!("rust-{}", berkas));
         let linker = alat.ndk_bin.join(format!("{}{}-clang", abi.clang, API));
+        if let Some(k) = crate::host::skrip_tanpa_penafsir(&linker) { return Err(k); }
         let besar = abi.rust.to_uppercase().replace('-', "_");
         let mut cmd = Command::new("cargo");
         cmd.args(["build", "--release", "-j", "1", "--target", abi.rust, "--manifest-path"]).arg(&manifes)

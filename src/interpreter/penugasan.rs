@@ -47,6 +47,7 @@ impl Interpreter {
         if let Some(v) = self.coba_tumbuh_di_tempat(s, env)? { return Ok(v); }
         if let Some(v) = self.coba_ubah_di_tempat(s, env)?   { return Ok(v); }
         if let Some(v) = self.coba_tumbuh_jalur(s, env)?     { return Ok(v); }
+        if let Some(v) = self.coba_konsumsi_jalur(s, env)?   { return Ok(v); }
         if let Some(v) = self.coba_konsumsi_penerima(s, env)? { return Ok(v); }
 
         // `a, b = e`: satu nilai untuk banyak sasaran berarti membongkar tuple.
@@ -145,6 +146,13 @@ impl Interpreter {
         Ok(Value::Unit)
     }
 
+    /// Isi jalur `root` + `steps` DIPINDAHKAN keluar (tempatnya jadi `nil`), jadi pemegangnya tinggal satu.
+    pub(crate) fn ambil_jalur(&mut self, root: &str, steps: &[Langkah], env: &mut Env) -> Result<Value, Signal> {
+        let v = self.tulis_jalur(root, steps, None, true, env)?.unwrap_or(Value::Nil);
+        self.tulis_jalur(root, steps, Some(Value::Nil), false, env)?;
+        Ok(v)
+    }
+
     /// Telusuri `root` + `steps` lalu, di langkah terakhir, tulis `nilai` — atau, kalau
     /// `nilai` kosong, kembalikan isi lamanya tanpa menulis apa pun.
     fn tulis_jalur(
@@ -172,7 +180,7 @@ impl Interpreter {
 
             // `t.0 = v` atas tuple adalah `t[0] = v`.
             let ganti;
-            let terakhir = match Self::field_tuple(kursor, terakhir) {
+            let terakhir = match Self::field_tuple(kursor, terakhir).or_else(|| Self::index_struct(kursor, terakhir)) {
                 Some(l) => { ganti = l; &ganti }
                 None => terakhir,
             };
@@ -294,6 +302,13 @@ impl Interpreter {
     }
 
     /// `.N` atas sebuah tuple, dibaca sebagai langkah `[N]`.
+    /// `p["x"]` atas struct milik program adalah `p.x`: privasi dan field yang tidak dideklarasikan ikut.
+    fn index_struct(kursor: &Value, langkah: &Langkah) -> Option<Langkah> {
+        use crate::interpreter::builtin::dict::DICT_TYPE_NAME;
+        let (Value::Struct { name, .. }, Langkah::Index(ixv, sp)) = (kursor, langkah) else { return None };
+        (name != DICT_TYPE_NAME).then(|| Langkah::Field(format!("{}", ixv), *sp))
+    }
+
     fn field_tuple(kursor: &Value, langkah: &Langkah) -> Option<Langkah> {
         let (Value::Tuple(_), Langkah::Field(nama, sp)) = (kursor, langkah) else { return None };
         if nama.is_empty() || !nama.chars().all(|c| c.is_ascii_digit()) { return None; }
@@ -312,10 +327,14 @@ impl Interpreter {
             tak_bisa_ditulis_lewat_index, tipe_index_salah,
         };
         let ganti;
-        let langkah = match Self::field_tuple(kursor, langkah) {
+        let langkah = match Self::field_tuple(kursor, langkah).or_else(|| Self::index_struct(kursor, langkah)) {
             Some(l) => { ganti = l; &ganti }
             None => langkah,
         };
+        // Field antara yang privat tidak bisa dilewati untuk menulis ke dalamnya (`p.q.y = 4`).
+        if let Langkah::Field(nama, _) = langkah {
+            self.check_field_access_as(&*kursor, nama, self.ruang_kini.as_deref().map(|s| s.as_str()))?;
+        }
         match langkah {
             // Kalimatnya sama dengan langkah `[...]` di bawah dan dengan VM: menulis
             // lewat `d.a` dan lewat `d["a"]` adalah satu kesalahan, bukan dua.

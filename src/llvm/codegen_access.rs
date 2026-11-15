@@ -111,6 +111,14 @@ impl Codegen {
                 if let Some(r) = self.buka_tiap_elemen(v, &e2) { return r; }
             }
         }
+        // `Option<nilai bertag>` (mis. `None` tanpa petunjuk) menuju `Option<T>`: isinya dibuka, tagnya diperiksa.
+        if let (JrgType::Enum(a), JrgType::Enum(b)) = (&v.ty, target) {
+            if let (Some(JrgType::Any), Some(tb)) = (self.option_args.get(a).cloned(), self.option_args.get(b).cloned()) {
+                if tb != JrgType::Any && super::codegen_any::tag_untuk(&tb).is_some() {
+                    if let Some(r) = self.buka_isi_opsi(v, &tb, b) { return r; }
+                }
+            }
+        }
         // `Option<T>` menuju `Option` bernilai bertag: isinya (kalau ada) masuk kotak.
         if let (JrgType::Enum(a), JrgType::Enum(b)) = (&v.ty, target) {
             if let (Some(ta), Some(JrgType::Any)) = (self.option_args.get(a).cloned(), self.option_args.get(b).cloned()) {
@@ -127,13 +135,13 @@ impl Codegen {
         }
         // Peluruhan di DALAM slice atau dict: `array<[2]i64>` jadi `array<array<i64>>`.
         if let (JrgType::Slice(e1), JrgType::Slice(e2)) = (&v.ty, target) {
-            if e1 != e2 && super::codegen_any::luruh(e1) == **e2 {
+            if e1 != e2 && (super::codegen_any::luruh(e1) == **e2 || isi_jadi_bertag(e1, e2) || isi_dibuka(e1, e2)) {
                 let (e1, e2) = ((**e1).clone(), (**e2).clone());
                 if let Some(r) = self.ubah_tiap_elemen(v, &e1, &e2) { return r; }
             }
         }
         if let (JrgType::Dict(e1), JrgType::Dict(e2)) = (&v.ty, target) {
-            if e1 != e2 && super::codegen_any::luruh(e1) == **e2 {
+            if e1 != e2 && (super::codegen_any::luruh(e1) == **e2 || isi_jadi_bertag(e1, e2)) {
                 let (e1, e2) = ((**e1).clone(), (**e2).clone());
                 if let Some(r) = self.ubah_tiap_nilai(v, &e1, &e2) { return r; }
             }
@@ -344,9 +352,10 @@ impl Codegen {
     /// Indeks array/string/tuple: bilangan bulat saja, dengan kalimat acuan untuk yang lain.
     pub(crate) fn indeks_bulat(&mut self, idx: &Expr, wadah: &str, span: Span) -> Result<Val, String> {
         let iv = self.codegen_expr(idx, Some(&JrgType::I64))?;
-        if !iv.ty.is_int() && iv.ty != JrgType::Never {
-            return Err(super::galat::tandai(span, crate::interpreter::galat_index::tipe_index_salah(
-                wadah, &iv.ty.nama_typeof())));
+        if !iv.ty.is_int() && !matches!(iv.ty, JrgType::Never | JrgType::Any) {
+            let pesan = crate::interpreter::galat_index::tipe_index_salah(wadah, &iv.ty.nama_typeof());
+            self.tempat_tiruan_sesudah(&pesan, span)?;
+            return Ok(Val { text: "0".into(), ty: JrgType::I64 });
         }
         Ok(self.coerce_longgar(&iv, &JrgType::I64))
     }
@@ -357,6 +366,15 @@ impl Codegen {
         // Dipasang oleh langkah sesudahnya: `e` adalah langkah ANTARA sebuah jalur tulis.
         let antara = std::mem::take(&mut self.tulis_antara);
         match e {
+            // `const`/`let` modul dilipat di tempat pakai: nilainya diturunkan ke tempat sementara supaya
+            // `NAMA[i]` bisa dibaca (menulis lewat konstanta sudah ditolak parser).
+            Expr::Ident(name, _) if self.lookup_local(name).is_none() && !self.var_global.contains_key(&self.k(name))
+                && self.tables.consts.contains_key(&self.k(name)) => {
+                let v = self.codegen_expr(e, None)?;
+                let slot = self.alloca_typed("cst.", &v.ty);
+                self.emit(format!("store {} {}, ptr {}", v.ty.llvm_ty(), v.text, slot));
+                Ok((slot, v.ty))
+            }
             Expr::Ident(name, _) => self.lookup_local(name)
                 .or_else(|| self.var_global.get(&self.k(name)).cloned())
                 .ok_or_else(|| {
@@ -414,8 +432,18 @@ impl Codegen {
                 if let JrgType::Tuple(_) = &oty {
                     return self.tempat_elemen_tuple(&optr, &oty, idx, *span);
                 }
-                let iv = self.codegen_expr(idx, Some(&JrgType::I64))?;
-                let iv = self.coerce_longgar(&iv, &JrgType::I64);
+                // `p["x"] = v` atas struct adalah `p.x = v`.
+                if let JrgType::Struct(_) = &oty {
+                    let k = self.kunci_struct(idx, *span)?;
+                    return self.get_field_place(&optr, &oty, &k, *span);
+                }
+                if !Self::bisa_ditulis_index(&oty) {
+                    self.codegen_expr(idx, None)?;
+                    let pesan = crate::interpreter::galat_index::tak_bisa_ditulis_lewat_index(&self.nama_acuan(&oty));
+                    return self.tempat_tiruan_sesudah(&pesan, *span);
+                }
+                let wadah = oty.nama_typeof();
+                let iv = self.indeks_bulat(idx, &wadah, *span)?;
                 self.get_index_place(&optr, &oty, &iv, *span)
             }
             Expr::Unary { op: UnaryOp::Deref, .. } => {
@@ -438,6 +466,130 @@ impl Codegen {
         slot
     }
 
+    /// Gagal saat jalan dengan `pesan`, lalu beri tempat tiruan bertag yang tak pernah tercapai.
+    fn tempat_tiruan_sesudah(&mut self, pesan: &str, span: Span) -> Result<(String, JrgType), String> {
+        let lama = self.span_kini.replace(span);
+        let r = self.gagal_sesudah_argumen(pesan, &[]);
+        self.span_kini = lama;
+        r?;
+        Ok((self.alloca_typed("tiruan.", &JrgType::Any), JrgType::Any))
+    }
+
+    /// `p[k]` (baca) atas struct dengan kunci teks dari variabel: field dipilih saat jalan — dulu ditolak
+    /// saat kompilasi. Hasilnya bertipe field kalau semua setipe, selain itu nilai bertag; field privat
+    /// dan kunci yang tidak ada dijawab kalimat acuan.
+    fn baca_struct_kunci(&mut self, ptr: &str, oty: &JrgType, idx: &Expr, span: Span) -> Result<Val, String> {
+        use super::codegen_konversi::{Cetak, PENANDA};
+        let JrgType::Struct(n) = oty else { unreachable!() };
+        let layout = self.types.structs.get(n).cloned().ok_or_else(|| format!("struct `{}` tidak dikenal", n))?;
+        let kv = self.codegen_expr(idx, Some(&JrgType::Str))?;
+        let lama = self.span_kini.replace(span);
+        let tipe: Vec<JrgType> = layout.fields.iter().map(|(_, t)| t.tanpa_kotak()).collect();
+        let satu = tipe.first().filter(|t| tipe.iter().all(|x| x == *t)).cloned();
+        let hasil_ty = satu.clone().unwrap_or(JrgType::Any);
+        let hasil = self.alloca_typed("skk.", &hasil_ty);
+        let (kp, kl) = self.split_str(&kv);
+        self.ensure_extern("declare i32 @jrg_str_eq(ptr, i64, ptr, i64)", "jrg_str_eq");
+        let usai = self.fresh_label("skk.usai.");
+        let dasar = super::generik::dasar(n).to_string();
+        for (f, _) in &layout.fields {
+            let ft = self.intern_string(f);
+            let (fp, fl) = self.split_str(&ft);
+            let (r, c) = (self.fresh("skk."), self.fresh("skk."));
+            self.emit(format!("{} = call i32 @jrg_str_eq(ptr {}, i64 {}, ptr {}, i64 {})", r, kp, kl, fp, fl));
+            self.emit(format!("{} = icmp ne i32 {}, 0", c, r));
+            let (ya, tidak) = (self.fresh_label("skk.ya."), self.fresh_label("skk.lain."));
+            self.terminate(format!("br i1 {}, label %{}, label %{}", c, ya, tidak));
+            self.start_block(ya);
+            match crate::vm::visibilitas::periksa(&dasar, f, self.cur_self_ty.as_deref()) {
+                Err(e) => self.panik(&e),
+                Ok(()) => {
+                    let (fptr, fty) = self.get_field_place(ptr, oty, f, span)?;
+                    let v = self.load_place(&fptr, &fty);
+                    let v = if satu.is_some() { v } else { self.kotak_any(&v, span)? };
+                    self.emit(format!("store {} {}, ptr {}", hasil_ty.llvm_ty(), v.text, hasil));
+                    self.terminate(format!("br label %{}", usai));
+                }
+            }
+            self.start_block(tidak);
+        }
+        let ada: Vec<String> = layout.fields.iter().map(|(f, _)| f.clone()).collect();
+        let pesan = crate::interpreter::galat_index::field_hilang(super::modul::tampil(&dasar), PENANDA, &ada);
+        self.panik_sisip(&pesan, &Cetak::Teks(kv.clone()));
+        self.start_block(usai);
+        self.span_kini = lama;
+        Ok(self.load_place(&hasil, &hasil_ty))
+    }
+
+    /// Kunci `p[k]` atas struct: field-nya harus pasti saat kompilasi, karena tipe tiap field berbeda.
+    pub(crate) fn kunci_struct(&self, idx: &Expr, span: Span) -> Result<String, String> {
+        match idx {
+            Expr::Literal(LitKind::Str(t), _) | Expr::Literal(LitKind::RawStr(t), _) => Ok(t.clone()),
+            Expr::Literal(LitKind::Int(v), _) => Ok(v.to_string()),
+            _ => Err(super::galat::tandai(span,
+                "indeks struct di backend LLVM harus teks literal (`p[\"x\"]`), atau tulis `p.x` — \
+                 tipe tiap field bisa berbeda, jadi field yang dipilih saat jalan tidak bisa diberi tipe di sini")),
+        }
+    }
+
+    /// Wadah yang bisa ditulis lewat `[...]`; sisanya gagal saat jalan dengan kalimat acuan.
+    pub(crate) fn bisa_ditulis_index(t: &JrgType) -> bool {
+        matches!(t, JrgType::Array(_, _) | JrgType::Slice(_) | JrgType::Dict(_) | JrgType::DictCampur(_)
+            | JrgType::Tuple(_) | JrgType::Struct(_) | JrgType::Any)
+    }
+
+    /// Nama tipe seperti `typeof` acuan menyebutnya (`enum:Option`, `enum:E`).
+    pub(crate) fn nama_acuan(&self, oty: &JrgType) -> String {
+        match oty {
+            JrgType::Enum(n) => format!("enum:{}", if self.option_args.contains_key(n) { "Option".to_string() }
+                else if self.result_args.contains_key(n) { "Result".to_string() }
+                else { super::modul::tampil(super::generik::dasar(n)).to_string() }),
+            _ => oty.nama_typeof(),
+        }
+    }
+
+    /// Tipe yang tidak punya field sama sekali: menulis `.f` ke sana gagal saat jalan.
+    pub(crate) fn bukan_pemilik_field(t: &JrgType) -> bool {
+        matches!(t, JrgType::Unit | JrgType::Bool | JrgType::Rune | JrgType::Str | JrgType::Array(_, _)
+            | JrgType::Slice(_) | JrgType::Enum(_) | JrgType::Chan(_))
+            || matches!(t.nama_typeof().as_str(), "int" | "float")
+    }
+
+    /// Nama handle pustaka (`Ptr`, `Future`, `Task`), kalau tipe ini memegangnya secara statis.
+    pub(crate) fn nama_handle_pustaka(t: &JrgType) -> Option<&'static str> {
+        match t {
+            JrgType::Struct(n) => crate::interpreter::galat_index::HANDLE_PUSTAKA.iter().copied().find(|h| *h == n.as_str()),
+            JrgType::Masa(_, false) => Some("Future"),
+            JrgType::Masa(_, true) => Some("Task"),
+            _ => None,
+        }
+    }
+
+    /// Alamat sasaran penugasan: menulis ke field sebuah handle pustaka ditolak saat jalan.
+    pub(crate) fn tempat_tulis(&mut self, t: &Expr) -> Result<(String, JrgType), String> {
+        match t {
+            Expr::Field { obj, field, span } => {
+                if let Some(h) = self.tipe_jalur(obj).and_then(|ty| Self::nama_handle_pustaka(&ty)) {
+                    self.tulis_antara = true;
+                    let _ = self.get_place(obj)?;
+                    return self.tempat_tiruan_sesudah(
+                        &crate::interpreter::galat_index::tulis_handle(h, field), *span);
+                }
+            }
+            Expr::Index { obj, idx, span } => {
+                if let Some(h) = self.tipe_jalur(obj).and_then(|ty| Self::nama_handle_pustaka(&ty)) {
+                    let k = self.kunci_struct(idx, *span)?;
+                    self.tulis_antara = true;
+                    let _ = self.get_place(obj)?;
+                    return self.tempat_tiruan_sesudah(
+                        &crate::interpreter::galat_index::tulis_handle(h, &k), *span);
+                }
+            }
+            _ => {}
+        }
+        self.get_place(t)
+    }
+
     pub(crate) fn get_field_place(&mut self, optr: &str, oty: &JrgType, field: &str, span: Span) -> Result<(String, JrgType), String> {
         match oty {
             JrgType::Struct(name) => {
@@ -450,8 +602,12 @@ impl Codegen {
                     return Err(crate::llvm::galat::tandai(span,
                         crate::interpreter::galat_index::metode_tanpa_kurung(name, field)));
                 }
-                let idx = layout.field_index(field)
-                    .ok_or_else(|| format!("struct `{}` tidak punya field `{}`", name, field))?;
+                let Some(idx) = layout.field_index(field) else {
+                    let nama: Vec<&str> = layout.fields.iter().map(|(f, _)| f.as_str()).collect();
+                    let saran = crate::diag::saran_nama_terdekat(field, nama.into_iter());
+                    return Err(crate::llvm::galat::tandai(span, crate::interpreter::galat_index::field_tak_dideklarasikan(
+                        super::modul::tampil(super::generik::dasar(name)), field, saran.as_deref())));
+                };
                 // Satu pintu untuk BACA dan TULIS: `codegen_field` dan jalur target
                 // penugasan dua-duanya lewat sini, jadi penegakan visibilitas tidak bisa …
                 crate::vm::visibilitas::periksa(super::generik::dasar(name), field, self.cur_self_ty.as_deref())
@@ -459,6 +615,7 @@ impl Codegen {
                 let fty = layout.fields[idx].1.clone();
                 let r = self.fresh("fld.");
                 self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 {}", r, oty.llvm_ty(), optr, idx));
+                if let JrgType::Kotak(t) = fty { return Ok((self.isi_kotak(&r), *t)); }
                 Ok((r, fty))
             }
             JrgType::Tuple(ts) => {
@@ -482,6 +639,9 @@ impl Codegen {
             JrgType::Sinkron(k) if crate::sinkron::metode_ada(if *k { "mutex" } else { "atomic" }, field) =>
                 Err(crate::llvm::galat::tandai(span,
                     crate::interpreter::galat_index::metode_tanpa_kurung(&oty.nama_typeof(), field))),
+            // Menulis `.f` ke yang bukan struct/dict: gagal SAAT JALAN dengan kalimat acuan; tempatnya tiruan.
+            t if Self::bukan_pemilik_field(t) => self.tempat_tiruan_sesudah(
+                &crate::interpreter::galat_index::bukan_pemilik_field(&oty.nama_typeof(), field), span),
             _ => Err(format!("[{}:{}] tidak bisa akses field `.{}` pada tipe `{}`", span.lo.0, span.hi.0, field, oty.display_name())),
         }
     }
@@ -503,6 +663,14 @@ impl Codegen {
         let n = elems.len() as i64;
 
         let Some(raw) = Self::indeks_konstan(idx) else {
+            // Elemen setipe: tata letaknya sama dengan `[n x T]`, jadi tempatnya dihitung saat jalan.
+            if let Some(t) = elems.first().filter(|t| elems.iter().all(|e| e == *t)).cloned() {
+                let iv = self.indeks_bulat(idx, "tuple", span)?;
+                let ix = self.emit_bounds_check_const(&iv, n, ("tuple", "elemen"));
+                let r = self.fresh("tidx.");
+                self.emit(format!("{} = getelementptr [{} x {}], ptr {}, i64 0, i64 {}", r, n, t.llvm_ty(), optr, ix.text));
+                return Ok((r, t));
+            }
             return Err(super::galat::tandai(span, format!(
                 "index tuple harus berupa angka yang sudah pasti saat kompilasi\n\
                  bantuan: pakai angka langsung, mis. `t[0]`\n\
@@ -515,11 +683,8 @@ impl Codegen {
 
         let i = if raw < 0 { raw + n } else { raw };
         if i < 0 || i >= n {
-            return Err(super::galat::tandai(span, format!(
-                "index [{}] di luar batas — tuple ini isinya {} elemen \
-                 (index valid: 0..{}, atau -1..-{} kalau mau hitung dari belakang)",
-                raw, n, n - 1, n
-            )));
+            let pesan = crate::interpreter::Interpreter::oob_msg("tuple", "elemen", raw as i128, n as usize);
+            return self.tempat_tiruan_sesudah(&pesan, span);
         }
 
         let r = self.fresh("tidx.");
@@ -528,6 +693,31 @@ impl Codegen {
             r, oty.llvm_ty(), optr, i
         ));
         Ok((r, elems[i as usize].clone()))
+    }
+
+    /// `t[i]` atas tuple berelemen beda tipe dengan `i` dari variabel: dipilih saat jalan, hasilnya
+    /// nilai bertag — dulu ditolak saat kompilasi. Menulis lewat bentuk ini tetap ditolak.
+    fn baca_tuple_campur(&mut self, ptr: &str, oty: &JrgType, idx: &Expr, span: Span) -> Result<Val, String> {
+        let JrgType::Tuple(es) = oty else { unreachable!() };
+        let es = es.clone();
+        let iv = self.indeks_bulat(idx, "tuple", span)?;
+        let ix = self.emit_bounds_check_const(&iv, es.len() as i64, ("tuple", "elemen"));
+        let hasil = self.alloca_typed("tcm.", &JrgType::Any);
+        let usai = self.fresh_label("tcm.usai.");
+        let label: Vec<String> = es.iter().map(|_| self.fresh_label("tcm.e.")).collect();
+        let kasus: Vec<String> = label.iter().enumerate().map(|(i, l)| format!("i64 {}, label %{}", i, l)).collect();
+        self.terminate(format!("switch i64 {}, label %{} [ {} ]", ix.text, usai, kasus.join(" ")));
+        for (i, (t, l)) in es.iter().zip(&label).enumerate() {
+            self.start_block(l.clone());
+            let ep = self.fresh("tcm.p.");
+            self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 {}", ep, oty.llvm_ty(), ptr, i));
+            let v = self.load_place(&ep, t);
+            let k = self.kotak_any(&v, span)?;
+            self.emit(format!("store %JrgAny {}, ptr {}", k.text, hasil));
+            self.terminate(format!("br label %{}", usai));
+        }
+        self.start_block(usai);
+        Ok(self.load_place(&hasil, &JrgType::Any))
     }
 
     pub(crate) fn get_index_place(&mut self, optr: &str, oty: &JrgType, iv: &Val, span: Span) -> Result<(String, JrgType), String> {
@@ -694,16 +884,90 @@ impl Codegen {
         if matches!(self.peek_expr_type(obj),
                     Some(JrgType::Dict(_)) | Some(JrgType::DictCampur(_)))
         {
+            self.catat_pesan_field_dict(field, span);
             let kunci = Expr::Literal(crate::parser::LitKind::Str(field.to_string()), span);
             return self.codegen_index(obj, &kunci, span);
         }
-        let (ptr, oty) = self.get_place(obj)?;
+        // `d.a.b` atas nilai bertag dari jembatan: `d.a` tidak punya alamat, jadi dibaca sebagai NILAI.
+        let (ptr, oty) = if self.basis_bertag(obj) {
+            let v = self.codegen_expr(obj, None)?;
+            (self.spill_to_place(&v), v.ty)
+        } else { self.get_place(obj)? };
         if oty == JrgType::Any {
             let v = self.load_place(&ptr, &oty);
             return self.field_titipan(&v, field, span);
         }
+        // Field yang tidak ada, di jalur BACA: kalimat method/field acuan (jalur tulis punya kalimatnya sendiri).
+        if let JrgType::Struct(n) = &oty {
+            let tak_ada = self.types.structs.get(n).is_some_and(|l| l.field_index(field).is_none());
+            if tak_ada && self.tables.find_method(n, field).is_none() {
+                if let Some(p) = self.pesan_tak_punya(&oty, field) { return Err(crate::llvm::galat::tandai(span, p)); }
+            }
+        }
+        // Dict yang tipenya baru terbaca sesudah diturunkan (`jawa::stats().alive_total`): sama, `d["a"]`.
+        if matches!(oty, JrgType::Dict(_) | JrgType::DictCampur(_)) {
+            self.catat_pesan_field_dict(field, span);
+            let o = self.lokal_sementara(ptr, oty, span);
+            let kunci = Expr::Literal(crate::parser::LitKind::Str(field.to_string()), span);
+            return self.codegen_index(&o, &kunci, span);
+        }
+        if let Some(r) = self.field_bukan_struct(&ptr, &oty, field, span) { return r; }
         let (fptr, fty) = self.get_field_place(&ptr, &oty, field, span)?;
         Ok(self.load_place(&fptr, &fty))
+    }
+
+    /// `x.f` atau `x[k]` yang bertipe nilai bertag: tidak punya alamat, cuma nilai (jalur BACA saja).
+    fn basis_bertag(&mut self, obj: &Expr) -> bool {
+        match obj {
+            Expr::Field { obj: o, .. } | Expr::Index { obj: o, .. } => {
+                // `f(..)?` atas builtin jembatan menjawab nilai bertag; penduga tipenya tidak melihat ke sana.
+                let jembatan = matches!(o.as_ref(), Expr::Propagate { expr, .. }
+                    if matches!(expr.as_ref(), Expr::Call { func, .. }
+                        if matches!(func.as_ref(), Expr::PathExpr { segments, .. }
+                            if segments.iter().rev().nth(1).is_some_and(|ns| super::codegen_jembatan::ns_jembatan(ns)))));
+                jembatan || self.peek_expr_type(o) == Some(JrgType::Any) || self.basis_bertag(o)
+            }
+            _ => false,
+        }
+    }
+
+    /// `x.nama` dibaca atas nilai yang bukan struct, seperti `eval_field` acuan: `len`/`is_empty`
+    /// teks dan array dijawab, method tanpa `()` ditolak saat jalan, sisanya lewat pintu method.
+    fn field_bukan_struct(&mut self, ptr: &str, oty: &JrgType, field: &str, span: Span) -> Option<Result<Val, String>> {
+        use crate::interpreter::galat_index as gi;
+        let tname = match oty {
+            JrgType::Struct(_) | JrgType::Sinkron(_) | JrgType::Any => return None,
+            JrgType::Tuple(ts) => {
+                let pesan = match field.parse::<i128>() {
+                    Ok(ix) if ix >= 0 && (ix as usize) < ts.len() => return None,
+                    Ok(ix) => crate::interpreter::Interpreter::oob_msg("tuple", "elemen", ix, ts.len()),
+                    Err(_) => format!("`.{}` bukan index tuple yang sah — setelah titik harus angka bulat, \
+                                       mis. `.0` untuk elemen pertama", field),
+                };
+                return Some(self.gagal_sesudah_argumen(&pesan, &[]));
+            }
+            _ => self.nama_acuan(oty),
+        };
+        let o = self.lokal_sementara(ptr.to_string(), oty.clone(), span);
+        if gi::pseudo_field(&tname, field) {
+            return Some(self.codegen_method(&o, field, &[], None, span));
+        }
+        let tipe = tname.rsplit(':').next().unwrap_or(&tname).to_string();
+        let pemakai = matches!(oty, JrgType::Enum(n) if self.tables.find_method(n, field).is_some());
+        let bawaan = gi::ns_metode_bawaan(&tname).is_some_and(|ns| crate::vm::ada_builtin(&format!("{}::{}", ns, field)));
+        if pemakai || bawaan {
+            return Some(self.gagal_sesudah_argumen(&gi::metode_tanpa_kurung(&tipe, field), &[]));
+        }
+        Some(self.codegen_method(&o, field, &[], None, span))
+    }
+
+    /// Kalimat acuan `d.k` atas dict (`Interpreter` metode.rs): saran dari method `dict::`, kuncinya diisi runtime.
+    fn catat_pesan_field_dict(&mut self, field: &str, span: Span) {
+        let calon = crate::interpreter::calon_method("dict");
+        let saran = crate::diag::saran_nama_terdekat(field, calon.iter().map(|s| s.as_str()));
+        let utuh = crate::interpreter::pesan_method_tak_ada("dict", field, "\u{0}", saran.as_deref());
+        let (a, b) = utuh.split_once('\u{0}').expect("penanda kunci");
+        self.pesan_field_dict.insert((span.lo.0, span.hi.0), (a.to_string(), b.to_string()));
     }
 
     /// Tipe yang dicatat untuk `d["kunci"]` ketika `d` sebuah dict bernilai
@@ -720,6 +984,12 @@ impl Codegen {
         tabel.iter().find(|(n, _)| *n == kunci).map(|(_, t)| t.clone())
     }
 
+    /// `o.f` dibaca sebagai nilai: `o` bertag (tanpa alamat field), atau bukan tempat sama sekali.
+    pub(crate) fn field_dibaca_nilai(&mut self, o: &Expr) -> bool {
+        !matches!(o, Expr::Ident(..) | Expr::Field { .. } | Expr::Index { .. } | Expr::Unary { .. })
+            || self.peek_expr_type(o) == Some(JrgType::Any)
+    }
+
     pub fn codegen_index(&mut self, obj: &Expr, idx: &Expr, span: Span) -> Result<Val, String> {
         // String tidak lewat `get_place`: nilainya `%JrgStr` (ptr+len), dan `s[i]`
         // menghasilkan sebuah `rune` yang DIHITUNG, bukan alamat yang dibaca.
@@ -730,7 +1000,14 @@ impl Codegen {
             return self.karakter_string(&sv, &iv);
         }
 
-        let (ptr, oty) = self.get_place(obj)?;
+        // `req.params["id"]` atas nilai bertag: field-nya dibaca sebagai NILAI (titipan), karena
+        // nilai bertag tidak punya alamat field — ini jalur baca, jadi tidak ada tulisan yang hilang.
+        let field_bertag = matches!(obj, Expr::Field { obj: o, .. } if self.field_dibaca_nilai(o))
+            || self.basis_bertag(obj);
+        let (ptr, oty) = if field_bertag {
+            let v = self.codegen_expr(obj, None)?;
+            (self.spill_to_place(&v), v.ty)
+        } else { self.get_place(obj)? };
         // Dict: kuncinya string, dan hasilnya nilai — bukan alamat, karena
         // pasangannya dicari saat jalan.
         if let JrgType::Dict(_) = &oty {
@@ -750,6 +1027,35 @@ impl Codegen {
                 if kunci_teks { JrgType::Dict(Box::new(JrgType::Any)) }
                 else { JrgType::Slice(Box::new(JrgType::Any)) }
             });
+            // Dict tanpa tipe yang diingat: isinya bisa juga titipan milik `jrgc` (`req.params`).
+            if dalam == JrgType::Dict(Box::new(JrgType::Any)) && kunci_teks {
+                let k = self.kunci_dict(idx, span)?;
+                let w = self.fresh("ixt.");
+                self.emit(format!("{} = extractvalue %JrgAny {}, 0", w, kotak.text));
+                // Tag 9: titipan milik `jrgc` (`jembatan/src/lib.rs`, `TAG_TITIPAN`).
+                let w8 = self.fresh("ixt.");
+                self.emit(format!("{} = and i32 {}, 255", w8, w));
+                let c = self.fresh("ixt.");
+                self.emit(format!("{} = icmp eq i32 {}, 9", c, w8));
+                let (lt, ld, lz) = (self.fresh_label("ixt.titip."), self.fresh_label("ixt.dict."), self.fresh_label("ixt.akhir."));
+                self.terminate(format!("br i1 {}, label %{}, label %{}", c, lt, ld));
+                self.start_block(lt.clone());
+                let a = self.indeks_titipan(&kotak, &k, span)?;
+                let lt_akhir = self.cur_label.clone();
+                self.terminate(format!("br label %{}", lz));
+                self.start_block(ld);
+                let nilai = self.buka_any(&kotak, &dalam, span)?;
+                let tempat = self.spill_to_place(&nilai);
+                let d = self.load_place(&tempat, &dalam);
+                let b = self.dict_baca(&d, &k, span)?;
+                let b = self.coerce(&b, &JrgType::Any);
+                let ld_akhir = self.cur_label.clone();
+                self.terminate(format!("br label %{}", lz));
+                self.start_block(lz);
+                let r = self.fresh("ixt.");
+                self.emit(format!("{} = phi %JrgAny [ {}, %{} ], [ {}, %{} ]", r, a.text, lt_akhir, b.text, ld_akhir));
+                return Ok(Val { text: r, ty: JrgType::Any });
+            }
             let nilai = self.buka_any(&kotak, &dalam, span)?;
             let tempat = self.spill_to_place(&nilai);
             if let JrgType::Dict(_) = &dalam {
@@ -783,38 +1089,119 @@ impl Codegen {
             let iv = self.indeks_bulat(idx, "string", span)?;
             return self.karakter_string(&sv, &iv);
         }
-        if let JrgType::Tuple(_) = &oty {
+        if let JrgType::Tuple(es) = &oty {
+            let campur = es.iter().any(|e| *e != es[0]);
+            if campur && Self::indeks_konstan(idx).is_none() {
+                return self.baca_tuple_campur(&ptr, &oty, idx, span);
+            }
             let (eptr, ety) = self.tempat_elemen_tuple(&ptr, &oty, idx, span)?;
             return Ok(self.load_place(&eptr, &ety));
+        }
+        if let JrgType::Struct(n) = &oty {
+            let k = match self.kunci_struct(idx, span) {
+                Ok(k) => k,
+                Err(_) if self.peek_expr_type(idx) == Some(JrgType::Str) => return self.baca_struct_kunci(&ptr, &oty, idx, span),
+                Err(g) => return Err(g),
+            };
+            let layout = self.types.structs.get(n).cloned().ok_or_else(|| format!("struct `{}` tidak dikenal", n))?;
+            if layout.field_index(&k).is_none() {
+                let ada: Vec<String> = layout.fields.iter().map(|(f, _)| f.clone()).collect();
+                let pesan = crate::interpreter::galat_index::field_hilang(
+                    super::modul::tampil(super::generik::dasar(n)), &k, &ada);
+                self.tempat_tiruan_sesudah(&pesan, span)?;
+                return Ok(Val::unit());
+            }
+            let (fptr, fty) = self.get_field_place(&ptr, &oty, &k, span)?;
+            return Ok(self.load_place(&fptr, &fty));
+        }
+        if !matches!(oty, JrgType::Array(_, _) | JrgType::Slice(_)) {
+            self.codegen_expr(idx, None)?;
+            let pesan = crate::interpreter::galat_index::bukan_wadah(&self.nama_acuan(&oty));
+            self.tempat_tiruan_sesudah(&pesan, span)?;
+            return Ok(Val::unit());
         }
         let iv = self.indeks_bulat(idx, &oty.nama_typeof(), span)?;
         let (eptr, ety) = self.get_index_place(&ptr, &oty, &iv, span)?;
         Ok(self.load_place(&eptr, &ety))
     }
 
+    /// Jumlah karakter teks `(sptr, slen)`: memo runtime dibaca langsung di IR, runtime dipanggil cuma kalau
+    /// memonya teks lain. Teks ASCII ⇔ jumlah karakter = panjang bita.
+    pub(crate) fn jumlah_karakter(&mut self, sptr: &str, slen: &str) -> String {
+        self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
+        self.ensure_extern("@jrg_teks_memo_p = external global ptr\n@jrg_teks_memo_l = external global i64\n\
+            @jrg_teks_memo_n = external global i64", "global.teks_memo");
+        let (mp, ml, mn) = (self.fresh("tmp."), self.fresh("tml."), self.fresh("tmn."));
+        self.emit(format!("{} = load ptr, ptr @jrg_teks_memo_p", mp));
+        self.emit(format!("{} = load i64, ptr @jrg_teks_memo_l", ml));
+        self.emit(format!("{} = load i64, ptr @jrg_teks_memo_n", mn));
+        let (c1, c2, sama) = (self.fresh("tmc."), self.fresh("tmc."), self.fresh("tmc."));
+        self.emit(format!("{} = icmp eq ptr {}, {}", c1, mp, sptr));
+        self.emit(format!("{} = icmp eq i64 {}, {}", c2, ml, slen));
+        self.emit(format!("{} = and i1 {}, {}", sama, c1, c2));
+        let (kena, meleset, usai) = (self.fresh_label("tm.kena."), self.fresh_label("tm.meleset."), self.fresh_label("tm.usai."));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", sama, kena, meleset));
+        self.start_block(kena.clone());
+        self.terminate(format!("br label %{}", usai));
+        self.start_block(meleset.clone());
+        let n1 = self.fresh("tmh.");
+        self.emit(format!("{} = call i64 @jrg_str_char_count(ptr {}, i64 {})", n1, sptr, slen));
+        self.terminate(format!("br label %{}", usai));
+        self.start_block(usai);
+        let n = self.fresh("tmjk.");
+        self.emit(format!("{} = phi i64 [ {}, %{} ], [ {}, %{} ]", n, mn, kena, n1, meleset));
+        n
+    }
+
     /// `s[i]` — karakter ke-`i` sebuah string, sebagai `rune`.
     pub(crate) fn karakter_string(&mut self, sv: &Val, iv: &Val) -> Result<Val, String> {
-        self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
         self.ensure_extern("declare i32 @jrg_str_char_at(ptr, i64, i64)", "jrg_str_char_at");
 
         let (sptr, slen) = self.split_str(sv);
         // Panjang dalam KARAKTER, bukan byte — itu satuan yang dipakai
         // indeksnya, jadi pemeriksaan batas harus memakai satuan yang sama.
-        let n = self.fresh("scnt.");
-        self.emit(format!("{} = call i64 @jrg_str_char_count(ptr {}, i64 {})", n, sptr, slen));
-
+        let n = self.jumlah_karakter(&sptr, &slen);
         let ix = self.emit_bounds_check_dyn(iv, &n, ("string", "karakter"));
 
-        let c = self.fresh("schr.");
+        // ASCII: karakternya bita ke-`i`, dibaca langsung; selain itu lewat runtime.
+        let ascii = self.fresh("sasc.");
+        self.emit(format!("{} = icmp eq i64 {}, {}", ascii, n, slen));
+        let (baca, panggil, usai) = (self.fresh_label("schr.baca."), self.fresh_label("schr.panggil."), self.fresh_label("schr.usai."));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", ascii, baca, panggil));
+        self.start_block(baca.clone());
+        let (g, b, c1) = (self.fresh("schg."), self.fresh("schb."), self.fresh("schz."));
+        self.emit(format!("{} = getelementptr i8, ptr {}, i64 {}", g, sptr, ix.text));
+        self.emit(format!("{} = load i8, ptr {}", b, g));
+        self.emit(format!("{} = zext i8 {} to i32", c1, b));
+        self.terminate(format!("br label %{}", usai));
+        self.start_block(panggil.clone());
+        let c2 = self.fresh("schr.");
         self.emit(format!(
             "{} = call i32 @jrg_str_char_at(ptr {}, i64 {}, i64 {})",
-            c, sptr, slen, ix.text
+            c2, sptr, slen, ix.text
         ));
+        self.terminate(format!("br label %{}", usai));
+        self.start_block(usai);
+        let c = self.fresh("schp.");
+        self.emit(format!("{} = phi i32 [ {}, %{} ], [ {}, %{} ]", c, c1, baca, c2, panggil));
         Ok(Val { text: c, ty: JrgType::Rune })
     }
 
     pub fn codegen_slice(&mut self, obj: &Expr, lo: &Option<Box<Expr>>, hi: &Option<Box<Expr>>, span: Span) -> Result<Val, String> {
         let (ptr, oty) = self.get_place(obj)?;
+        // Kedua batas dievaluasi dulu, baru wadah dan jenisnya diperiksa — urutan acuan.
+        let batas = |cg: &mut Self, e: &Option<Box<Expr>>| -> Result<Option<Val>, String> {
+            e.as_ref().map(|e| cg.codegen_expr(e, Some(&JrgType::I64))).transpose()
+        };
+        let lo_e = batas(self, lo)?;
+        let hi_e = batas(self, hi)?;
+        if oty == JrgType::Any {
+            let v = self.load_place(&ptr, &oty);
+            return self.potong_bertag(&v, lo_e, hi_e, span);
+        }
+        if let JrgType::Tuple(_) = &oty {
+            return self.potong_tuple(&ptr, &oty, (lo, lo_e), (hi, hi_e), span);
+        }
         let (elem_ty, base_ptr, base_len) = match &oty {
             JrgType::Array(elem, n) => {
                 let bp = self.fresh("slb.");
@@ -837,19 +1224,17 @@ impl Codegen {
             // semua tipe lain di sini.
             JrgType::Str => {
                 let sv = self.load_place(&ptr, &oty);
-                return self.potong_string(&sv, lo, hi);
+                return self.potong_string_val(&sv, lo_e, hi_e, span);
             }
-            _ => return Err(format!("[{}:{}] tidak bisa slicing pada tipe `{}`", span.lo.0, span.hi.0, oty.display_name())),
+            _ => {
+                let pesan = crate::interpreter::galat_index::bukan_bisa_dipotong(&self.nama_acuan(&oty));
+                self.tempat_tiruan_sesudah(&pesan, span)?;
+                return Ok(Val::unit());
+            }
         };
-        let lo_v = match lo {
-            Some(e) => { let v = self.codegen_expr(e, Some(&JrgType::I64))?; self.coerce_longgar(&v, &JrgType::I64) }
-            None => Val { text: "0".into(), ty: JrgType::I64 },
+        let Some((lo_v, hi_v)) = self.batas_potongan_dicek(lo_e, hi_e, &base_len, span)? else {
+            return Ok(Val::unit());
         };
-        let hi_v = match hi {
-            Some(e) => { let v = self.codegen_expr(e, Some(&JrgType::I64))?; self.coerce_longgar(&v, &JrgType::I64) }
-            None => base_len.clone(),
-        };
-        let (lo_v, hi_v) = self.emit_slice_bounds_check(&lo_v, &hi_v, &base_len.text);
         let newlen = self.fresh("sll.");
         self.emit(format!("{} = sub i64 {}, {}", newlen, hi_v.text, lo_v.text));
 
@@ -879,6 +1264,122 @@ impl Codegen {
         Ok(Val { text: s2, ty: JrgType::Slice(Box::new(elem_ty)) })
     }
 
+    /// Potongan atas nilai bertag, dipilih dari tagnya saat jalan — dulu ditolak saat kompilasi.
+    /// Teks dipotong per karakter; isi yang tak bisa dipotong gagal dengan kalimat acuan.
+    fn potong_bertag(&mut self, v: &Val, lo: Option<Val>, hi: Option<Val>, span: Span) -> Result<Val, String> {
+        use super::codegen_any::{TAG_BURAM, TAG_SLICE, TAG_STR};
+        let lama = self.span_kini.replace(span);
+        let hasil = self.alloca_typed("ptgt.", &JrgType::Any);
+        let tag = self.tag_any(v);
+        let (lt, lb, lk, lz) = (self.fresh_label("ptgt.teks."), self.fresh_label("ptgt.lain."),
+                                self.fresh_label("ptgt.koleksi."), self.fresh_label("ptgt.akhir."));
+        let teks = self.fresh("ptgt.");
+        self.emit(format!("{} = icmp eq i32 {}, {}", teks, tag.text, TAG_STR));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", teks, lt, lb));
+        self.start_block(lt);
+        let s = self.buka_any(v, &JrgType::Str, span)?;
+        let r = self.potong_string_val(&s, lo, hi, span)?;
+        let k = self.kotak_any(&r, span)?;
+        self.emit(format!("store %JrgAny {}, ptr {}", k.text, hasil));
+        self.terminate(format!("br label %{}", lz));
+        self.start_block(lb);
+        // Array dan tuple bertag bisa dipotong di acuan; tipe elemennya tidak diketahui di sini.
+        let (a, b, c) = (self.fresh("ptgt."), self.fresh("ptgt."), self.fresh("ptgt."));
+        self.emit(format!("{} = icmp eq i32 {}, {}", a, tag.text, TAG_SLICE));
+        self.emit(format!("{} = icmp eq i32 {}, {}", b, tag.text, TAG_BURAM));
+        self.emit(format!("{} = or i1 {}, {}", c, a, b));
+        let (lg, ll) = (self.fresh_label("ptgt.gagal."), lk);
+        self.terminate(format!("br i1 {}, label %{}, label %{}", c, ll, lg));
+        self.start_block(ll);
+        self.panik_tipe_any(v, |t| format!(
+            "potongan atas `{}` di dalam nilai bertag belum didukung backend LLVM — beri anotasi tipe \
+             di tempat nilainya diikat (`let a: []int = ..`)", t));
+        self.start_block(lg);
+        self.panik_tipe_any(v, |t| crate::interpreter::galat_index::bukan_bisa_dipotong(t));
+        self.start_block(lz);
+        self.span_kini = lama;
+        Ok(self.load_place(&hasil, &JrgType::Any))
+    }
+
+    /// Batas potongan yang sudah dievaluasi, diperiksa urut acuan: jenis awal, jangkauan awal,
+    /// jenis akhir, lalu sisanya. `None` = sudah gagal saat jalan (blok sesudahnya mati).
+    fn batas_potongan_dicek(&mut self, lo: Option<Val>, hi: Option<Val>, panjang: &Val, span: Span)
+        -> Result<Option<(Val, Val)>, String>
+    {
+        let salah = |v: &Option<Val>| v.as_ref().is_some_and(|v| !v.ty.is_int() && !matches!(v.ty, JrgType::Never | JrgType::Any));
+        let nol = Val { text: "0".into(), ty: JrgType::I64 };
+        if salah(&lo) || salah(&hi) {
+            let sisi = if salah(&lo) { "awal" } else { "akhir" };
+            if sisi == "akhir" {
+                if let Some(l) = &lo {
+                    let l = self.coerce_longgar(l, &JrgType::I64);
+                    self.emit_slice_bounds_check(&l, panjang, &panjang.text);
+                }
+            }
+            let v = if sisi == "awal" { lo.unwrap() } else { hi.unwrap() };
+            let pesan = crate::interpreter::galat_index::batas_potongan_tipe(sisi, &v.ty.nama_typeof());
+            self.tempat_tiruan_sesudah(&pesan, span)?;
+            return Ok(None);
+        }
+        let lo_v = lo.map(|v| self.coerce_longgar(&v, &JrgType::I64)).unwrap_or(nol);
+        let hi_v = hi.map(|v| self.coerce_longgar(&v, &JrgType::I64)).unwrap_or_else(|| panjang.clone());
+        Ok(Some(self.emit_slice_bounds_check(&lo_v, &hi_v, &panjang.text)))
+    }
+
+    /// `t[a:b]`: tipe hasilnya bergantung pada batasnya, jadi batasnya harus pasti saat kompilasi.
+    fn potong_tuple(&mut self, ptr: &str, oty: &JrgType, lo: (&Option<Box<Expr>>, Option<Val>),
+                    hi: (&Option<Box<Expr>>, Option<Val>), span: Span) -> Result<Val, String> {
+        use crate::interpreter::galat_index as g;
+        let JrgType::Tuple(elems) = oty else { unreachable!() };
+        let n = elems.len();
+        for (sisi, v) in [("awal", &lo.1), ("akhir", &hi.1)] {
+            if let Some(v) = v {
+                if !v.ty.is_int() && !matches!(v.ty, JrgType::Never | JrgType::Any) {
+                    self.tempat_tiruan_sesudah(&g::batas_potongan_tipe(sisi, &v.ty.nama_typeof()), span)?;
+                    return Ok(Val::unit());
+                }
+            }
+        }
+        let konstan = |e: &Option<Box<Expr>>| -> Result<Option<i64>, String> {
+            match e {
+                None => Ok(None),
+                Some(e) => Self::indeks_konstan(e).map(Some).ok_or_else(|| super::galat::tandai(span,
+                    "batas potongan tuple di backend LLVM harus angka yang sudah pasti saat kompilasi (`t[1:]`) — \
+                     elemen tuple boleh bertipe berbeda, jadi tipe hasil `t[a:b]` bergantung pada batasnya")),
+            }
+        };
+        let (lo_k, hi_k) = (konstan(lo.0)?, konstan(hi.0)?);
+        let mut pos = [0usize, n];
+        for (j, (sisi, k)) in [("awal", lo_k), ("akhir", hi_k)].into_iter().enumerate() {
+            let Some(raw) = k else { continue };
+            let p = if raw < 0 { raw + n as i64 } else { raw };
+            if p < 0 || p > n as i64 {
+                self.tempat_tiruan_sesudah(&g::batas_potongan_luar(sisi, raw as i128, n), span)?;
+                return Ok(Val::unit());
+            }
+            pos[j] = p as usize;
+        }
+        if pos[0] > pos[1] {
+            self.tempat_tiruan_sesudah(&g::potongan_terbalik(pos[0], pos[1]), span)?;
+            return Ok(Val::unit());
+        }
+        // Tuple tanpa elemen: `{ }`, tampil `()`, `typeof` `tuple` — seperti acuan (dulu ditolak).
+        if pos[0] == pos[1] {
+            return Ok(Val { text: "zeroinitializer".into(), ty: JrgType::Tuple(Vec::new()) });
+        }
+        let asal = self.load_place(ptr, oty);
+        let hasil_ty = JrgType::Tuple(elems[pos[0]..pos[1]].to_vec());
+        let mut agg = "undef".to_string();
+        for (j, i) in (pos[0]..pos[1]).enumerate() {
+            let e = self.fresh("tpot.");
+            self.emit(format!("{} = extractvalue {} {}, {}", e, oty.llvm_ty(), asal.text, i));
+            let r = self.fresh("tpot.");
+            self.emit(format!("{} = insertvalue {} {}, {} {}, {}", r, hasil_ty.llvm_ty(), agg, elems[i].llvm_ty(), e, j));
+            agg = r;
+        }
+        Ok(Val { text: agg, ty: hasil_ty })
+    }
+
     /// `s[lo:hi]` — potongan string, per KARAKTER.
     pub(crate) fn potong_string(&mut self, sv: &Val, lo: &Option<Box<Expr>>, hi: &Option<Box<Expr>>) -> Result<Val, String> {
         self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
@@ -897,7 +1398,24 @@ impl Codegen {
             None => Val { text: n.clone(), ty: JrgType::I64 },
         };
         let (lo_v, hi_v) = self.emit_slice_bounds_check(&lo_v, &hi_v, &n);
+        self.potong_string_sah(&sptr, &slen, &lo_v, &hi_v)
+    }
 
+    /// `s[lo:hi]` yang batasnya sudah dievaluasi: jenisnya diperiksa dengan kalimat acuan.
+    fn potong_string_val(&mut self, sv: &Val, lo: Option<Val>, hi: Option<Val>, span: Span) -> Result<Val, String> {
+        self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
+        self.ensure_extern("declare void @jrg_str_slice(ptr, i64, i64, i64, ptr, ptr)", "jrg_str_slice");
+        let (sptr, slen) = self.split_str(sv);
+        let n = self.fresh("sscnt.");
+        self.emit(format!("{} = call i64 @jrg_str_char_count(ptr {}, i64 {})", n, sptr, slen));
+        let panjang = Val { text: n, ty: JrgType::I64 };
+        let Some((lo_v, hi_v)) = self.batas_potongan_dicek(lo, hi, &panjang, span)? else {
+            return Ok(Val::unit());
+        };
+        self.potong_string_sah(&sptr, &slen, &lo_v, &hi_v)
+    }
+
+    fn potong_string_sah(&mut self, sptr: &str, slen: &str, lo_v: &Val, hi_v: &Val) -> Result<Val, String> {
         let outp = self.alloca_raw("ssp.", "ptr", None);
         let outl = self.alloca_raw("ssl.", "i64", None);
         self.emit(format!(
@@ -911,4 +1429,25 @@ impl Codegen {
 
 pub fn is_bare_array_type(te: &TypeExpr) -> bool {
     matches!(te, TypeExpr::Named(NamedType { name, args, .. }) if name == "array" && args.is_empty())
+}
+
+/// Dict di dalam dict yang isinya menuju nilai bertag (`dict<dict<int>>` ke `dict<dict<bertag>>`).
+/// Kebalikan `isi_jadi_bertag` di dalam slice: `array<array<nilai bertag>>` ke `array<array<string>>`.
+fn isi_dibuka(a: &JrgType, b: &JrgType) -> bool {
+    match (a, b) {
+        (JrgType::Slice(x), JrgType::Slice(y)) => **x == JrgType::Any && **y != JrgType::Any
+            && !matches!(**y, JrgType::Slice(_) | JrgType::Array(..) | JrgType::Dict(_))
+            && super::codegen_any::tag_untuk(y).is_some() || isi_dibuka(x, y),
+        _ => false,
+    }
+}
+
+fn isi_jadi_bertag(a: &JrgType, b: &JrgType) -> bool {
+    match (a, b) {
+        (JrgType::Dict(x), JrgType::Dict(y))
+        // Slice juga: `array<array<string>>` ke `array<array<nilai bertag>>` (`std/diff`).
+        | (JrgType::Slice(x) | JrgType::Array(x, _), JrgType::Slice(y)) => **x != JrgType::Any && **y == JrgType::Any
+            && super::codegen_any::tag_untuk(x).is_some() || isi_jadi_bertag(x, y),
+        _ => false,
+    }
 }

@@ -1,0 +1,50 @@
+# Runtime C backend LLVM di bawah UBSan dan ASan (`perkakas/sapu_sanitasi.sh <mode> --suite`): konformans, contoh,
+# tes `std/`, lalu biner tes `llvm_parity`/`llvm_diagnostik`, tiap program lewat clang ber-`-fsanitize`. Dijalankan
+# MANUAL (`gh workflow run sanitasi.yml`) sekali per gelombang kerja, bersama `sapu.yml`.
+
+name: sanitasi
+
+on:
+  workflow_dispatch:
+
+jobs:
+  sanitasi:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mode: [ubsan, asan]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Pasang toolchain
+        run: |
+          rustup toolchain install stable --profile minimal
+          v=$(clang --version | sed -n 's/.*version \([0-9]*\).*/\1/p' | head -1)
+          sudo apt-get update -qq && sudo apt-get install -y -qq "libclang-rt-$v-dev" > /dev/null || true
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Bangun jrgc, runtime, jembatan, tes LLVM
+        run: |
+          cargo build --release -j 2
+          (cd runtime && cargo build --release)
+          (cd jembatan && cargo build --release)
+          cargo test --release -j 1 --no-run --test llvm_parity --test llvm_diagnostik
+
+      # Di PID namespace seperti suite: beberapa tes mengirim sinyal ke proses.
+      - name: Sapuan ${{ matrix.mode }}
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          set +e
+          setsid --wait unshare -U --map-current-user -m -p -f --mount-proc \
+            sh perkakas/sapu_sanitasi.sh ${{ matrix.mode }} --suite 2>&1 | tee sanitasi.log
+          exit ${PIPESTATUS[0]}
+        shell: bash
+
+      - name: Simpan log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sanitasi-${{ matrix.mode }}-log
+          path: sanitasi.log

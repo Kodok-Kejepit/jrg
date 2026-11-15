@@ -22,7 +22,7 @@ impl Interpreter {
         fn fst(args: &[Value]) -> Value { args.get(0).cloned().unwrap_or(Value::Nil) }
         fn path_of(v: &Value, fname: &str) -> Result<String, Signal> {
             match v {
-                Value::Str(s) => Ok(s.clone()),
+                Value::Str(s) => Ok(String::clone(&s.clone())),
                 o => Err(Signal::RuntimeError(RuntimeError::new(format!(
                     "{}: path harus string, dapat `{}`", fname, o.type_name()
                 )))),
@@ -32,7 +32,7 @@ impl Interpreter {
             FileRead => {
                 let path = path_of(&fst(args), "file::read")?;
                 Ok(match std::fs::read_to_string(&path) {
-                    Ok(s)  => ok_value(Value::Str(s)),
+                    Ok(s)  => ok_value(Value::Str(std::sync::Arc::new(s))),
                     Err(e) => err_value(format!("file::read: gagal baca `{}` — {}", path, crate::host::galat_io(&e))),
                 })
             }
@@ -78,7 +78,7 @@ impl Interpreter {
                 let path = path_of(&fst(args), "file::read_lines")?;
                 Ok(match std::fs::read_to_string(&path) {
                     Ok(s) => ok_value(Value::Array(
-                        s.lines().map(|l| Value::Str(l.to_string())).collect()
+                        s.lines().map(|l| Value::Str(std::sync::Arc::new(l.to_string()))).collect()
                     )),
                     Err(e) => err_value(format!("file::read_lines: gagal baca `{}` — {}", path, crate::host::galat_io(&e))),
                 })
@@ -90,7 +90,7 @@ impl Interpreter {
                     Ok(entries) => {
                         let mut names: Vec<Value> = entries
                             .filter_map(|e| e.ok())
-                            .map(|e| Value::Str(e.file_name().to_string_lossy().into_owned()))
+                            .map(|e| Value::Str(std::sync::Arc::new(e.file_name().to_string_lossy().into_owned())))
                             .collect();
                         names.sort_by(|a, b| format!("{}", a).cmp(&format!("{}", b)));
                         ok_value(Value::Array(names.into()))

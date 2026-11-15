@@ -333,15 +333,9 @@ impl Interpreter {
                 None => true,
             },
 
-            Pattern::Literal { lit, .. } => match (lit, val) {
-                (LitKind::Int(a),   Value::Int(b))   => *a as i128 == *b,
-                (LitKind::Float(a), Value::Float(b)) => a == b,
-                (LitKind::Bool(a),  Value::Bool(b))  => a == b,
-                (LitKind::Str(a),   Value::Str(b))   => a == b,
-                (LitKind::Nil,      Value::Nil)       => true,
-                (LitKind::Rune(a),  Value::Rune(b))  => a == b,
-                _                                    => false,
-            },
+            // Pola literal adalah uji `==` (satu definisi): `2` cocok dengan `2.0` seperti rentangnya dan
+            // seperti VM/LLVM — dulu cuma jenis yang sama, dan literal teks mentah tidak pernah cocok.
+            Pattern::Literal { lit, .. } => Self::nilai_sama(&self.eval_lit(lit), val).unwrap_or(false),
 
             Pattern::Enum { ty, variant, inner, .. } => {
                 if let Value::Enum { type_name, variant: vn, payload } = val {

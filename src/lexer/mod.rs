@@ -11,14 +11,31 @@ use unicode_xid::UnicodeXID;
 /// error encountered. In error-recovery mode (used by LSP) we accumulate
 /// errors and emit ErrorToken nodes instead of stopping.
 pub fn lex(source: &SourceFile) -> Result<Vec<Token>, LexError> {
+    periksa_arah_teks(source)?;
     let mut lexer = Lexer::new(source);
     lexer.tokenize()
+}
+
+/// Karakter pengubah arah teks (U+202A–U+202E, U+2066–U+2069) di sumber ditolak, seperti rustc:
+/// di dalam komentar atau teks ia membuat kode TAMPIL lain dari yang dijalankan (Trojan Source,
+/// CVE-2021-42574). Yang memang perlu di dalam teks ditulis sebagai escape `\u202E`.
+fn periksa_arah_teks(source: &SourceFile) -> Result<(), LexError> {
+    let Some((i, c)) = source.src.char_indices().find(|(_, c)| matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}'))
+        else { return Ok(()) };
+    let lo = BytePos(i as u32);
+    Err(LexError {
+        msg: format!("karakter kendali arah teks U+{:04X} di sumber — ia membuat kode tampil berbeda dari yang \
+                      dijalankan (Trojan Source, CVE-2021-42574)\nbantuan: kalau memang dibutuhkan di dalam teks, \
+                      tulis escape-nya: `\\u{:04X}`", c as u32, c as u32),
+        span: Span::new(lo, BytePos((i + c.len_utf8()) as u32), source.id),
+    })
 }
 
 /// Sama seperti [`lex`], tapi juga mengembalikan rentang tiap komentar.
 pub fn lex_dengan_komentar(
     source: &SourceFile,
 ) -> Result<(Vec<Token>, Vec<Komentar>), LexError> {
+    periksa_arah_teks(source)?;
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize()?;
     Ok((tokens, std::mem::take(&mut lexer.komentar)))
@@ -29,6 +46,8 @@ pub fn lex_dengan_komentar(
 mod token;
 mod span;
 mod mesin;
+mod aksara;
+mod aksara_tabel;
 
 pub use token::*;
 pub use span::*;

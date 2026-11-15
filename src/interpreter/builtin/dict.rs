@@ -160,7 +160,7 @@ impl Interpreter {
             DictKeys => {
                 cukup(args, "dict::keys")?;
                 let fields = pinjam_dict(&args[0], "dict::keys", 1)?;
-                Ok(Value::Array(sorted_keys(&fields).into_iter().map(Value::Str).collect()))
+                Ok(Value::Array(sorted_keys(&fields).into_iter().map(Value::teks).collect()))
             }
 
             DictValues => {
@@ -176,7 +176,7 @@ impl Interpreter {
                 Ok(Value::Array(sorted_keys(&fields).into_iter()
                     .map(|k| {
                         let v = fields.get(&k).cloned().unwrap_or(Value::Nil);
-                        Value::Tuple(vec![Value::Str(k), v].into())
+                        Value::Tuple(vec![Value::Str(std::sync::Arc::new(k)), v].into())
                     }).collect()))
             }
 

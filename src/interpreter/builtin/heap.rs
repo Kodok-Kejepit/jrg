@@ -33,7 +33,7 @@ fn buffers() -> &'static Mutex<HashMap<u64, BufferCell>> { BUFFERS.get_or_init(|
 fn make_handle(kind: &str, id: u64) -> Value {
     let mut fields = HashMap::new();
     fields.insert("id".to_string(), Value::Int(id as i128));
-    fields.insert("kind".to_string(), Value::Str(kind.to_string()));
+    fields.insert("kind".to_string(), Value::Str(std::sync::Arc::new(kind.to_string())));
     Value::Struct { name: "Ptr".to_string(), fields: fields.into() }
 }
 
@@ -42,7 +42,7 @@ fn handle_parts(v: &Value, fname: &str) -> Result<(u64, String), String> {
         Value::Struct { name, fields } if name == "Ptr" => {
             let id = match fields.get("id") { Some(Value::Int(n)) => u64::try_from(*n).map_err(|_| format!("{}: handle tidak valid (`id` {} bukan nomor alokasi)", fname, n))?, _ => return Err(format!("{}: handle tidak valid (field `id` hilang)", fname)) };
             let kind = match fields.get("kind") { Some(Value::Str(s)) => s.clone(), _ => return Err(format!("{}: handle tidak valid (field `kind` hilang)", fname)) };
-            Ok((id, kind))
+            Ok((id, String::clone(&kind)))
         }
         other => Err(pesan_bukan_ptr(fname, &other.type_name())),
     }
@@ -286,7 +286,7 @@ pub fn new_buffer_fill(args: &[Value]) -> Result<Value, String> {
 pub fn new_buffer_to_hex(args: &[Value]) -> Result<Value, String> {
     let id = expect_kind(args.get(0).unwrap_or(&Value::Nil), "buffer", "jawa::buffer_to_hex")?;
     match get_buffer_cell(id) {
-        Some(cell) => Ok(Value::Str(crate::dok::crypto::hex_encode(&cell.lock().unwrap_or_else(|p| p.into_inner())))),
+        Some(cell) => Ok(Value::Str(std::sync::Arc::new(crate::dok::crypto::hex_encode(&cell.lock().unwrap_or_else(|p| p.into_inner()))))),
         None => Err(pesan_sudah_bebas("jawa::buffer_to_hex", "buffer")),
     }
 }

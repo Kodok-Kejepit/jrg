@@ -179,14 +179,8 @@ pub fn register(vm: &mut Vm) {
                 Isi::Bufer(_) => buffer += 1,
             }
         }
-        let mut m = HashMap::new();
-        m.insert("alive_array".to_string(), VmValue::Int(array));
-        m.insert("alive_buffer".to_string(), VmValue::Int(buffer));
-        m.insert("alive_single".to_string(), VmValue::Int(single));
-        m.insert("alive_total".to_string(), VmValue::Int(single + array + buffer));
-        m.insert("total_allocated".to_string(), VmValue::Int(TOTAL_ALLOC.load(Ordering::Relaxed) as i128));
-        m.insert("total_freed".to_string(), VmValue::Int(TOTAL_FREE.load(Ordering::Relaxed) as i128));
-        Ok(VmValue::struktur("HeapStats", m))
+        Ok(heap_stats(single, array, buffer,
+            TOTAL_ALLOC.load(Ordering::Relaxed) as i128, TOTAL_FREE.load(Ordering::Relaxed) as i128))
     });
 
     // ── array ───────────────────────────────────────────────────────────
@@ -329,4 +323,16 @@ pub fn register(vm: &mut Vm) {
             }
         }
     });
+}
+
+/// `HeapStats` dari hitungannya — satu bentuk untuk `--vm` dan registry milik biner `--emit-llvm`.
+pub fn heap_stats(single: i128, array: i128, buffer: i128, dialokasi: i128, dilepas: i128) -> VmValue {
+    let mut m = HashMap::new();
+    m.insert("alive_array".to_string(), VmValue::Int(array));
+    m.insert("alive_buffer".to_string(), VmValue::Int(buffer));
+    m.insert("alive_single".to_string(), VmValue::Int(single));
+    m.insert("alive_total".to_string(), VmValue::Int(single + array + buffer));
+    m.insert("total_allocated".to_string(), VmValue::Int(dialokasi));
+    m.insert("total_freed".to_string(), VmValue::Int(dilepas));
+    VmValue::struktur("HeapStats", m)
 }

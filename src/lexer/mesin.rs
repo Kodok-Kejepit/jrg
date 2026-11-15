@@ -48,6 +48,14 @@ impl<'src> Lexer<'src> {
         BytePos(self.pos as u32)
     }
 
+    /// Nama non-ASCII harus satu aksara dan NFC (`aksara.rs`); `lo` = awal namanya.
+    pub(crate) fn periksa_nama(&self, nama: &str, lo: BytePos) -> Result<(), LexError> {
+        super::aksara::periksa(nama).map_err(|t| {
+            let a = BytePos(lo.0 + t.awal as u32);
+            LexError { msg: t.pesan, span: Span::new(a, BytePos(a.0 + t.panjang as u32), self.file_id) }
+        })
+    }
+
     pub(crate) fn span_from(&self, lo: BytePos) -> Span {
         Span::new(lo, self.byte_pos(), self.file_id)
     }
@@ -741,6 +749,7 @@ impl<'src> Lexer<'src> {
                         break;
                     }
                 }
+                if !ident.is_ascii() { self.periksa_nama(&ident, lo)?; }
                 let kind = keyword_or_ident(&ident);
                 Ok(Token::new(kind, self.span_from(lo)))
             }
@@ -758,6 +767,7 @@ impl<'src> Lexer<'src> {
                                 self.advance();
                             } else { break; }
                         }
+                        if !label.is_ascii() { self.periksa_nama(&label[1..], BytePos(lo.0 + 1))?; }
                         Ok(Token::new(TokenKind::Ident(label), self.span_from(lo)))
                     }
                     _ => self.lex_rune(lo),

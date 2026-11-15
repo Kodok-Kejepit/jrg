@@ -3,10 +3,8 @@ package main
 // ============================================================================
 // web_demo.jrg — aplikasi web kecil yang memakai seluruh lapisan `dok::` …
 
-// Rahasia sesi. Di program sungguhan ini datang dari `env::get("SESSION_KEY")`,
-// bukan dari sumber — sebuah kunci yang ikut ter-commit sama saja dengan tidak
-// ada kunci.
-const KUNCI = "kunci-sesi-contoh-yang-cukup-panjang"
+// Rahasia sesi dari lingkungan, atau acak tiap jalan — kunci yang ikut ter-commit sama saja dengan tanpa kunci.
+let KUNCI = env::get("SESSION_KEY") ?? crypto::random_hex(32)
 
 const HALAMAN = «<!doctype html>
 <title>{{ judul }}</title>
@@ -17,6 +15,7 @@ const HALAMAN = «<!doctype html>
 {{/each}}</ul>
 {{#if masuk}}<p>Halo, {{ user }}. <a href="/keluar">Keluar</a></p>
 {{else}}<form method=post action="/masuk">
+  <input type=hidden name=csrf value="{{ csrf }}">
   <input name=user><button>Masuk</button>
 </form>{{/if}}»
 
@@ -27,7 +26,8 @@ pub fn main() {
         "pesan": "",
         "barang": ["kopi", "gula & susu", "<script>alert(1)</script>"],
         "masuk": false,
-        "user": ""
+        "user": "",
+        "csrf": ""
     }
     match dok::render(HALAMAN, data) {
         Ok(html) => wok(html)
@@ -92,16 +92,26 @@ pub fn main() {
         return dok::header_set(resp, "X-Ditenagai-Oleh", "JawaRustGo++")
     })
 
+    // Formulir login membawa token CSRF yang terikat ke id pra-sesi di cookie. Tanpa itu situs lain bisa membuat
+    // pengunjung masuk dengan akun penyerang (login CSRF); `SameSite` tidak menolong, cookie korban tidak dipakai.
     dok::router_get(r, "/", |req| {
+        let pra = dok::cookie_get(req, "pra") ?? crypto::random_hex(16)
         let d = {"judul": "Toko JRG", "pesan": "", "barang": ["kopi", "teh"],
-                 "masuk": false, "user": ""}
+                 "masuk": false, "user": "", "csrf": dok::csrf_token(KUNCI, pra)}
         match dok::render(HALAMAN, d) {
-            Ok(h)  => dok::html(h)
+            Ok(h)  => dok::cookie_set(dok::html(h), "pra", pra, {"max_age": 3600})
             Err(e) => dok::response(500, e)
         }
     })
 
     dok::router_post(r, "/masuk", |req| {
+        let pra = dok::cookie_get(req, "pra") ?? ""
+        var token = ""
+        match dok::form(req) {
+            Ok(pasangan) => { for _, kv in pasangan { if kv.0 == "csrf" { token = kv.1 } } }
+            Err(e) => { return dok::response(400, e) }
+        }
+        if pra == "" || !dok::csrf_verify(token, KUNCI, pra) { return dok::response(403, "token CSRF tidak sah") }
         let sesi = dok::session_encode({"user": "budi"}, KUNCI)
         let resp = dok::redirect("/admin", 302)
         return dok::cookie_set(resp, "sesi", sesi, {"max_age": 3600})

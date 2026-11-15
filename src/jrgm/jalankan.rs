@@ -3,9 +3,9 @@
 use super::dependensi::{graf_dependensi, path_dependensi};
 use std::path::{Path, PathBuf};
 
-use jrgc::lexer::SourceFile;
-use jrgc::parser::parse;
-use jrgc::interpreter::interpret_with_paths;
+use crate::lexer::SourceFile;
+use crate::parser::parse;
+use crate::interpreter::interpret_with_paths;
 
 use super::dependensi::tambah_path_dependensi;
 
@@ -13,22 +13,22 @@ use super::dependensi::tambah_path_dependensi;
 
 /// Eksekusi satu file .jrg: Lex → Parse → VM/Interpret (+ optional profiler)
 pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool, emit_bc: bool) -> Result<(), String> {
-    if prof { jrgc::profiler::init(true); eprintln!("[jrgm] profiler aktif\n"); }
+    if prof { crate::profiler::init(true); eprintln!("[jrgm] profiler aktif\n"); }
 
     let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("tidak bisa baca `{}`: {}", path.display(), jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa baca `{}`: {}", path.display(), crate::host::galat_io(&e)))?;
     let sf = SourceFile { id: 0, name: path.display().to_string(), src };
     // Peta sumber dipakai diagnostik untuk mengambil cuplikan baris dan menaruh
     // caret di kolom yang benar — galat lex dan parse juga, sama dengan `jrgc`.
-    let mut source_map = jrgc::diag::SourceMap::with_file(sf.clone());
+    let mut source_map = crate::diag::SourceMap::with_file(sf.clone());
 
     if verbose { eprintln!("[jrgm] lexing: {}", path.display()); }
-    let tokens = jrgc::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
+    let tokens = crate::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
     if verbose { eprintln!("[jrgm] {} token(s) diproduksi", tokens.len()); }
 
     let (ast, parse_errors) = parse(tokens, false);
     if !parse_errors.is_empty() {
-        jrgc::pipa::laporkan_galat_parse(&parse_errors, false, &source_map);
+        crate::pipa::laporkan_galat_parse(&parse_errors, false, &source_map);
         return Err(String::new());
     }
     if verbose { eprintln!("[jrgm] {} items — memulai {}...",
@@ -39,22 +39,22 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
     let project_root = std::env::current_dir().unwrap_or_else(|_| source_dir.clone());
     let search_paths: Vec<std::path::PathBuf> = {
         let mut v = vec![source_dir, project_root.clone()];
-        tambah_path_dependensi(&project_root, &mut v);
+        tambah_path_dependensi(&project_root, &mut v)?;
         v.dedup();
         v
     };
 
     // ── Bytecode VM path ─────────────────────────────────────────────────
     if use_vm {
-        let result = jrgc::vm::run_file_with_paths(&ast, search_paths.clone(), emit_bc, prof);
-        if prof { jrgc::profiler::report(); }
+        let result = crate::vm::run_file_with_paths(&ast, search_paths.clone(), emit_bc, prof);
+        if prof { crate::profiler::report(); }
         if verbose { eprintln!("[jrgm] selesai (VM)"); }
         return match result {
-            Ok(()) => Ok(()),
+            Ok(()) => { crate::host::keluar_kode_main(); Ok(()) }
             Err(e) => {
                 // Sejak `VmError` membawa `Span`, jalurnya sama dengan
                 // interpreter: cuplikan sumber dan caret ikut tampil.
-                jrgc::diag::laporkan_vm(&mut source_map, &e);
+                crate::diag::laporkan_vm(&mut source_map, &e);
                 Err(String::new())
             }
         };
@@ -62,11 +62,11 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
 
     // ── Tree-walking interpreter path ─────────────────────────────────────
     let hasil = interpret_with_paths(&ast, search_paths);
-    if prof { jrgc::profiler::report(); }
+    if prof { crate::profiler::report(); }
     let result = match hasil {
-        Ok(()) => Ok(()),
+        Ok(()) => { crate::host::keluar_kode_main(); Ok(()) }
         Err(e) => {
-            jrgc::diag::laporkan_runtime(&mut source_map, &e);
+            crate::diag::laporkan_runtime(&mut source_map, &e);
             // Pesannya SUDAH dicetak lengkap di atas; string kosong
             // menandakan itu ke pemanggil supaya ia tidak mencetak versi
             // telanjangnya lagi di bawah.
@@ -80,14 +80,14 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
 
 pub(crate) fn check_jrg_file(path: &Path, verbose: bool) -> Result<(), String> {
     let src = std::fs::read_to_string(path)
-        .map_err(|e| format!("tidak bisa baca `{}`: {}", path.display(), jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa baca `{}`: {}", path.display(), crate::host::galat_io(&e)))?;
 
     let sf = SourceFile { id: 0, name: path.display().to_string(), src };
 
     if verbose { eprintln!("[jrgm] lexing: {}", path.display()); }
 
-    let source_map = jrgc::diag::SourceMap::with_file(sf.clone());
-    let tokens = jrgc::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
+    let source_map = crate::diag::SourceMap::with_file(sf.clone());
+    let tokens = crate::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
     let (ast, parse_errors) = parse(tokens, true);
 
     if parse_errors.is_empty() {
@@ -100,7 +100,7 @@ pub(crate) fn check_jrg_file(path: &Path, verbose: bool) -> Result<(), String> {
     } else {
         // Diurai dengan `recover` supaya SEMUA galatnya terkumpul, tapi tetap
         // dilaporkan sebagai galat: build yang punya satu saja harus gagal.
-        jrgc::pipa::laporkan_galat_parse(&parse_errors, false, &source_map);
+        crate::pipa::laporkan_galat_parse(&parse_errors, false, &source_map);
         Err(String::new())
     }
 }

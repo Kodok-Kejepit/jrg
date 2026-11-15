@@ -1,0 +1,40 @@
+package main
+import "std/ini"
+
+fn test_parse() {
+    let t = "; komentar\nnama = jrg\n\n[server]\nport = 8080\nhost=127.0.0.1\n# lain\n[Kosong]\n[db]\nurl = \"a;b\" ; bukan komentar\nKunci = Besar\nkunci = kecil\n"
+    let d = ini::parse(t).unwrap()
+    assert_eq(d[""]["nama"], "jrg")
+    assert_eq(d["server"]["port"], "8080")
+    assert_eq(d["server"]["host"], "127.0.0.1")
+    assert_eq(d["db"]["url"], "\"a;b\" ; bukan komentar")
+    assert_eq(d["db"]["Kunci"], "Besar")
+    assert_eq(d["db"]["kunci"], "kecil")
+    assert(dict::is_empty(d["Kosong"]))
+    assert_eq(ini::parse("\uFEFF[a]\r\nk = v\r\n").unwrap()["a"]["k"], "v")
+    assert(!dict::has(ini::parse("[a]\nk = v\n").unwrap(), ""))
+    assert_eq(ini::parse("[a]\nk = x = y\nkosong =\n").unwrap()["a"], dict { k: "x = y", kosong: "" })
+}
+
+fn test_yang_ambigu_ditolak() {
+    assert_eq(ini::parse("[a]\nk = 1\nk = 2\n").unwrap_err(), "baris 3: kunci `k` ditulis dua kali di bagian `a`")
+    assert_eq(ini::parse("[a]\n[b]\n[a]\n").unwrap_err(), "baris 3: bagian `a` ditulis dua kali")
+    assert_eq(ini::parse("[a]\nk = 1\n  lanjut\n").unwrap_err(), "baris 3: diawali spasi — baris sambungan tidak didukung, tulis nilainya di satu baris")
+    assert_eq(ini::parse("[a\n").unwrap_err(), "baris 1: kepala bagian tidak ditutup `]`")
+    assert_eq(ini::parse("[]\n").unwrap_err(), "baris 1: nama bagian `` tidak sah")
+    assert_eq(ini::parse("tanpa sama dengan\n").unwrap_err(), "baris 1: harusnya `kunci = nilai` atau `[bagian]`")
+    assert_eq(ini::parse("= v\n").unwrap_err(), "baris 1: kunci kosong")
+    assert_eq(ini::parse("k = a\u0000b\n").unwrap_err(), "baris 1: memuat karakter kendali")
+}
+
+fn test_stringify_bolak_balik() {
+    let d = {"": {"nama": "jrg"}, "server": {"port": 8080, "host": "h"}}
+    let t = ini::stringify(d).unwrap()
+    let b = ini::parse(t).unwrap()
+    assert_eq(b[""]["nama"], "jrg")
+    assert_eq(b["server"]["port"], "8080")
+    assert(ini::stringify({"a": {"k=x": "v"}}).is_err())
+    assert(ini::stringify(dict { a: dict { k: "baris\nbaru" } }).is_err())
+    assert(ini::stringify(dict { a: dict { k: " spasi" } }).is_err())
+    assert(ini::stringify({"a]": {"k": "v"}}).is_err())
+}

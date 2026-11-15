@@ -128,6 +128,33 @@ impl Codegen {
         Ok(true)
     }
 
+    /// `x = arr::pop(x)[0]` atas slice milik lokal/`var` modul: panjangnya diturunkan di tempat (kosong
+    /// tetap kosong, seperti `arr::pop([])`) — dulu seluruh `x` disalin tiap kali, kuadrat.
+    pub(crate) fn coba_pop_di_tempat(&mut self, a: &AssignStmt) -> Result<bool, String> {
+        let ([Expr::Ident(nama, _)], AssignOp::Eq, [Expr::Index { obj, idx, .. }]) =
+            (a.targets.as_slice(), &a.op, a.values.as_slice()) else { return Ok(false) };
+        if !matches!(&**idx, Expr::Literal(LitKind::Int(0), _)) { return Ok(false); }
+        let Expr::Call { func, args, .. } = &**obj else { return Ok(false) };
+        let [Expr::Ident(m, _)] = args.as_slice() else { return Ok(false) };
+        let Expr::PathExpr { segments, .. } = &**func else { return Ok(false) };
+        if m != nama || segments.len() != 2 || segments[0] != "arr" || segments[1] != "pop"
+            || self.unit_alias("arr").is_some() { return Ok(false); }
+        let Some((slot, ty)) = self.lookup_local(nama)
+            .or_else(|| self.var_global.get(&self.k(nama)).cloned()) else { return Ok(false) };
+        // Cuma panjang di slot milik variabel ini yang berubah, isi penyangganya tidak ditulis: aman juga untuk
+        // `self` pinjaman dan tangkapan (penambahan berikutnya mengalokasi ulang lewat tabel kapasitasnya).
+        if !matches!(ty, JrgType::Slice(_)) { return Ok(false); }
+        let (lp, ln, k, bn) = (self.fresh("popl."), self.fresh("popn."), self.fresh("popk."), self.fresh("popb."));
+        self.emit(format!("{} = getelementptr %JrgSlice, ptr {}, i32 0, i32 1", lp, slot));
+        self.emit(format!("{} = load i64, ptr {}", ln, lp));
+        self.emit(format!("{} = icmp sgt i64 {}, 0", k, ln));
+        self.emit(format!("{} = sub i64 {}, 1", bn, ln));
+        let akhir = self.fresh("popa.");
+        self.emit(format!("{} = select i1 {}, i64 {}, i64 0", akhir, k, bn));
+        self.emit(format!("store i64 {}, ptr {}", akhir, lp));
+        Ok(true)
+    }
+
     /// Sama untuk tempat MANA PUN yang berakar pada sebuah nama (`self.isi += [x]`,
     /// `p.xs = arr::push(p.xs, x)`) dan untuk elemen yang tidak datar. Kapasitasnya dicatat
     /// primitif C per alamat penyangga, bukan per variabel.
@@ -188,14 +215,31 @@ impl Codegen {
 
     /// `x = f(x, ..)` atas fungsi bernama: argumen pertama DIPINDAHKAN (tanpa salinan masuk),
     /// karena `x` langsung ditimpa hasilnya. Mengembalikan nama yang boleh dipindahkan.
+    /// Juga `x, y = f(x, ..)` (sasaran lain tidak menyebut `x`) dan fungsi modul `m::f(x, ..)`.
     pub(crate) fn argumen_dipindahkan(&self, a: &AssignStmt) -> Option<String> {
-        let ([Expr::Ident(nama, _)], AssignOp::Eq, [Expr::Call { func, args, .. }]) =
-            (a.targets.as_slice(), &a.op, a.values.as_slice()) else { return None };
-        let Expr::Ident(f, _) = &**func else { return None };
+        let (AssignOp::Eq, [Expr::Call { func, args, .. }]) = (&a.op, a.values.as_slice()) else { return None };
+        let (Expr::Ident(nama, _), lain) = a.targets.split_first()? else { return None };
+        if lain.iter().any(|t| crate::interpreter::capture::names_mentioned(t).contains(nama.as_str())) { return None; }
         if !matches!(args.first(), Some(Expr::Ident(n, _)) if n == nama) { return None; }
         if args[1..].iter().any(|x| crate::interpreter::capture::names_mentioned(x).contains(nama.as_str())) { return None; }
         if nama == "self" || self.tangkapan.contains(nama) || self.lookup_local(nama).is_none() { return None; }
-        if self.lookup_local(f).is_some() || !self.tables.functions.contains_key(&self.k(f)) { return None; }
+        let milik_program = match &**func {
+            Expr::Ident(f, _) => self.lookup_local(f).is_none() && self.tables.functions.contains_key(&self.k(f)),
+            Expr::PathExpr { segments, .. } if segments.len() == 2 => self.unit_alias(&segments[0])
+                .is_some_and(|u| self.tables.functions.contains_key(&super::modul::kunci(u, &segments[1]))),
+            _ => false,
+        };
+        milik_program.then(|| nama.clone())
+    }
+
+    /// `x = [.., x, ..]` atas lokal polos yang muncul tepat sekali, telanjang: elemen itu
+    /// dipindahkan (`x` langsung ditimpa) — dulu seluruh `x` disalin tiap kali, `a = [a]` kuadrat.
+    pub(crate) fn elemen_dipindahkan(&self, a: &AssignStmt) -> Option<String> {
+        let ([t @ Expr::Ident(nama, _)], AssignOp::Eq, [Expr::Array { elems, .. }]) =
+            (a.targets.as_slice(), &a.op, a.values.as_slice()) else { return None };
+        let telanjang = elems.iter().filter(|e| matches!(e, Expr::Ident(n, _) if n == nama)).count();
+        let disebut = elems.iter().filter(|e| crate::interpreter::capture::names_mentioned(e).contains(nama.as_str())).count();
+        if telanjang != 1 || disebut != 1 || nama == "self" || !self.akar_lokal_polos(t) { return None; }
         Some(nama.clone())
     }
 
@@ -226,7 +270,13 @@ impl Codegen {
         }
         let hasil = match hasil {
             Some(v) => v,
-            None => self.codegen_expr(nilai, None)?,
+            None => {
+                self.arg_pindah = self.argumen_dipindahkan(a);
+                self.hasil_pindah_milik = false;
+                let v = self.codegen_expr(nilai, None);
+                self.arg_pindah = None;
+                v?
+            }
         };
         let JrgType::Tuple(ts) = hasil.ty.clone() else {
             return Err(super::galat::tandai(nilai.span(),
@@ -247,7 +297,10 @@ impl Codegen {
             if *t != JrgType::Unit { self.emit(format!("store {} {}, ptr {}", t.llvm_ty(), r, slot)); }
             sementara.push((i, nama));
         }
+        // Elemen pertama hasil panggilan yang memindahkan `x` dan cuma mengembalikannya: tidak disalin lagi.
+        let pertama_milik = std::mem::take(&mut self.hasil_pindah_milik);
         for (i, nama) in sementara {
+            self.lit_milik = i == 0 && pertama_milik;
             let satu = AssignStmt {
                 targets: vec![a.targets[i].clone()], op: AssignOp::Eq,
                 values: vec![Expr::Ident(nama, nilai.span())], span: a.span,
@@ -264,7 +317,7 @@ impl Codegen {
             Expr::Ident(n, _) => self.lookup_local(n).map(|(_, t)| t)
                 .or_else(|| self.var_global.get(&self.k(n)).map(|(_, t)| t.clone())),
             Expr::Field { obj, field, .. } => match self.tipe_jalur(obj)? {
-                JrgType::Struct(n) => self.types.structs.get(&n)?.field_type(field).cloned(),
+                JrgType::Struct(n) => self.types.structs.get(&n)?.field_type(field).map(|t| t.tanpa_kotak()),
                 JrgType::Tuple(ts) => ts.get(field.parse::<usize>().ok()?).cloned(),
                 _ => None,
             },
@@ -317,7 +370,10 @@ impl Codegen {
     /// nama yang dipakai bersama closure, `self` pinjaman), menyambung di tempat sesudahnya
     /// memakai nilai BARU — jalur biasa yang mengerjakannya.
     fn kanan_bisa_menulis(&self, akar: &str, kanan: &Expr) -> bool {
-        let polos = self.lookup_local(akar).is_some() && !self.tangkapan.contains(akar)
+        // Lokal yang naik ke kotak cuma karena fungsinya punya closure, tapi tidak disebut closure mana pun,
+        // tidak bisa ditulis sebuah panggilan: dulu `x = arr::push(x, arr::map(b, |y| ..))` menyalin `x`.
+        let polos = self.lookup_local(akar).is_some()
+            && !(self.tangkapan.contains(akar) && self.ditangkap_closure.contains(akar))
             && !self.tangkap_masuk.contains(akar) && !(akar == "self" && self.self_dipinjam);
         !polos && crate::interpreter::capture::ada_panggilan(kanan)
     }

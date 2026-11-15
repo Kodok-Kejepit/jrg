@@ -1,0 +1,65 @@
+package std_izin
+
+// Kontrol akses berbasis peran yang MENOLAK secara bawaan: peran atau aksi yang tidak dikenal, daftar peran kosong,
+// dan aksi yang tidak didaftarkan untuk peran mana pun berarti `false` — celah "missing authorization" (CWE-862)
+// lahir dari pemeriksa yang membiarkan lewat. Aksi `a.b.c`; `a.*` mencakup `a.b` dan `a.b.c` (bukan `ax`), `*` semuanya.
+
+pub struct Aturan {
+    pub peran: dict = dict::new(),
+}
+
+/// Aturan kosong — belum ada yang boleh apa pun.
+pub fn baru() { return Aturan {} }
+
+fn _aksi_sah(a) {
+    if typeof(a) != "string" || a == "" { return false }
+    let bagian = str::split(a, ".")
+    for i, b in bagian {
+        if b == "" { return false }
+        if b == "*" && i != len(bagian) - 1 { return false }
+        for _, r in str::chars(b) {
+            let c = str(r)
+            if !((c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "_" || c == "-" || (c == "*" && b == "*")) { return false }
+        }
+    }
+    return true
+}
+
+/// Beri `peran` hak atas tiap aksi di `aksi` (array teks, `produk.lihat` atau `produk.*`).
+pub fn izinkan(z, peran, aksi) {
+    if typeof(peran) != "string" || peran == "" { panik("izin::izinkan: nama peran harus teks tak kosong") }
+    for _, a in aksi {
+        if !_aksi_sah(a) { panik(«izin::izinkan: aksi `${a}` tidak sah — huruf kecil/angka/`_`/`-` bertitik, `*` cuma di ujung») }
+    }
+    let lama = dict::has(z.peran, peran) $ z.peran[peran] : []
+    z.peran[peran] = arr::unique(arr::concat(lama, aksi))
+    return z
+}
+
+fn _cocok(pola, aksi) {
+    if pola == aksi { return true }
+    if str::ends_with(pola, ".*") {
+        let awal = pola[0:len(pola) - 1]
+        return str::starts_with(aksi, awal)
+    }
+    return pola == "*"
+}
+
+/// `true` cuma kalau salah satu `peran` (array teks) diberi hak atas `aksi`; selain itu `false`.
+pub fn boleh(z, peran, aksi) {
+    if !_aksi_sah(aksi) || str::contains(aksi, "*") { return false }
+    if typeof(peran) != "array" { return false }
+    for _, p in peran {
+        if typeof(p) == "string" && dict::has(z.peran, p) {
+            for _, pola in z.peran[p] { if _cocok(pola, aksi) { return true } }
+        }
+    }
+    return false
+}
+
+/// `Ok(())` kalau boleh, `Err(alasan)` kalau tidak — alasannya untuk log, bukan untuk ditampilkan ke penyerang.
+pub fn wajib(z, peran, aksi) {
+    if boleh(z, peran, aksi) { return Ok(()) }
+    let s = _aksi_sah(aksi) && len(aksi) <= 64 $ aksi : "(aksi tidak sah)"
+    return Err(«ditolak: tidak ada peran yang diberi hak `${s}`»)
+}

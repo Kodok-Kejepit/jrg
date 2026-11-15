@@ -216,23 +216,24 @@ impl GlobalTables {
         hasil
     }
 
-    /// Leluhur yang tidak bisa diratakan, kalau ada — yaitu leluhur GENERIK,
-    /// karena struct generik dilewati pendaftaran layout di backend ini.
-    pub fn leluhur_bermasalah(&self, name: &str) -> Option<(String, &'static str)> {
+    /// Parameter tipe para leluhur GENERIK (`struct Anak: Dasar` atas `struct Dasar<T>`), juga nama
+    /// yang dipakai `impl<..>` method mereka. Tidak disebut di mana pun, jadi diikat ke nilai bertag.
+    pub fn param_leluhur(&self, name: &str) -> Vec<String> {
         let name = super::generik::dasar(name);
         let mut kini = self.structs.get(name).and_then(|d| d.parent.clone());
         let mut lihat: Vec<String> = vec![name.to_string()];
+        let mut hasil = Vec::new();
         while let Some(n) = kini {
             if lihat.iter().any(|x| x == &n) { break; }
-            match self.structs.get(&n) {
-                None => return None,
-                Some(d) if !d.generics.params.is_empty() =>
-                    return Some((n, "generik, dan mewarisi struct generik belum didukung backend ini")),
-                Some(d) => kini = d.parent.clone(),
-            }
+            let Some(d) = self.structs.get(&n) else { break };
+            hasil.extend(d.generics.params.iter().map(|p| p.name.clone()));
+            for ((t, _), ps) in &self.param_impl { if *t == n { hasil.extend(ps.iter().cloned()); } }
+            kini = d.parent.clone();
             lihat.push(n);
         }
-        None
+        hasil.sort();
+        hasil.dedup();
+        hasil
     }
 
     /// Method milik tipe itu sendiri menang; sesudah itu naik ke induknya.
@@ -379,6 +380,13 @@ fn resolve_named(nt: &NamedType, ctx: &TypeResolveCtx) -> Result<JrgType, String
         // Handle milik `jrgc` (lewat jembatan) dan nama `typeof` yang tidak punya tata letak di sini:
         // nilainya bertag, tipenya dibawa saat jalan.
         "Canvas" | "canvas" | "tuple" | "function" | "closure" | "native_fn" => Ok(JrgType::Any),
+        // Tidak bisa ditulis pemakai (`$`): parameter konstruktor generik sebagai nilai.
+        "$campur" => Ok(JrgType::Any),
+        // Handle dan rekaman `jrgc` yang sampai lewat jembatan (`req: DokRequest`), kecuali program
+        // mendeklarasikan struct bernama sama.
+        "DokDb" | "DokHttpResp" | "DokLinReg" | "DokRequest" | "DokResponse" | "DokWs" | "PyObj" | "JsObj"
+        | "PhpObj" | "Nd" | "MousePos" | "UdpPacket" | "ProsesBagian" | "ProsesHasil" | "Ptr"
+            if nt.args.is_empty() && !ctx.tables.structs.contains_key(name) => Ok(JrgType::Any),
         _ => {
             if let Some(s) = ctx.tables.structs.get(name) {
                 if !s.generics.params.is_empty() {

@@ -1,0 +1,188 @@
+package std_diff
+
+// Selisih dua daftar (biasanya baris teks), algoritma Myers: selisih terpendek. Biayanya dibatasi — di atas
+// `BATAS` langkah, bagian tengah yang tersisa ditulis sebagai hapus-semua lalu tambah-semua: tetap benar
+// (`terapkan` menghasilkan sasarannya), cuma tidak lagi terpendek.
+
+pub const BATAS = 500
+
+// Operasi: `["=", x]` sama, `["-", x]` dibuang dari `a`, `["+", x]` ditambah dari `b`.
+fn _myers(a, b, batas) {
+    let n = len(a)
+    let m = len(b)
+    let maks = n + m
+    let off = maks + 1
+    var v = arr::fill(0, 2 * maks + 3)
+    var jejak = []
+    var d = 0
+    while d <= maks {
+        if d > batas { return None }
+        jejak = arr::push(jejak, v[off - d - 1:off + d + 2])
+        var k = -d
+        while k <= d {
+            var x = 0
+            if k == -d || (k != d && v[off + k - 1] < v[off + k + 1]) {
+                x = v[off + k + 1]
+            } else {
+                x = v[off + k - 1] + 1
+            }
+            var y = x - k
+            while x < n && y < m && a[x] == b[y] {
+                x += 1
+                y += 1
+            }
+            v[off + k] = x
+            if x >= n && y >= m { return Some(_mundur(a, b, jejak, d)) }
+            k += 2
+        }
+        d += 1
+    }
+    return None
+}
+
+fn _mundur(a, b, jejak, akhir) {
+    var x = len(a)
+    var y = len(b)
+    var ops = []
+    var d = akhir
+    while d > 0 {
+        let vv = jejak[d]
+        let k = x - y
+        var pk = k - 1
+        if k == -d || (k != d && vv[k - 1 + d + 1] < vv[k + 1 + d + 1]) { pk = k + 1 }
+        let px = vv[pk + d + 1]
+        let py = px - pk
+        while x > px && y > py {
+            ops = arr::push(ops, ["=", a[x - 1]])
+            x -= 1
+            y -= 1
+        }
+        if x == px {
+            ops = arr::push(ops, ["+", b[y - 1]])
+            y -= 1
+        } else {
+            ops = arr::push(ops, ["-", a[x - 1]])
+            x -= 1
+        }
+        d -= 1
+    }
+    while x > 0 && y > 0 {
+        ops = arr::push(ops, ["=", a[x - 1]])
+        x -= 1
+        y -= 1
+    }
+    return arr::reverse(ops)
+}
+
+/// Selisih dua array: array operasi `["=", x]`, `["-", x]`, `["+", x]`; terpendek sampai `BATAS` perubahan.
+pub fn daftar(a, b) { return daftar_berbatas(a, b, BATAS) }
+
+/// Seperti `daftar` dengan batas sendiri; biayanya tumbuh kuadrat batasnya.
+pub fn daftar_berbatas(a, b, batas) {
+    var awal = 0
+    while awal < len(a) && awal < len(b) && a[awal] == b[awal] { awal += 1 }
+    var akhir = 0
+    while akhir < len(a) - awal && akhir < len(b) - awal && a[len(a) - 1 - akhir] == b[len(b) - 1 - akhir] { akhir += 1 }
+    let ta = a[awal:len(a) - akhir]
+    let tb = b[awal:len(b) - akhir]
+    var ops = arr::map(a[0:awal], |x| ["=", x])
+    match _myers(ta, tb, batas) {
+        Some(tengah) => { ops = arr::concat(ops, tengah) }
+        None => {
+            ops = arr::concat(ops, arr::map(ta, |x| ["-", x]))
+            ops = arr::concat(ops, arr::map(tb, |x| ["+", x]))
+        }
+    }
+    return arr::concat(ops, arr::map(a[len(a) - akhir:], |x| ["=", x]))
+}
+
+/// Jalankan operasi atas `a`; `Err` kalau operasinya tidak cocok dengan `a`.
+pub fn terapkan(a, ops) {
+    var hasil = []
+    var i = 0
+    for n, op in ops {
+        if op[0] == "+" {
+            hasil = arr::push(hasil, op[1])
+        } else {
+            if i >= len(a) || a[i] != op[1] { return Err(«operasi ke-${n} tidak cocok dengan isi ke-${i}») }
+            if op[0] == "=" { hasil = arr::push(hasil, op[1]) }
+            i += 1
+        }
+    }
+    if i != len(a) { return Err(«operasinya berhenti di isi ke-${i}, padahal ada ${len(a)}») }
+    return Ok(hasil)
+}
+
+// Tiap baris membawa `\n`-nya, jadi "a" lawan "a\n" (baris akhir tanpa ganti baris) tetap terlihat berbeda.
+fn _baris(teks) {
+    if teks == "" { return [] }
+    var b = arr::map(str::split(teks, "\n"), |x| x + "\n")
+    let n = len(b)
+    if str::ends_with(teks, "\n") { return b[0:n - 1] }
+    b[n - 1] = b[n - 1][0:len(b[n - 1]) - 1]
+    return b
+}
+
+fn _tulis(tanda, x) {
+    if str::ends_with(x, "\n") { return tanda + x }
+    return tanda + x + "\n\\ No newline at end of file\n"
+}
+
+fn _rentang(awal, n) {
+    if n == 1 { return str(awal) }
+    if n == 0 { return «${awal - 1},0» }
+    return «${awal},${n}»
+}
+
+/// Selisih dua teks dalam format unified (`diff -u`, dibaca `patch` dan `git apply`); `""` kalau sama.
+pub fn unified(a, b, nama_a, nama_b, konteks) {
+    let ops = daftar(_baris(a), _baris(b))
+    var ubah = []
+    for i, op in ops { if op[0] != "=" { ubah = arr::push(ubah, i) } }
+    if len(ubah) == 0 { return "" }
+    var keluar = «--- ${nama_a}\n+++ ${nama_b}\n»
+    // Nomor baris a dan b sebelum tiap operasi.
+    var na = [1]
+    var nb = [1]
+    for _, op in ops {
+        na = arr::push(na, na[len(na) - 1] + (op[0] != "+" $ 1 : 0))
+        nb = arr::push(nb, nb[len(nb) - 1] + (op[0] != "-" $ 1 : 0))
+    }
+    var u = 0
+    while u < len(ubah) {
+        var akhir_u = u
+        while akhir_u + 1 < len(ubah) && ubah[akhir_u + 1] - ubah[akhir_u] <= 2 * konteks + 1 { akhir_u += 1 }
+        let mulai = math::max(0, ubah[u] - konteks)
+        let selesai = math::min(len(ops), ubah[akhir_u] + konteks + 1)
+        var ca = 0
+        var cb = 0
+        var isi = ""
+        for _, i in range(mulai, selesai) {
+            let op = ops[i]
+            if op[0] == "=" {
+                ca += 1
+                cb += 1
+                isi = isi + _tulis(" ", op[1])
+            } else if op[0] == "-" {
+                ca += 1
+                isi = isi + _tulis("-", op[1])
+            } else {
+                cb += 1
+                isi = isi + _tulis("+", op[1])
+            }
+        }
+        keluar = keluar + «@@ -${_rentang(na[mulai], ca)} +${_rentang(nb[mulai], cb)} @@\n» + isi
+        u = akhir_u + 1
+    }
+    return keluar
+}
+
+/// Jumlah baris yang dibuang dan ditambah: `(buang, tambah)`.
+pub fn hitung(ops) {
+    var buang = 0
+    var tambah = 0
+    for _, op in ops {
+        if op[0] == "-" { buang += 1 } else if op[0] == "+" { tambah += 1 }
+    }
+    return (buang, tambah)
+}

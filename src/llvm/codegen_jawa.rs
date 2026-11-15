@@ -22,6 +22,11 @@ impl Codegen {
             _ if !crate::vm::ada_builtin(nama) => return None,
             _ => nama.strip_prefix("jawa::").or_else(|| nama.strip_prefix("jawir::"))?,
         };
+        // Registry `jawa::` milik runtime biner ini: jembatan akan membaca registry `jrgc` yang kosong.
+        if item == "stats" {
+            if !args.is_empty() { return None; }
+            return Some(self.jawa_stats(span));
+        }
         // Arity diperiksa sebelum dispatch: `None` berarti "bukan namespace
         // ini", bukan "argumennya salah".
         let arity = match item {
@@ -43,18 +48,19 @@ impl Codegen {
         // Argumen ke-0 sebuah handle untuk semua kecuali fungsi pembuat.
         let pembuat = matches!(item, "alloc" | "array" | "buffer");
         let mut nilai: Vec<String> = Vec::with_capacity(args.len());
+        let mut pegangan = None;
         for (i, a) in args.iter().enumerate() {
             if i == 0 && !pembuat {
                 let h = self.codegen_expr(a, None)?;
                 // `jawa::sizeof` atas nilai yang bukan pegangan menaksir ukuran nilainya, seperti
-                // dua mesin lain: lewat jembatan, yang memakai taksiran yang sama.
+                // dua mesin lain: lewat jembatan (taksirannya tidak menyentuh registry `jawa::`).
                 if item == "sizeof" && !matches!(&h.ty, JrgType::Struct(n) if n == "Ptr") {
                     let slot = self.alloca_typed("jws.", &h.ty);
                     self.emit(format!("store {} {}, ptr {}", h.ty.llvm_ty(), h.text, slot));
                     let e = self.lokal_sementara(slot, h.ty.clone(), span);
-                    if let Some(r) = self.coba_jembatan("jawa", "sizeof", &[e], span) { return r; }
+                    return self.panggil_jembatan("jawa::sizeof", None, None, &[e], span);
                 }
-                nilai.push(self.id_handle(&h, span)?);
+                pegangan = Some(h);
             } else {
                 let v = self.codegen_expr(a, Some(&JrgType::I64))?;
                 if !v.ty.is_int() {
@@ -67,6 +73,12 @@ impl Codegen {
                 }
                 nilai.push(self.coerce_longgar(&v, &JrgType::I64).text);
             }
+        }
+        // Pegangan diperiksa sesudah semua argumen dievaluasi, seperti acuan.
+        if let Some(h) = pegangan {
+            let ns = if item == "free" { "jawir" } else { "jawa" };
+            let id = self.id_handle(&h, &format!("{}::{}", ns, item), span)?;
+            nilai.insert(0, id);
         }
 
         let (fungsi, hasil) = match item {
@@ -179,12 +191,40 @@ impl Codegen {
         JrgType::Struct("Ptr".to_string())
     }
 
-    /// Ambil id dari sebuah handle, menolak apa pun yang bukan handle.
-    fn id_handle(&mut self, v: &Val, span: Span) -> Result<String, String> {
-        if v.ty != JrgType::Struct("Ptr".to_string()) {
-            return Err(super::galat::tandai(span, format!(
-                "butuh handle dari `jawa::alloc`/`jawa::array`/`jawa::buffer`, diberi `{}`",
-                v.ty.display_name())));
+    /// Ambil id dari sebuah handle; yang bukan handle gagal SAAT JALAN dengan kalimat acuan.
+    fn id_handle(&mut self, v: &Val, nama: &str, span: Span) -> Result<String, String> {
+        let ptr = self.tipe_ptr();
+        if v.ty == JrgType::Any {
+            let kata = self.kata_buram(&ptr);
+            let slot = self.alloca_typed("jwt.", &JrgType::Any);
+            self.emit(format!("store %JrgAny {}, ptr {}", v.text, slot));
+            let (w, c) = (self.fresh("jwt."), self.fresh("jwt."));
+            self.emit(format!("{} = load i32, ptr {}", w, slot));
+            self.emit(format!("{} = icmp ne i32 {}, {}", c, w, kata));
+            let kotak = v.clone();
+            self.gagal_bila(&c, |cg| {
+                // `Ptr` milik `ptr::` (titipan jembatan, bukan struct buram pengguna) ditolak khusus.
+                if let Ok(t) = cg.typeof_any(&kotak) {
+                    let (tp, tl) = cg.split_str(&t);
+                    let k = cg.intern_string("struct:Ptr");
+                    let (kp, kl) = cg.split_str(&k);
+                    cg.ensure_extern("declare i32 @jrg_str_eq(ptr, i64, ptr, i64)", "jrg_str_eq");
+                    let (r, b, g, nb, s) = (cg.fresh("jwt."), cg.fresh("jwt."), cg.fresh("jwt."), cg.fresh("jwt."), cg.fresh("jwt."));
+                    cg.emit(format!("{} = call i32 @jrg_str_eq(ptr {}, i64 {}, ptr {}, i64 {})", r, tp, tl, kp, kl));
+                    cg.emit(format!("{} = icmp ne i32 {}, 0", b, r));
+                    cg.emit(format!("{} = and i32 {}, 255", g, w));
+                    cg.emit(format!("{} = icmp ne i32 {}, {}", nb, g, super::codegen_any::TAG_BURAM));
+                    cg.emit(format!("{} = and i1 {}, {}", s, b, nb));
+                    cg.gagal_bila(&s, |cg| cg.panik(&format!("{}: handle tidak valid (field `kind` hilang)", nama)));
+                }
+                cg.panik_tipe_any(&kotak, |t| crate::interpreter::builtin::heap::pesan_bukan_ptr(nama, t))
+            });
+            let buka = self.buka_any(v, &ptr, span)?;
+            return self.id_handle(&buka, nama, span);
+        }
+        if v.ty != ptr {
+            self.panik_statis(&crate::interpreter::builtin::heap::pesan_bukan_ptr(nama, &v.ty.nama_typeof()));
+            return Ok("0".into());
         }
         if self.types.structs.get("Ptr").and_then(|l| l.field_index("id")) != Some(0) {
             return Err(super::galat::tandai(span,
@@ -198,6 +238,21 @@ impl Codegen {
         self.emit(format!("{} = extractvalue {} {}, 0", r, v.ty.llvm_ty(), v.text));
         Ok(r)
     }
+
+    /// Lima hitungan dari runtime, lalu `HeapStats` dibentuk `jrgc` lewat jembatan.
+    fn jawa_stats(&mut self, span: Span) -> Result<Val, String> {
+        self.ensure_extern("declare void @jrg_jawa_stats(ptr)", "jrg_jawa_stats");
+        let buf = self.alloca_raw("jst.", "[5 x i64]", Some(8));
+        self.emit(format!("call void @jrg_jawa_stats(ptr {})", buf));
+        let mut args = Vec::with_capacity(5);
+        for i in 0..5 {
+            let p = self.fresh("jst.");
+            self.emit(format!("{} = getelementptr [5 x i64], ptr {}, i64 0, i64 {}", p, buf, i));
+            args.push(self.lokal_sementara(p, JrgType::I64, span));
+        }
+        self.panggil_jembatan_pintu("::jawa_stats", "HeapStats", &args, span)
+    }
+
 }
 
 enum Hasil { Kosong, Dibuang, Int, Bool, Handle }

@@ -18,12 +18,16 @@ pub mod codegen_pattern;
 
 /// Kesetaraan struktural untuk nilai agregat (array/slice/tuple/struct/unit).
 pub mod codegen_eq;
+mod codegen_berulang;
 
 /// Namespace `arr::` — koleksi yang mengembalikan nilai baru.
 pub mod codegen_arr;
 
 /// Namespace `dict::` dan literal `{ "k": v }`.
 pub mod codegen_any;
+pub mod codegen_polimorf;
+pub mod codegen_keluarga;
+pub mod codegen_lepas;
 pub mod codegen_dict;
 
 /// `defer` — lingkup fungsi, LIFO, argumen dibekukan saat pendaftaran.
@@ -50,12 +54,18 @@ pub mod infer_bentrok;
 /// Error backend ini, dengan lokasinya — lihat berkasnya untuk alasan
 /// kenapa penandanya diurai alih-alih tipenya diganti.
 pub mod galat;
+pub mod situs;
+pub use situs::isi_situs;
 pub mod modul;
 pub mod generik;
 mod codegen_tumbuh;
+mod codegen_statis;
+mod codegen_sambung;
+pub mod uji;
 mod codegen_korutin;
 mod codegen_sinkron;
 mod codegen_jembatan;
+pub mod codegen_bulat;
 mod tulis_modul;
 pub mod apk;
 pub mod apk_bahasa;
@@ -150,11 +160,10 @@ pub fn generate_ir_dgn_jalur(
             .map_err(|error| vec![format!("tipe return `main` tidak valid: {}", error)])?,
         None => types::JrgType::Unit,
     };
-    if main_ret_ty != types::JrgType::Unit && !main_ret_ty.is_int() {
-        return Err(vec![format!(
-            "`main` hanya boleh mengembalikan integer exit code atau unit, bukan `{}`",
-            main_ret_ty.display_name()
-        )]);
+    let main_opsi = matches!(&main_ret_ty, types::JrgType::Enum(n)
+        if cg.option_args.contains_key(n) || cg.result_args.contains_key(n));
+    if main_ret_ty != types::JrgType::Unit && !main_ret_ty.is_int() && !main_opsi {
+        return Err(vec![crate::host::pesan_main_bukan_kode(&main_ret_ty.nama_typeof())]);
     }
 
     cg.enqueue_fn("main", &main_decl, TypeSubst::new(), "main".to_string(), None);
@@ -992,6 +1001,24 @@ mod tests {
         assert!(!ir.contains("ret i64 7"), "IR aktual:\n{}", ir);
     }
 
+    /// Handle FFI dilepas HANYA kalau terbukti tidak keluar dari bloknya (`codegen_lepas`): disalin ke array,
+    /// dikembalikan, ditangkap closure, dialiaskan, atau dimasukkan literal berarti tidak dilepas.
+    #[test]
+    fn handle_ffi_dilepas_hanya_kalau_tidak_keluar() {
+        let ir = |badan: &str| generate_ir(&parse_source(&format!(
+            "package main\nfn g(x) {{ return x }}\nfn f(i: int) -> int {{\n let h = py::ref(\"[1]\").unwrap()\n {}\n return i\n}}\npub fn main() {{ wok(f(1)) }}\n", badan)))
+            .unwrap_or_else(|e| panic!("{:?}", e));
+        let ada = |badan: &str| ir(badan).contains("call void @jrg_jembatan_lepas");
+        for aman in ["wok(h)", "wok(str(h), typeof(h))", "let n = py::ref_method(h, \"__len__\").unwrap()\n wok(n)",
+                     "if i > 0 { wok(py::get(h, \"x\")) }"] {
+            assert!(ada(aman), "harus dilepas: {}", aman);
+        }
+        for keluar in ["var xs = []\n xs = arr::push(xs, h)\n wok(xs)", "let g = h\n wok(g)", "wok([h])",
+                       "let c = || h\n wok(c())", "wok(g(h))"] {
+            assert!(!ada(keluar), "TIDAK boleh dilepas: {}", keluar);
+        }
+    }
+
     #[test]
     fn non_integer_main_return_is_rejected() {
         let file = parse_source(
@@ -999,7 +1026,7 @@ mod tests {
              pub fn main() -> string { \"invalid\" }\n",
         );
         let errors = generate_ir(&file).unwrap_err();
-        assert!(errors.iter().any(|error| error.contains("integer exit code")));
+        assert!(errors.iter().any(|error| error.contains("cuma boleh mengembalikan bilangan bulat 0 sampai 255")), "{:?}", errors);
     }
 
     #[test]

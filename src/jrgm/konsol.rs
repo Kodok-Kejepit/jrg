@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 
 use super::bahasa::Resep;
 use super::manifes::Manifest;
-use jrgc::llvm::apk::{self, OpsiApk};
+use crate::llvm::apk::{self, OpsiApk};
 
 const MAIN: &str = include_str!("konsol/main.jrg");
 const HALAMAN: &str = include_str!("konsol/index.html");
@@ -18,10 +18,10 @@ pub(crate) fn didukung(r: &Resep) -> bool { r.nama == "c" || r.nama == "cpp" }
 /// Tulis berkas konsol ke `target/apk-konsol/`; jawabannya (main.jrg, index.html, tanpa_buffer.c).
 pub(crate) fn tulis_templat(akar: &Path) -> Result<(PathBuf, PathBuf, PathBuf), String> {
     let d = akar.join("target").join("apk-konsol");
-    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {}", d.display(), jrgc::host::galat_io(&e)))?;
+    std::fs::create_dir_all(&d).map_err(|e| format!("{}: {}", d.display(), crate::host::galat_io(&e)))?;
     let tulis = |n: &str, isi: &str| -> Result<PathBuf, String> {
         let p = d.join(n);
-        std::fs::write(&p, isi).map_err(|e| format!("{}: {}", p.display(), jrgc::host::galat_io(&e)))?;
+        std::fs::write(&p, isi).map_err(|e| format!("{}: {}", p.display(), crate::host::galat_io(&e)))?;
         Ok(p)
     };
     Ok((tulis("main.jrg", MAIN)?, tulis("index.html", HALAMAN)?, tulis("tanpa_buffer.c", TANPA_BUFFER)?))

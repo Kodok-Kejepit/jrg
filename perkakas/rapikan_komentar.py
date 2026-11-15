@@ -6,7 +6,8 @@ BATAS = 3          # blok lebih panjang dari ini dipangkas
 SIMPAN = 2         # berapa baris yang ditinggal di sumber
 
 def berkas_proyek():
-    out = subprocess.run(['git','ls-files'],capture_output=True,text=True).stdout.split('\n')
+    # Berkas baru yang belum di-`git add` ikut: tes penjaganya baru melihatnya sesudah ter-commit.
+    out = subprocess.run(['git','ls-files','--cached','--others','--exclude-standard'],capture_output=True,text=True).stdout.split('\n')
     return [f for f in out if f.endswith(('.rs','.jrg','.py','.js','.sh')) and os.path.exists(f)]
 
 def penanda(path):

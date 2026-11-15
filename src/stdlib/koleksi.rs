@@ -67,7 +67,9 @@ fn bil_wajib(v: Option<&VmValue>, f: &str, bentuk: &str) -> Result<i128, String>
 
 /// Urutan sebuah PASANGAN nilai, atau `None` kalau keduanya tidak terbanding.
 pub fn cmp_vm(a: &VmValue, b: &VmValue) -> Option<std::cmp::Ordering> {
-    use std::cmp::Ordering;
+    if crate::interpreter::stack_menipis() == Some(true) {
+        return crate::interpreter::di_stack_lega(|| cmp_vm(a, b));
+    }
     match (a, b) {
         (VmValue::Int(x),   VmValue::Int(y))   => Some(x.cmp(y)),
         (VmValue::Str(x),   VmValue::Str(y))   => Some(x.cmp(y)),
@@ -188,13 +190,14 @@ fn daftar_arr(vm: &mut Vm) {
     // dipakai sebagai "tidak ketemu" — dan `-1` adalah indeks yang SAH di JRG,
     // jadi `a[arr::index_of(a, x)]` diam-diam membaca elemen TERAKHIR.
     vm.def("arr::index_of", |a| {
-        let v = arr_ke(a.get(0), "arr::index_of", 1)?;
+        arr_pinjam(a.get(0), "arr::index_of", 1, |_| ())?;
+        let Some(VmValue::Array(v)) = a.get(0) else { unreachable!("baru saja dipastikan array") };
         // Yang dicari WAJIB disebut: tanpa itu jawabannya "tidak ketemu"
         // untuk pencarian yang tidak pernah dinyatakan.
         let Some(cari) = a.get(1).cloned() else {
             return Err("arr::index_of butuh (arr, val)".to_string());
         };
-        Ok(match crate::vm::value::posisi_vm_eq(v.iter(), &cari)? {
+        Ok(match crate::vm::value::posisi_vm_eq_di(v, &cari)? {
             Some(i) => some(VmValue::Int(i as i128)),
             None => none(),
         })
@@ -374,10 +377,8 @@ fn daftar_arr(vm: &mut Vm) {
         // `arr::rotate([])` menjawab `[]` tanpa pernah menyebut bahwa `n`
         // tidak diberikan — sementara interpreter menolaknya.
         let n = match a.get(1) {
-            Some(VmValue::Int(n)) => *n,
-            Some(o) => return Err(
-                crate::interpreter::pesan_rotate_n(&o.type_name_penuh())),
             None => return Err(crate::interpreter::pesan_rotate_kurang()),
+            v => bil(v, "arr::rotate")?,
         };
         if v.is_empty() {
             return Ok(VmValue::array(v));
@@ -499,7 +500,7 @@ fn daftar_str(vm: &mut Vm) {
                 // mengolah ISI, jadi argumen pertama yang bukan teks ditolak
                 // lewat pintu yang sama dengan `str::` lainnya.
                 let s = if $nama == "to_string" {
-                    format!("{}", v.first().cloned().unwrap_or(Value::Nil))
+                    std::sync::Arc::new(format!("{}", v.first().cloned().unwrap_or(Value::Nil)))
                 } else {
                     match crate::interpreter::builtin::str_ops::teks(
                         v.first().unwrap_or(&Value::Nil), concat!("str::", $nama)) {
@@ -572,25 +573,42 @@ fn daftar_str(vm: &mut Vm) {
     vm.def("str::words", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
         &NativeFnKind::StrWords, v)));
 
-    // Sepuluh nama yang dulu ditulis ulang di `vm/vm.rs`, sekarang memanggil
-    // implementasi interpreter yang SAMA. Lihat catatan di tempat asalnya
-    // untuk apa yang melenceng selama ada dua salinan.
-    vm.def("str::upper", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrUpper, v)));
-    vm.def("str::lower", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrLower, v)));
-    vm.def("str::trim", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrTrim, v)));
-    vm.def("str::reverse", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrReverse, v)));
-    vm.def("str::contains", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrContains, v)));
-    vm.def("str::starts_with", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrStartsWith, v)));
-    vm.def("str::ends_with", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrEndsWith, v)));
-    vm.def("str::replace", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
-        &NativeFnKind::StrReplace, v)));
+    // Implementasi interpreter yang SAMA (dulu salinan kedua di `vm/vm.rs` melenceng). Argumen teks: inti
+    // `str_ops::inti` langsung, tanpa jembatan nilai; bentuk lain (rune, bukan teks — dengan kalimat
+    // galatnya) lewat jembatan.
+    use crate::interpreter::builtin::str_ops::inti;
+    vm.def("str::upper", |a| match a {
+        [VmValue::Str(s)] => Ok(VmValue::str(inti::upper(s))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrUpper, v)),
+    });
+    vm.def("str::lower", |a| match a {
+        [VmValue::Str(s)] => Ok(VmValue::str(inti::lower(s))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrLower, v)),
+    });
+    vm.def("str::trim", |a| match a {
+        [VmValue::Str(s)] => Ok(VmValue::str(inti::trim(s))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrTrim, v)),
+    });
+    vm.def("str::reverse", |a| match a {
+        [VmValue::Str(s)] => Ok(VmValue::str(inti::reverse(s))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrReverse, v)),
+    });
+    vm.def("str::contains", |a| match a {
+        [VmValue::Str(s), VmValue::Str(p)] => Ok(VmValue::Bool(inti::contains(s, p))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrContains, v)),
+    });
+    vm.def("str::starts_with", |a| match a {
+        [VmValue::Str(s), VmValue::Str(p)] => Ok(VmValue::Bool(inti::starts_with(s, p))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrStartsWith, v)),
+    });
+    vm.def("str::ends_with", |a| match a {
+        [VmValue::Str(s), VmValue::Str(p)] => Ok(VmValue::Bool(inti::ends_with(s, p))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrEndsWith, v)),
+    });
+    vm.def("str::replace", |a| match a {
+        [VmValue::Str(s), VmValue::Str(d), VmValue::Str(k)] => Ok(VmValue::str(inti::replace(s, d, k))),
+        _ => lewat(a, |v| Interpreter::dispatch_str_inner(&NativeFnKind::StrReplace, v)),
+    });
     vm.def("str::split", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
         &NativeFnKind::StrSplit, v)));
     vm.def("str::title", |a| lewat(a, |v| Interpreter::dispatch_str_inner(
@@ -628,16 +646,20 @@ fn daftar_str(vm: &mut Vm) {
     // Method `.fill(v)` — namanya sengaja tidak `arr::fill`, karena fungsi
     // namespace dengan nama itu berarti hal LAIN (`arr::fill(v, n)` membuat …
     vm.def("arr::__metode_starts_with", |a| {
-        let (x, y) = (arr_ke(a.first(), "arr::starts_with", 1)?,
-                      arr_ke(a.get(1), "arr::starts_with", 2)?);
-        Ok(VmValue::Bool(x.len() >= y.len()
-            && crate::vm::value::semua_vm_eq(x.iter(), y.iter())?))
+        // Cuma awalan sepanjang `y` yang disalin dari `x`, bukan seluruh isinya.
+        arr_pinjam(a.first(), "arr::starts_with", 1, |_| ())?;
+        let y = arr_ke(a.get(1), "arr::starts_with", 2)?;
+        let Some(x) = arr_pinjam(a.first(), "arr::starts_with", 1, |v| v.get(..y.len()).map(|s| s.to_vec()))? else {
+            return Ok(VmValue::Bool(false));
+        };
+        Ok(VmValue::Bool(crate::vm::value::semua_vm_eq(x.iter(), y.iter())?))
     });
     vm.def("arr::__metode_ends_with", |a| {
-        let (x, y) = (arr_ke(a.first(), "arr::ends_with", 1)?,
-                      arr_ke(a.get(1), "arr::ends_with", 2)?);
-        Ok(VmValue::Bool(x.len() >= y.len()
-            && crate::vm::value::semua_vm_eq(x[x.len() - y.len()..].iter(), y.iter())?))
+        arr_pinjam(a.first(), "arr::ends_with", 1, |_| ())?;
+        let y = arr_ke(a.get(1), "arr::ends_with", 2)?;
+        let Some(x) = arr_pinjam(a.first(), "arr::ends_with", 1,
+            |v| v.len().checked_sub(y.len()).map(|m| v[m..].to_vec()))? else { return Ok(VmValue::Bool(false)) };
+        Ok(VmValue::Bool(crate::vm::value::semua_vm_eq(x.iter(), y.iter())?))
     });
     vm.def("arr::__metode_fill", |a| {
         let v = arr_ke(a.get(0), "fill", 1)?;

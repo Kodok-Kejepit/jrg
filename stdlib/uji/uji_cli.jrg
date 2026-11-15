@@ -1,0 +1,96 @@
+package main
+import "std/cli"
+
+fn p_contoh() {
+    var p = cli::baru("alat", "Contoh alat.")
+    p = cli::flag(p, "verbose", "v", "cetak lebih banyak")
+    p = cli::flag(p, "quiet", "q", "diam")
+    p = cli::opsi(p, "output", "o", "berkas keluaran", Some("-"))
+    p = cli::opsi(p, "level", "", "tingkat", None)
+    p = cli::opsi_ulang(p, "include", "I", "folder cari")
+    p = cli::posisi(p, "masukan", "berkas masukan")
+    p = cli::sisa(p, "lain", "sisanya")
+    return p
+}
+
+fn ok(args) {
+    match cli::urai(p_contoh(), args) {
+        Ok(h) => { return h }
+        Err(e) => { panik("tak terduga: " + e) }
+    }
+}
+
+fn galat(args) {
+    match cli::urai(p_contoh(), args) {
+        Ok(h) => { panik(«harusnya Err: ${h}») }
+        Err(e) => { return e }
+    }
+}
+
+fn test_bentuk_dasar() {
+    let h = ok(["--level", "3", "a.jrg"])
+    assert_eq(h["level"], "3")
+    assert_eq(h["masukan"], "a.jrg")
+    assert_eq(h["output"], "-")
+    assert_eq(h["verbose"], false)
+    assert_eq(h["include"], [])
+    assert_eq(h["lain"], [])
+    assert_eq(h["help"], false)
+}
+
+fn test_bentuk_nilai_dan_gugus() {
+    let h = ok(["-vq", "--level=2", "-ofoo", "-I", "a", "-Ib", "-I=c", "x", "y", "z"])
+    assert_eq(h["verbose"], true)
+    assert_eq(h["quiet"], true)
+    assert_eq(h["output"], "foo")
+    assert_eq(h["include"], ["a", "b", "c"])
+    assert_eq(h["masukan"], "x")
+    assert_eq(h["lain"], ["y", "z"])
+    let g = ok(["--level", "1", "-vo", "keluar.txt", "m"])
+    assert_eq(g["output"], "keluar.txt")
+    assert_eq(g["verbose"], true)
+    assert_eq(ok(["--level=", "m"])["level"], "")
+    assert_eq(ok(["--level", "1", "--output", "-", "m"])["output"], "-")
+}
+
+fn test_dua_garis_menutup_opsi() {
+    let h = ok(["--level", "1", "--", "-rf", "--verbose"])
+    assert_eq(h["masukan"], "-rf")
+    assert_eq(h["lain"], ["--verbose"])
+    assert_eq(h["verbose"], false)
+    assert_eq(ok(["--level", "1", "-"])["masukan"], "-")
+}
+
+fn test_yang_ambigu_ditolak() {
+    assert_eq(galat(["--verb", "--level", "1", "m"]), "opsi `--verb` tidak dikenal, maksudnya `--verbose`?")
+    assert_eq(galat(["--level", "1", "--level", "2", "m"]), "`--level` ditulis dua kali")
+    assert_eq(galat(["-v", "--verbose", "--level", "1", "m"]), "`--verbose` ditulis dua kali")
+    assert_eq(galat(["--verbose=ya", "--level", "1", "m"]), "`--verbose` tidak menerima nilai")
+    assert_eq(galat(["--level"]), "`--level` butuh nilai")
+    assert_eq(galat(["--level", "-5", "m"]), "`--level` butuh nilai, yang ketemu `-5` — nilai berawalan `-` ditulis `--level=-5`")
+    assert_eq(ok(["--level=-5", "m"])["level"], "-5")
+    assert_eq(galat(["-x", "m"]), "opsi `-x` tidak dikenal (di `-x`)")
+    assert_eq(galat(["-vx"]), "opsi `-x` tidak dikenal (di `-vx`)")
+}
+
+fn test_wajib_dan_berlebih() {
+    assert_eq(galat(["m"]), "opsi `--level` wajib ditulis")
+    assert_eq(galat(["--level", "1"]), "argumen `masukan` belum ditulis")
+    var p = cli::baru("b", "")
+    p = cli::posisi(p, "satu", "")
+    match cli::urai(p, ["a", "b"]) {
+        Ok(_) => { panik("harusnya Err") }
+        Err(e) => { assert_eq(e, "argumen berlebih: `b`") }
+    }
+}
+
+fn test_bantuan() {
+    let h = ok(["-h"])
+    assert_eq(h["help"], true)
+    assert_eq(ok(["-vh"])["help"], true)
+    let t = cli::bantuan(p_contoh())
+    assert(str::starts_with(t, "pemakaian: alat [opsi] <masukan> [lain...]\n"))
+    assert(str::contains(t, "  -o, --output <output>    berkas keluaran (bawaan: -)\n"))
+    assert(str::contains(t, "  -I, --include <include>  folder cari (boleh diulang)\n"))
+    assert(str::contains(t, "  -h, --help"))
+}

@@ -55,11 +55,15 @@ pub fn join_all_goroutines() {
     }
 }
 
-pub fn spawn_goroutine(task: SpawnTask) {
+/// `Err` membawa kalimat galatnya: program tidak boleh jalan terus tanpa goroutine yang dimintanya.
+pub fn spawn_goroutine(task: SpawnTask) -> Result<(), String> {
     // Didaftarkan SEBELUM utasnya lahir: kalau sesudah, laporan bisa
     // terlanjur dicetak sebelum penghitungnya naik.
     crate::profiler::utas_baru();
-    let h = std::thread::spawn(move || {
+    let h = std::thread::Builder::new()
+        .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
+        .spawn(move || {
+        crate::interpreter::catat_puncak_stack();
         let mut vm = super::vm::Vm::new();
         // Goroutine mewarisi keadaan profiler dari proses, bukan dari VM induknya —
         // `Vm::new()` selalu lahir dengan profiling mati, jadi tanpa baris ini …
@@ -75,5 +79,10 @@ pub fn spawn_goroutine(task: SpawnTask) {
         // thread ini sebelum ia selesai.
         crate::profiler::flush();
     });
+    let h = match h {
+        Ok(h) => h,
+        Err(e) => return Err(crate::interpreter::pesan_goroutine_tak_dibuat(&e)),
+    };
     HANDLE_GOROUTINE.lock().unwrap_or_else(|p| p.into_inner()).push(h);
+    Ok(())
 }

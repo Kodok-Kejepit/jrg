@@ -30,14 +30,14 @@ impl Interpreter {
             EnvGet => {
                 let name = nama("env::get", args)?;
                 // `Option`, bukan `nil`: yang mungkin tidak ada menjawab `Option`.
-                Ok(std::env::var(name).map(|v| crate::interpreter::some_value(Value::Str(v)))
+                Ok(std::env::var(name).map(|v| crate::interpreter::some_value(Value::Str(std::sync::Arc::new(v))))
                     .unwrap_or_else(|_| crate::interpreter::none_value()))
             }
 
             EnvGetOr => {
                 if args.len() < 2 { return runtime_err!("env::get_or butuh (nama, default)"); }
                 let name = nama("env::get_or", args)?;
-                Ok(std::env::var(name).map(Value::Str).unwrap_or_else(|_| args[1].clone()))
+                Ok(std::env::var(name).map(Value::teks).unwrap_or_else(|_| args[1].clone()))
             }
 
             EnvSet => {
@@ -65,14 +65,14 @@ impl Interpreter {
                 // sama dengan Python dan Node, dan satu-satunya yang berguna
                 // buat program. Diisi `main` lewat `crate::argumen::pasang`.
                 Ok(Value::Array(crate::argumen::ambil()
-                    .into_iter().map(Value::Str).collect()))
+                    .into_iter().map(Value::teks).collect()))
             }
 
             EnvExe => {
                 // Path biner yang SEDANG berjalan. `env::args()[0]` tidak bisa
                 // dipakai untuk ini: ia nama skrip, bukan nama juru bahasanya.
                 match std::env::current_exe() {
-                    Ok(p) => Ok(Value::Str(p.display().to_string())),
+                    Ok(p) => Ok(Value::Str(std::sync::Arc::new(p.display().to_string()))),
                     Err(e) => runtime_err!("env::exe: tidak bisa dibaca: {}", e),
                 }
             }

@@ -16,8 +16,17 @@ pub mod proses;
 pub mod wasm;
 pub mod http;
 pub mod regex;
+pub mod regex_inti;
 pub mod future;
 mod kanvas;
+pub mod zip;
+pub mod xml;
+pub mod gzip;
+pub mod url;
+pub mod tar;
+pub mod semver;
+pub mod toml;
+pub mod jwt;
 
 use crate::vm::vm::Vm;
 
@@ -47,6 +56,22 @@ pub fn register_all(vm: &mut Vm) {
     crate::wokwok::daftar::register(vm);
     // `suara::` — bunyi sebagai larik `wokwok::`; tinggal di `src/suara/`.
     crate::suara::register(vm);
+    // `zip::` — arsip ZIP, celah pustaka arsip bahasa lain ditutup sejak lahir.
+    zip::register(vm);
+    // `xml::` — DTD ditolak utuh (XXE, ledakan entitas).
+    xml::register(vm);
+    // `gzip::` — bom, kepala meluber, CRC/ISIZE bohong, ekor liar ditolak.
+    gzip::register(vm);
+    // `tar::` — tar-slip, tautan, dua ukuran untuk satu entri, sparse ditolak; `.tar.gz` lewat `gzip::`.
+    tar::register(vm);
+    // `toml::` — kunci/tabel kembar, tabel diperluas, bilangan di luar 64 bit, escape asing ditolak.
+    toml::register(vm);
+    // `semver::` — awalan `v`, nol di depan, versi telanjang di rentang dan spasi sebagai "dan" ditolak.
+    semver::register(vm);
+    // `url::` — satu pengurai untuk pemakai dan klien `http::`; URL ambigu ditolak, bukan ditebak.
+    url::register(vm);
+    // `jwt::` — HS256 dipatok, `alg` dari token tidak dipercaya.
+    jwt::register(vm);
 }
 
 /// Return embedded JRG stdlib source code (tanpa file system)

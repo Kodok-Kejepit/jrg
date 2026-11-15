@@ -10,7 +10,7 @@ pub const OBJ_NAME: &str = "JsonObject";
 
 pub fn json_encode(args: &[Value]) -> Result<Value, String> {
     let v = args.get(0).unwrap_or(&Value::Nil);
-    Ok(Value::Str(encode(v)?))
+    Ok(Value::Str(std::sync::Arc::new(encode(v)?)))
 }
 
 /// Satu penyandi JSON untuk bahasa ini. Dulu ada salinan kedua di sini, dan
@@ -43,7 +43,6 @@ fn penyebab(v: &Value) -> &Value {
     anak.map(penyebab).unwrap_or(v)
 }
 
-fn escape(s: &str) -> String { crate::json_inti::sandi_teks(s) }
 
 pub fn json_decode(args: &[Value]) -> Result<Value, String> {
     let s = match args.get(0) {
@@ -66,7 +65,7 @@ pub fn decode(s: &str) -> Result<Value, String> {
             Json::Bool(b) => Value::Bool(b),
             Json::Int(n) => Value::Int(n),
             Json::Float(f) => Value::Float(f),
-            Json::Str(t) => Value::Str(t),
+            Json::Str(t) => Value::Str(std::sync::Arc::new(t)),
             Json::Arr(a) => Value::Array(a.into_iter().map(ke_nilai).collect::<Vec<_>>().into()),
             Json::Obj(o) => {
                 let mut fields = HashMap::new();
@@ -96,7 +95,7 @@ pub fn json_set(args: &[Value]) -> Result<Value, String> {
             Err(crate::interpreter::galat_index::tulis_handle(name, k)),
         (Some(Value::Struct { name, fields }), Some(Value::Str(k)), Some(v)) => {
             let mut new_fields = fields.clone();
-            new_fields.insert(k.clone(), v.clone());
+            new_fields.insert(String::clone(&k.clone()), v.clone());
             Ok(Value::Struct { name: name.clone(), fields: new_fields })
         }
         _ => Err("dok::json_set(obj, key, val)".to_string()),
@@ -108,7 +107,7 @@ pub fn json_keys(args: &[Value]) -> Result<Value, String> {
         Some(Value::Struct { fields, .. }) => {
             let mut ks: Vec<String> = fields.keys().cloned().collect();
             ks.sort();
-            Ok(Value::Array(ks.into_iter().map(Value::Str).collect()))
+            Ok(Value::Array(ks.into_iter().map(Value::teks).collect()))
         }
         _ => Err("dok::json_keys(obj)".to_string()),
     }

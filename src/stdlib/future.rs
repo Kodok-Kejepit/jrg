@@ -169,9 +169,8 @@ pub fn register(vm: &mut Vm) {
         let (c, serah) = kanal_tunggal(a.first(), "future::timeout")?;
         let ms = match a.get(1) {
             Some(Int(n)) if *n >= 0 => *n,
-            lain => return Err(format!(
-                "future::timeout: argumen 2 harus int >= 0 (milidetik), dapat `{}`",
-                lain.map(|x| x.type_name_penuh()).unwrap_or_else(|| "tidak ada".to_string()))),
+            lain => return Err(crate::interpreter::tugas::pesan_timeout_ms("future::timeout",
+                &lain.map(|x| x.type_name_penuh()).unwrap_or_else(|| "tidak ada".to_string()))),
         };
         // `None` harus berarti SATU hal: "belum siap".
         if !masih_boleh(&serah) {

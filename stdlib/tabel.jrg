@@ -21,7 +21,7 @@ pub fn dari(data, kolom) {
     for _, d in data {
         var b = []
         for _, k in kolom { b = arr::push(b, dict::get_or(d, k, "")) }
-        t = Tabel { kepala: t.kepala, baris: arr::push(t.baris, b), kanan: t.kanan }
+        t.baris = arr::push(t.baris, b)
     }
     return t
 }
@@ -46,13 +46,15 @@ fn _angka_kah(s) {
 impl Tabel {
     /// Tambah satu baris.
     pub fn baris_baru(self, b) {
-        return Tabel { kepala: self.kepala, baris: arr::push(self.baris, b), kanan: self.kanan }
+        // Di jalurnya, bukan struct baru dari `arr::push(self.baris, b)` — itu menyalin seluruh baris (kuadrat).
+        self.baris = arr::push(self.baris, b)
+        return self
     }
 
     /// Paksa kolom ke-`i` rata kanan (angka sudah otomatis).
     pub fn rata_kanan(self, i) {
-        return Tabel { kepala: self.kepala, baris: self.baris,
-                       kanan: dict::set(self.kanan, i, true) }
+        self.kanan = dict::set(self.kanan, i, true)
+        return self
     }
 
     /// Berapa barisnya (tanpa kepala).

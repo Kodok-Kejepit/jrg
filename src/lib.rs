@@ -7,6 +7,8 @@ pub mod sinkron;
 pub mod ruang_tipe;
 pub mod hash_cepat;
 pub mod json_inti;
+pub mod kutip_inti;
+pub mod kompres;
 pub mod diag;
 pub mod host;
 pub mod pipa;
@@ -22,6 +24,7 @@ pub mod profiler;
 pub mod module;
 pub mod editor_src;
 pub mod vm;
+pub mod jit;
 
 /// Backend ketiga: lowering AST ke LLVM IR, lalu native lewat `clang`.
 pub mod llvm;
@@ -37,6 +40,8 @@ pub mod baris;
 pub mod repl;
 pub mod hotreload;
 pub mod lsp;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod jrgm;
 pub mod stdlib;
 pub mod wokwok;
 pub mod suara;

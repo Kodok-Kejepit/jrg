@@ -1,0 +1,38 @@
+package main
+import "std/uuid"
+
+fn test_v4() {
+    var lihat = dict::new()
+    for _, _i in range(200) {
+        let u = uuid::v4()
+        assert_eq(len(u), 36)
+        assert_eq(uuid::versi(u).unwrap(), 4)
+        assert(str::contains("89ab", u[19:20]))
+        assert_eq(uuid::parse(u).unwrap(), u)
+        assert(!dict::has(lihat, u))
+        lihat[u] = true
+    }
+}
+
+fn test_v7_terurut() {
+    let a = uuid::v7_dari_ms(1700000000000)
+    assert_eq(a[0:13], "018bcfe5-6800")
+    assert_eq(uuid::versi(a).unwrap(), 7)
+    assert(str::contains("89ab", a[19:20]))
+    let b = uuid::v7_dari_ms(1700000000001)
+    assert(a < b)
+    assert_eq(uuid::v7_dari_ms(0)[0:13], "00000000-0000")
+    assert_eq(uuid::v7_dari_ms(281474976710655)[0:13], "ffffffff-ffff")
+    assert_eq(uuid::versi(uuid::v7()).unwrap(), 7)
+}
+
+fn test_parse_ketat() {
+    assert_eq(uuid::parse("550E8400-E29B-41D4-A716-446655440000").unwrap(), "550e8400-e29b-41d4-a716-446655440000")
+    assert_eq(uuid::parse("{550e8400-e29b-41d4-a716-446655440000}").unwrap_err(), "UUID `{550e8400-e29b-41d4-a716-446655440000}` harus 36 karakter berbentuk xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+    assert(uuid::parse("urn:uuid:550e8400-e29b-41d4-a716-446655440000").is_err())
+    assert(uuid::parse("550e8400e29b41d4a716446655440000").is_err())
+    assert_eq(uuid::parse("550e8400+e29b-41d4-a716-446655440000").unwrap_err(), "UUID: harusnya `-` di posisi 8")
+    assert_eq(uuid::parse("550e8400-e29b-41d4-a716-44665544000g").unwrap_err(), "UUID: karakter di posisi 35 bukan digit heksadesimal")
+    assert_eq(uuid::parse(str::repeat("a", 5000)).unwrap_err(), "UUID (5000 karakter) harus 36 karakter berbentuk xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+    assert_eq(uuid::versi(uuid::NIL).unwrap(), 0)
+}

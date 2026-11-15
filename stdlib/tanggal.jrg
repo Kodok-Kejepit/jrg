@@ -1,0 +1,294 @@
+package std_tanggal
+
+// Tanggal dan waktu kalender Gregorius, tahun 1 sampai 9999, dengan zona sebagai offset TETAP (menit dari UTC).
+// Tidak ada basis data zona waktu: "Asia/Jakarta" tidak dikenal, `+07:00` dikenal. Waktu tanpa zona ditolak
+// pengurainya, karena "jam 10" tanpa zona adalah dua saat yang berbeda bagi dua mesin.
+
+pub struct Waktu {
+    pub tahun: int,
+    pub bulan: int,
+    pub hari: int,
+    pub jam: int = 0,
+    pub menit: int = 0,
+    pub detik: int = 0,
+    pub nano: int = 0,
+    pub offset: int = 0,
+}
+
+pub const NAMA_HARI = ["Senin", "Selasa", "Rabu", "Kamis", "Jumat", "Sabtu", "Minggu"]
+pub const NAMA_BULAN = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus",
+    "September", "Oktober", "November", "Desember"]
+
+fn _bagi(a, b) {
+    let q = a / b
+    return (a % b != 0 && (a < 0) != (b < 0)) $ q - 1 : q
+}
+
+fn _sisa(a, b) { return a - _bagi(a, b) * b }
+
+/// Tahun kabisat Gregorius.
+pub fn kabisat(t) { return (t % 4 == 0 && t % 100 != 0) || t % 400 == 0 }
+
+/// Jumlah hari di bulan itu.
+pub fn jumlah_hari(t, b) {
+    if b == 2 { return kabisat(t) $ 29 : 28 }
+    if b == 4 || b == 6 || b == 9 || b == 11 { return 30 }
+    return 31
+}
+
+fn _hari_dari_sipil(t0, b, h) {
+    let t = b <= 2 $ t0 - 1 : t0
+    let era = t / 400
+    let yoe = t - era * 400
+    let doy = (153 * (b > 2 $ b - 3 : b + 9) + 2) / 5 + h - 1
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy
+    return era * 146097 + doe - 719468
+}
+
+fn _sipil_dari_hari(z0) {
+    let z = z0 + 719468
+    let era = _bagi(z, 146097)
+    let doe = z - era * 146097
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100)
+    let mp = (5 * doy + 2) / 153
+    let h = doy - (153 * mp + 2) / 5 + 1
+    let b = mp < 10 $ mp + 3 : mp - 9
+    let t = yoe + era * 400 + (b <= 2 $ 1 : 0)
+    return (t, b, h)
+}
+
+fn _periksa(w) {
+    if w.tahun < 1 || w.tahun > 9999 { return Err(«tahun ${w.tahun} di luar 1 sampai 9999») }
+    if w.bulan < 1 || w.bulan > 12 { return Err(«bulan ${w.bulan} tidak ada (1 sampai 12)») }
+    let n = jumlah_hari(w.tahun, w.bulan)
+    if w.hari < 1 || w.hari > n {
+        return Err(«tanggal ${w.hari} ${NAMA_BULAN[w.bulan - 1]} ${w.tahun} tidak ada (bulan itu ${n} hari)»)
+    }
+    if w.jam < 0 || w.jam > 23 { return Err(«jam ${w.jam} di luar 0 sampai 23») }
+    if w.menit < 0 || w.menit > 59 { return Err(«menit ${w.menit} di luar 0 sampai 59») }
+    if w.detik < 0 || w.detik > 59 { return Err(«detik ${w.detik} di luar 0 sampai 59 (detik kabisat tidak didukung)») }
+    if w.nano < 0 || w.nano > 999999999 { return Err(«nanodetik ${w.nano} di luar 0 sampai 999999999») }
+    if w.offset < -1439 || w.offset > 1439 { return Err(«offset ${w.offset} menit di luar ±23:59») }
+    return Ok(w)
+}
+
+/// Tanggal pukul 00:00 UTC; `Err` kalau tanggalnya tidak ada.
+pub fn dari(t, b, h) { return _periksa(Waktu { tahun: t, bulan: b, hari: h }) }
+
+/// Tanggal dan jam dengan offset (menit dari UTC, `7 * 60` untuk WIB).
+pub fn waktu(t, b, h, jam, menit, detik, offset) {
+    return _periksa(Waktu { tahun: t, bulan: b, hari: h, jam: jam, menit: menit, detik: detik, offset: offset })
+}
+
+/// Detik sejak 1970-01-01T00:00:00Z (nanodetiknya tidak ikut).
+pub fn ke_unix(w) {
+    let hari = _hari_dari_sipil(w.tahun, w.bulan, w.hari)
+    return hari * 86400 + w.jam * 3600 + w.menit * 60 + w.detik - w.offset * 60
+}
+
+fn _dari_unix_nano(s, nano, offset) {
+    if offset < -1439 || offset > 1439 { return Err(«offset ${offset} menit di luar ±23:59») }
+    let lokal = s + offset * 60
+    let hari = _bagi(lokal, 86400)
+    let dlm = lokal - hari * 86400
+    let (t, b, h) = _sipil_dari_hari(hari)
+    if t < 1 || t > 9999 { return Err(«cap waktu ${s} di luar tahun 1 sampai 9999») }
+    return Ok(Waktu { tahun: t, bulan: b, hari: h, jam: dlm / 3600, menit: dlm % 3600 / 60, detik: dlm % 60,
+        nano: nano, offset: offset })
+}
+
+/// Dari detik unix, ditampilkan di offset itu.
+pub fn dari_unix(s, offset) { return _dari_unix_nano(s, 0, offset) }
+
+/// Dari milidetik unix (bentuk `time::now_ms()`).
+pub fn dari_unix_ms(ms, offset) { return _dari_unix_nano(_bagi(ms, 1000), _sisa(ms, 1000) * 1000000, offset) }
+
+/// Saat ini di offset itu (`0` untuk UTC).
+pub fn sekarang(offset) { return dari_unix_ms(time::now_ms(), offset) }
+
+/// Saat yang SAMA ditampilkan di offset lain.
+pub fn ke_offset(w, offset) { return _dari_unix_nano(ke_unix(w), w.nano, offset) }
+
+/// -1, 0 atau 1 menurut SAATNYA (offset berbeda tetap terbanding benar).
+pub fn banding(a, b) {
+    let x = ke_unix(a)
+    let y = ke_unix(b)
+    if x != y { return x < y $ -1 : 1 }
+    if a.nano != b.nano { return a.nano < b.nano $ -1 : 1 }
+    return 0
+}
+
+/// Selisih `b - a` dalam detik utuh.
+pub fn selisih_detik(a, b) { return ke_unix(b) - ke_unix(a) }
+
+/// Maju (atau mundur kalau negatif) sekian detik.
+pub fn tambah_detik(w, n) { return _dari_unix_nano(ke_unix(w) + n, w.nano, w.offset) }
+
+/// Maju sekian hari kalender; jamnya tetap.
+pub fn tambah_hari(w, n) { return tambah_detik(w, n * 86400) }
+
+fn _geser_bulan(w, n) {
+    let total = w.tahun * 12 + (w.bulan - 1) + n
+    var q = w
+    q.tahun = _bagi(total, 12)
+    q.bulan = _sisa(total, 12) + 1
+    return q
+}
+
+/// Maju sekian bulan; `Err` kalau tanggalnya tidak ada di bulan tujuan (31 Januari + 1).
+pub fn tambah_bulan(w, n) {
+    let q = _geser_bulan(w, n)
+    match _periksa(q) {
+        Ok(v) => { return Ok(v) }
+        Err(e) => {
+            if q.tahun >= 1 && q.tahun <= 9999 && q.hari > jumlah_hari(q.tahun, q.bulan) {
+                return Err(e + " — `tanggal::tambah_bulan_jepit` memakai hari terakhir bulan itu")
+            }
+            return Err(e)
+        }
+    }
+}
+
+/// Seperti `tambah_bulan`, tapi tanggal yang lewat diganti hari terakhir bulan tujuan.
+pub fn tambah_bulan_jepit(w, n) {
+    var q = _geser_bulan(w, n)
+    if q.tahun >= 1 && q.tahun <= 9999 {
+        let m = jumlah_hari(q.tahun, q.bulan)
+        if q.hari > m { q.hari = m }
+    }
+    return _periksa(q)
+}
+
+/// Hari dalam pekan, ISO 8601: 1 Senin sampai 7 Minggu.
+pub fn hari_pekan(w) {
+    let h = _hari_dari_sipil(w.tahun, w.bulan, w.hari)
+    return _sisa(h + 3, 7) + 1
+}
+
+/// Nama hari (`"Senin"`).
+pub fn nama_hari(w) { return NAMA_HARI[hari_pekan(w) - 1] }
+
+/// Hari ke berapa di tahunnya (1 sampai 366).
+pub fn hari_ke(w) { return _hari_dari_sipil(w.tahun, w.bulan, w.hari) - _hari_dari_sipil(w.tahun, 1, 1) + 1 }
+
+// Masukan di pesan galat: tidak tumbuh mengikuti panjangnya.
+fn _kutip(s) {
+    for _, r in str::chars(s) {
+        let k = r as int
+        if k < 32 || k == 127 || (k >= 0x200B && k <= 0x200F) || (k >= 0x202A && k <= 0x202E) || (k >= 0x2066 && k <= 0x2069) {
+            return «(${len(s)} karakter, memuat karakter kendali)»
+        }
+    }
+    return len(s) <= 40 $ «`${s}`» : «(${len(s)} karakter)»
+}
+
+fn _dua(n) { return str::pad_left(str(n), 2, "0") }
+
+fn _offset_teks(m) {
+    if m == 0 { return "Z" }
+    let tanda = m < 0 $ "-" : "+"
+    let a = math::abs(m)
+    return tanda + _dua(a / 60) + ":" + _dua(a % 60)
+}
+
+/// RFC 3339: `2026-11-02T13:05:09+07:00`, pecahan detik kalau ada (tanpa nol di belakang).
+pub fn format_iso(w) {
+    var s = format_tanggal(w) + "T" + _dua(w.jam) + ":" + _dua(w.menit) + ":" + _dua(w.detik)
+    if w.nano > 0 {
+        var f = str::pad_left(str(w.nano), 9, "0")
+        while str::ends_with(f, "0") { f = f[0:len(f) - 1] }
+        s = s + "." + f
+    }
+    return s + _offset_teks(w.offset)
+}
+
+/// `2026-11-02`.
+pub fn format_tanggal(w) { return str::pad_left(str(w.tahun), 4, "0") + "-" + _dua(w.bulan) + "-" + _dua(w.hari) }
+
+/// `Senin, 2 November 2026`.
+pub fn format_panjang(w) { return «${nama_hari(w)}, ${w.hari} ${NAMA_BULAN[w.bulan - 1]} ${w.tahun}» }
+
+fn _angka(s, a, n, apa) {
+    if a + n > len(s) { return Err(«${apa} terpotong») }
+    var v = 0
+    for _, r in str::chars(s[a:a + n]) {
+        let c = str(r)
+        if !(c >= "0" && c <= "9") { return Err(«${apa} harus angka ASCII, ketemu ${_kutip(c)}») }
+        v = v * 10 + str::to_int(c)
+    }
+    return Ok(v)
+}
+
+fn _tanda(s, i, c) {
+    if i >= len(s) || s[i:i + 1] != c { return Err(«harusnya `${c}` di posisi ${i}») }
+    return Ok(())
+}
+
+fn _urai_tanggal(s) {
+    let t = _angka(s, 0, 4, "tahun")?
+    _tanda(s, 4, "-")?
+    let b = _angka(s, 5, 2, "bulan")?
+    _tanda(s, 7, "-")?
+    let h = _angka(s, 8, 2, "tanggal")?
+    return Ok((t, b, h))
+}
+
+/// `YYYY-MM-DD` persis.
+pub fn parse_tanggal(s) {
+    if len(s) != 10 { return Err(«tanggal ${_kutip(s)} harus berbentuk YYYY-MM-DD») }
+    let (t, b, h) = _urai_tanggal(s).map_err(|e| «tanggal ${_kutip(s)}: ${e}»)?
+    return dari(t, b, h).map_err(|e| «tanggal ${_kutip(s)}: ${e}»)
+}
+
+fn _urai_iso(s) {
+    let (t, b, h) = _urai_tanggal(s)?
+    _tanda(s, 10, "T")?
+    let jam = _angka(s, 11, 2, "jam")?
+    _tanda(s, 13, ":")?
+    let menit = _angka(s, 14, 2, "menit")?
+    _tanda(s, 16, ":")?
+    let detik = _angka(s, 17, 2, "detik")?
+    var i = 19
+    var nano = 0
+    if i < len(s) && s[i:i + 1] == "." {
+        i += 1
+        var n = 0
+        while i < len(s) && s[i:i + 1] >= "0" && s[i:i + 1] <= "9" {
+            if n == 9 { return Err("pecahan detik lebih dari 9 digit") }
+            nano = nano * 10 + str::to_int(s[i:i + 1])
+            n += 1
+            i += 1
+        }
+        if n == 0 { return Err("titik pecahan tanpa digit") }
+        while n < 9 {
+            nano = nano * 10
+            n += 1
+        }
+    }
+    if i >= len(s) { return Err("zona tidak ditulis — tambahkan `Z` (UTC) atau `+07:00`") }
+    var offset = 0
+    let z = s[i:i + 1]
+    if z == "Z" {
+        i += 1
+    } else if z == "+" || z == "-" {
+        let oj = _angka(s, i + 1, 2, "jam zona")?
+        _tanda(s, i + 3, ":")?
+        let om = _angka(s, i + 4, 2, "menit zona")?
+        if oj > 23 || om > 59 { return Err(«zona ${_kutip(s[i:i + 6])} di luar ±23:59») }
+        if z == "-" && oj == 0 && om == 0 { return Err("zona `-00:00` (offset tak diketahui) tidak didukung — tulis `Z`") }
+        offset = (oj * 60 + om) * (z == "-" $ -1 : 1)
+        i += 6
+    } else {
+        return Err(«zona harus `Z`, `+HH:MM` atau `-HH:MM`, ketemu ${_kutip(z)}»)
+    }
+    if i != len(s) { return Err(«ada teks berlebih mulai posisi ${i}») }
+    let w = Waktu { tahun: t, bulan: b, hari: h, jam: jam, menit: menit, detik: detik, nano: nano, offset: offset }
+    return _periksa(w)
+}
+
+/// RFC 3339 ketat: `YYYY-MM-DDTHH:MM:SS[.pecahan](Z|±HH:MM)`; `T` dan `Z` huruf besar, zona wajib.
+pub fn parse_iso(s) {
+    if len(s) > 40 { return Err(«waktu ${_kutip(s)} terlalu panjang untuk RFC 3339») }
+    return _urai_iso(s).map_err(|e| «waktu ${_kutip(s)}: ${e}»)
+}

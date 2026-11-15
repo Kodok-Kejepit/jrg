@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 
 use super::dependensi::tambah_path_dependensi;
 use super::manifes::Manifest;
-use jrgc::llvm::apk::{self, Aplikasi, OpsiApk};
+use crate::llvm::apk::{self, Aplikasi, OpsiApk};
 
 const KUNCI_ANDROID: &[&str] = &["nama", "paket", "versi", "kode", "orientasi", "ikon", "abi", "pustaka", "kunci", "alias",
                                   "izin", "tampilan", "port", "mesin", "bahasa", "[android.pustaka_c]", "[android.pustaka_rust]",
@@ -136,7 +136,7 @@ fn bangun_web(akar: &Path, m: &Manifest, opsi: &OpsiApk, tujuan: &Path, verbose:
     app.entri = Some(entri);
     kumpul_proyek(akar, "", &m.android.abaikan, &mut app.berkas_proyek);
     let mut dep = Vec::new();
-    tambah_path_dependensi(akar, &mut dep);
+    tambah_path_dependensi(akar, &mut dep)?;
     for (i, d) in dep.iter().enumerate() {
         let nama = format!("_dep/{}", i);
         kumpul_proyek(d, &nama, &[], &mut app.berkas_proyek);
@@ -155,25 +155,26 @@ pub(crate) fn bangun_apk(akar: &Path, m: &Manifest, opsi: &OpsiApk, tujuan: &Pat
     if let Some(r) = super::bahasa::resep_proyek(m)? { return super::konsol::bangun(akar, m, r, opsi, tujuan, verbose); }
     if opsi.aplikasi.entri.is_some() { return bangun_web(akar, m, opsi, tujuan, verbose); }
     let src = std::fs::read_to_string(&m.entry)
-        .map_err(|e| format!("tidak bisa baca `{}`: {}", m.entry.display(), jrgc::host::galat_io(&e)))?;
-    let sf = jrgc::lexer::SourceFile { id: 0, name: m.entry.display().to_string(), src };
-    let mut peta = jrgc::diag::SourceMap::with_file(sf.clone());
-    let token = jrgc::pipa::lex_dilaporkan(&sf, &peta).ok_or_else(String::new)?;
-    let (ast, galat) = jrgc::parser::parse(token, false);
+        .map_err(|e| format!("tidak bisa baca `{}`: {}", m.entry.display(), crate::host::galat_io(&e)))?;
+    let sf = crate::lexer::SourceFile { id: 0, name: m.entry.display().to_string(), src };
+    let mut peta = crate::diag::SourceMap::with_file(sf.clone());
+    let token = crate::pipa::lex_dilaporkan(&sf, &peta).ok_or_else(String::new)?;
+    let (ast, galat) = crate::parser::parse(token, false);
     if !galat.is_empty() {
-        jrgc::pipa::laporkan_galat_parse(&galat, false, &peta);
+        crate::pipa::laporkan_galat_parse(&galat, false, &peta);
         return Err(String::new());
     }
     let mut jalur = vec![m.entry.parent().map(Path::to_path_buf).unwrap_or_else(|| akar.to_path_buf()), akar.to_path_buf()];
-    tambah_path_dependensi(akar, &mut jalur);
+    tambah_path_dependensi(akar, &mut jalur)?;
     jalur.dedup();
-    let ir = jrgc::llvm::generate_ir_dgn_jalur(&ast,
-        jrgc::llvm::codegen::CodegenOptions { fast_math: false, full_buffered_stdout: false }, &jalur)
+    let ir = crate::llvm::generate_ir_dgn_jalur(&ast,
+        crate::llvm::codegen::CodegenOptions { fast_math: false, full_buffered_stdout: false }, &jalur)
         .map_err(|errs| {
-            let g: Vec<_> = errs.iter().map(|e| jrgc::llvm::galat::GalatLlvm::dari_pesan(e)).collect();
-            jrgc::diag::laporkan_llvm(&mut peta, &g);
+            let g: Vec<_> = errs.iter().map(|e| crate::llvm::galat::GalatLlvm::dari_pesan(e)).collect();
+            crate::diag::laporkan_llvm(&mut peta, &g);
             String::new()
         })?;
+    let ir = crate::llvm::isi_situs(ir, &mut peta);
     if let Some(d) = tujuan.parent() { let _ = std::fs::create_dir_all(d); }
     // Nama berkas sumber cuma dipakai untuk nama bawaan; identitasnya sudah ada di `opsi`.
     apk::bangun(Some(&ir), Path::new(&m.name), tujuan, opsi, verbose)
@@ -184,7 +185,7 @@ pub(crate) fn tujuan_bawaan(akar: &Path, m: &Manifest) -> PathBuf {
 }
 
 pub(crate) fn cmd_apk(abi: Option<&str>, keluaran: Option<&Path>, rilis: bool, aab: bool, verbose: bool) -> Result<(), String> {
-    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let m = Manifest::load(&akar)?;
     let mut opsi = opsi_dari_manifes(&m, abi)?;
     opsi.rilis = rilis;
@@ -212,7 +213,7 @@ pub(crate) fn cmd_apk(abi: Option<&str>, keluaran: Option<&Path>, rilis: bool, a
 /// Buat kunci rilis sekali: keytool menanyakan nama dan sandinya langsung di terminal.
 /// Kunci yang sudah ada TIDAK ditimpa — kehilangan kunci berarti aplikasinya tidak bisa diperbarui lagi.
 pub(crate) fn cmd_kunci() -> Result<(), String> {
-    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let m = Manifest::load(&akar)?;
     let kunci = m.android.kunci.clone().unwrap_or_else(|| akar.join("rilis.jks"));
     let alias = m.android.alias.clone().unwrap_or_else(|| "rilis".to_string());
@@ -222,7 +223,7 @@ pub(crate) fn cmd_kunci() -> Result<(), String> {
     }
     let st = Command::new("keytool").arg("-genkeypair").arg("-keystore").arg(&kunci)
         .args(["-alias", &alias, "-keyalg", "RSA", "-keysize", "4096", "-validity", "10000"])
-        .status().map_err(|e| format!("gagal menjalankan keytool (butuh Java): {}", jrgc::host::galat_io(&e)))?;
+        .status().map_err(|e| format!("gagal menjalankan keytool (butuh Java): {}", crate::host::galat_io(&e)))?;
     if !st.success() { return Err("keytool tidak membuat kuncinya".into()); }
     if m.android.kunci.is_none() { tulis_kunci_ke_manifes(&akar, &alias)?; }
     eprintln!("[jrgm] kunci rilis: {} (alias `{}`)\n  \
@@ -234,7 +235,7 @@ pub(crate) fn cmd_kunci() -> Result<(), String> {
 /// Tambah `kunci`/`alias` ke bagian `[android]` (dibuat kalau belum ada); baris lain tidak disentuh.
 fn tulis_kunci_ke_manifes(akar: &Path, alias: &str) -> Result<(), String> {
     let p = akar.join("jrgm.toml");
-    let isi = std::fs::read_to_string(&p).map_err(|e| format!("tidak bisa baca jrgm.toml: {}", jrgc::host::galat_io(&e)))?;
+    let isi = std::fs::read_to_string(&p).map_err(|e| format!("tidak bisa baca jrgm.toml: {}", crate::host::galat_io(&e)))?;
     let baris = format!("kunci     = \"rilis.jks\"\nalias     = \"{}\"", alias);
     let baru = match isi.lines().position(|l| l.trim() == "[android]") {
         Some(i) => {
@@ -244,11 +245,11 @@ fn tulis_kunci_ke_manifes(akar: &Path, alias: &str) -> Result<(), String> {
         }
         None => format!("{}\n[android]\n{}\n", isi.trim_end(), baris),
     };
-    std::fs::write(&p, baru).map_err(|e| format!("tidak bisa tulis jrgm.toml: {}", jrgc::host::galat_io(&e)))
+    std::fs::write(&p, baru).map_err(|e| format!("tidak bisa tulis jrgm.toml: {}", crate::host::galat_io(&e)))
 }
 
 fn adb_keluaran(adb: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(adb).args(args).output().map_err(|e| format!("gagal menjalankan adb: {}", jrgc::host::galat_io(&e)))?;
+    let out = Command::new(adb).args(args).output().map_err(|e| format!("gagal menjalankan adb: {}", crate::host::galat_io(&e)))?;
     if !out.status.success() {
         return Err(format!("`adb {}` gagal:\n{}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim()));
     }
@@ -284,7 +285,7 @@ fn pilih_perangkat(adb: &Path) -> Result<(), String> {
 
 /// Bangun untuk ABI perangkat, pasang, buka, lalu tampilkan keluaran programnya sampai ia ditutup.
 pub(crate) fn cmd_run_android(verbose: bool) -> Result<(), String> {
-    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let m = Manifest::load(&akar)?;
     let adb = apk::cari_adb()?;
     pilih_perangkat(&adb)?;
@@ -304,7 +305,7 @@ pub(crate) fn cmd_run_android(verbose: bool) -> Result<(), String> {
     eprintln!("[jrgm] jalan di perangkat; keluarannya di bawah (tutup aplikasinya atau Ctrl-C untuk berhenti)");
     let mut log = Command::new(&adb).args(["logcat", "-v", "raw", "-s", "jrg:I"])
         .stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
-        .map_err(|e| format!("gagal membaca logcat: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("gagal membaca logcat: {}", crate::host::galat_io(&e)))?;
     let keluar = log.stdout.take();
     let utas = std::thread::spawn(move || {
         if let Some(k) = keluar {

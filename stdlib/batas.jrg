@@ -1,0 +1,67 @@
+package std_batas
+
+// Pembatas laju token bucket per kunci (IP, nama pengguna): penangkal tebak sandi dan banjir permintaan (CWE-307,
+// CWE-770). Waktu diberikan pemanggil dalam milidetik (`time::now_ms()`), jadi bisa diuji tanpa jam sungguhan.
+// Jumlah kunci yang diingat berbatas — kunci palsu tanpa ujung tidak bisa menghabiskan memori.
+
+pub struct Pembatas {
+    pub kapasitas: int,
+    pub isi_per_detik: float,
+    pub maks_kunci: int,
+    pub ember: dict = dict::new(),
+}
+
+/// `kapasitas` permintaan sekaligus, terisi lagi `per_detik` per detik; paling banyak `maks_kunci` kunci diingat.
+pub fn baru(kapasitas, per_detik, maks_kunci) {
+    if typeof(kapasitas) != "int" || kapasitas < 1 { panik(«batas::baru: kapasitas harus bilangan bulat 1 ke atas, dapat ${kapasitas}») }
+    let t = typeof(per_detik)
+    if (t != "int" && t != "float") || !(per_detik > 0) { panik(«batas::baru: laju isi ulang harus bilangan di atas 0, dapat ${per_detik}») }
+    if typeof(maks_kunci) != "int" || maks_kunci < 1 { panik(«batas::baru: maks_kunci harus bilangan bulat 1 ke atas, dapat ${maks_kunci}») }
+    return Pembatas { kapasitas: kapasitas, isi_per_detik: per_detik as float, maks_kunci: maks_kunci }
+}
+
+fn _isi(p, e, kini) {
+    let lewat = math::max(0, kini - e[1]) as float / 1000.0
+    return [math::min(p.kapasitas as float, e[0] + lewat * p.isi_per_detik), kini]
+}
+
+// Saat penuh: buang kunci yang embernya sudah terisi penuh lagi (sama dengan kunci baru), lalu pangkas yang paling
+// lama dipakai sampai 90% — sekaligus banyak, jadi banjir kunci baru membayar pemindaian ini sekali tiap ±10% kunci.
+fn _rapikan(p, kini) {
+    var hidup = []
+    for k, e in p.ember {
+        if _isi(p, e, kini)[0] < p.kapasitas as float { hidup = arr::push(hidup, [e[1], k]) }
+    }
+    let simpan = p.maks_kunci * 9 / 10
+    if len(hidup) > simpan { hidup = arr::sort(hidup)[len(hidup) - simpan:] }
+    var sisa = dict::new()
+    for _, h in hidup { sisa[h[1]] = p.ember[h[1]] }
+    p.ember = sisa
+    return p
+}
+
+/// `(pembatas, true)` kalau permintaan untuk `kunci` boleh lewat sekarang (`kini` milidetik), `(pembatas, false)` kalau
+/// harus ditolak. Bentuknya `p, boleh = batas::coba(p, kunci, time::now_ms())`.
+pub fn coba(p, kunci, kini) {
+    if typeof(kunci) != "string" { panik(«batas::coba: kunci harus teks, dapat `${typeof(kunci)}`») }
+    if typeof(kini) != "int" { panik(«batas::coba: waktu harus milidetik bulat (`time::now_ms()`), dapat `${typeof(kini)}`») }
+    if !dict::has(p.ember, kunci) && dict::len(p.ember) >= p.maks_kunci { p = _rapikan(p, kini) }
+    var e = dict::has(p.ember, kunci) $ _isi(p, p.ember[kunci], kini) : [p.kapasitas as float, kini]
+    if e[0] >= 1.0 {
+        p.ember[kunci] = [e[0] - 1.0, kini]
+        return (p, true)
+    }
+    p.ember[kunci] = e
+    return (p, false)
+}
+
+/// Milidetik sampai `kunci` boleh lewat lagi (0 kalau sekarang sudah boleh) — untuk kepala `Retry-After`.
+pub fn tunggu_ms(p, kunci, kini) {
+    if !dict::has(p.ember, kunci) { return 0 }
+    let e = _isi(p, p.ember[kunci], kini)
+    if e[0] >= 1.0 { return 0 }
+    return math::ceil((1.0 - e[0]) / p.isi_per_detik * 1000.0) as int
+}
+
+/// Jumlah kunci yang sedang diingat.
+pub fn jumlah_kunci(p) { return dict::len(p.ember) }

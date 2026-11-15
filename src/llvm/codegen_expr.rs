@@ -55,6 +55,21 @@ pub(crate) fn eksponen_negatif_tertulis(e: &Expr) -> Option<f64> {
     }
 }
 
+/// Ubah literal pola menjadi ekspresi (`-5` di pola disimpan parser sebagai `Int((-5) as u128)`).
+fn expr_dari_lit_pola(lit: &LitKind, span: Span) -> Expr {
+    match lit {
+        LitKind::Int(n) if (*n as i128) < 0 => {
+            let pos = (*n as i128).wrapping_neg() as u128;
+            Expr::Unary {
+                op: UnaryOp::Neg,
+                expr: Box::new(Expr::Literal(LitKind::Int(pos), span)),
+                span,
+            }
+        }
+        _ => Expr::Literal(lit.clone(), span),
+    }
+}
+
 impl Codegen {
     /// Pembungkus: jalankan lowering-nya, lalu kalau gagal TANPA lokasi, tandai
     /// dengan span ekspresi ini.
@@ -109,19 +124,24 @@ impl Codegen {
 
     pub fn codegen_block_expr(&mut self, block: &Block, expected: Option<&JrgType>) -> Result<Val, String> {
         self.push_scope();
-        for stmt in &block.stmts {
-            self.codegen_stmt(stmt)?;
-            if self.is_terminated() { break; }
-        }
-        let result = if self.is_terminated() {
-            Val { text: "undef".into(), ty: expected.cloned().unwrap_or(JrgType::Unit) }
-        } else if let Some(tail) = &block.tail {
-            self.codegen_expr(tail, expected)?
-        } else {
-            Val::unit()
-        };
+        // Fungsi bernama di blok diangkat seperti di badan fungsi (`codegen_stmt_block`).
+        self.hoist_fn_bersarang(block);
+        let r = (|cg: &mut Self| {
+            for stmt in &block.stmts {
+                cg.codegen_stmt(stmt)?;
+                if cg.is_terminated() { break; }
+            }
+            Ok(if cg.is_terminated() {
+                Val { text: "undef".into(), ty: expected.cloned().unwrap_or(JrgType::Unit) }
+            } else if let Some(tail) = &block.tail {
+                cg.codegen_expr(tail, expected)?
+            } else {
+                Val::unit()
+            })
+        })(self);
+        self.fn_bersarang.pop();
         self.pop_scope();
-        Ok(result)
+        r
     }
 
     // ── literals / idents ───────────────────────────────────────────────
@@ -198,7 +218,8 @@ impl Codegen {
         }
         if let Some(r) = self.nilai_konstruktor(name, expected, span) { return r; }
         if let Some(p) = self.penjelasan_bukan_nilai(name) { return Err(p); }
-        // Bawaan bahasa yang disebut tanpa dipanggil: namanya ADA, yang belum ada nilainya di sini.
+        // Bawaan bahasa yang disebut tanpa dipanggil: closure `<native fn>` kalau aritasnya tetap.
+        if let Some(r) = self.nilai_bawaan(name, expected, span) { return r; }
         if crate::vm::ada_builtin(name) {
             return Err(format!(
                 "`{0}` dipakai sebagai NILAI (tanpa dipanggil), dan backend `--emit-llvm` belum mendukung \
@@ -271,81 +292,131 @@ impl Codegen {
         }
     }
 
+    /// Petunjuk tipe untuk sisi KEDUA, dari tipe nyata sisi pertama.
+    fn petunjuk_biner(ty: &JrgType) -> Option<JrgType> {
+        // `nil` dan `()` tidak pernah memaksa tipe sisi lain (`kosong() == 6`).
+        if matches!(ty, JrgType::Nil | JrgType::Unit) {
+            return None;
+        }
+        // String dan pegangan (`Atomic`, `Mutex`, channel) tidak memaksa tipe sisi lain.
+        if *ty == JrgType::Str || matches!(ty, JrgType::Sinkron(_) | JrgType::Chan(_)) {
+            None
+        } else {
+            Some(ty.clone())
+        }
+    }
+
+    fn koersi_dengan_lawan(&mut self, op: &BinaryOp, e: &Expr, v: Val, lawan: &JrgType, punya_hint: bool) -> Val {
+        let skalar = |t: &JrgType| !matches!(t, JrgType::Array(_, _) | JrgType::Slice(_)
+                                           | JrgType::Tuple(_) | JrgType::Struct(_));
+        // Literal pecahan tidak dipotong ke int; literal angka di `==` tidak ikut rune/bool.
+        let boleh_ikut = |dari: &JrgType, ke: &JrgType| !(dari.is_float() && ke.is_int());
+        let angka_ke_non = matches!(op, BinaryOp::Eq | BinaryOp::Ne)
+            && tipe_bawaan_ekspresi(e).is_some()
+            && matches!(lawan, JrgType::Bool | JrgType::Rune);
+        if is_malleable_literal(e) && punya_hint && !angka_ke_non
+            && skalar(&v.ty) && skalar(lawan) && boleh_ikut(&v.ty, lawan)
+        {
+            self.coerce_longgar(&v, lawan)
+        } else {
+            v
+        }
+    }
+
     fn codegen_binary(&mut self, op: &BinaryOp, lhs: &Expr, rhs: &Expr, span: Span) -> Result<Val, String> {
         if matches!(op, BinaryOp::And | BinaryOp::Or) {
             return self.codegen_short_circuit(op, lhs, rhs, span);
+        }
+        // Rantai teks `a + b + c + ..`: satu alokasi untuk semuanya.
+        if *op == BinaryOp::Add {
+            if let Some(r) = self.coba_sambung_teks(lhs, rhs, span) { return r; }
         }
         // ── operand diturunkan SEKALI, keputusannya dari tipe NYATA ───────
         let lhs_malleable = is_malleable_literal(lhs);
         let rhs_malleable = is_malleable_literal(rhs);
 
-        /// Petunjuk tipe untuk sisi KEDUA, dari tipe nyata sisi pertama.
-        fn petunjuk(ty: &JrgType) -> Option<JrgType> {
-            // `nil` dan `()` tidak pernah memaksa tipe sisi lain — `()` yang
-            // memaksa membuat literal `6` di `kosong() == 6` ikut jadi `()`.
-            if matches!(ty, JrgType::Nil | JrgType::Unit) {
-                return None;
-            }
-            // Sebuah string tidak pernah memaksa tipe sisi lain, operator APA PUN — pegangan
-            // (`Atomic`, `Mutex`, channel) juga: `a == 1` menjawab `false`, seperti dua mesin lain.
-            if *ty == JrgType::Str || matches!(ty, JrgType::Sinkron(_) | JrgType::Chan(_)) {
-                None
-            } else {
-                Some(ty.clone())
-            }
-        }
-
-        // Koersi penyatuan di bawah ini untuk literal ANGKA: `1 + 2.5` menjadikan
-        // `1` sebuah f64.
-        fn skalar(t: &JrgType) -> bool {
-            !matches!(t, JrgType::Array(_, _) | JrgType::Slice(_)
-                       | JrgType::Tuple(_) | JrgType::Struct(_))
-        }
-
-        // Literal PECAHAN tidak pernah menyesuaikan diri ke bilangan bulat: itu memotong.
-        let boleh_ikut = |dari: &JrgType, ke: &JrgType| !(dari.is_float() && ke.is_int());
         let (lv, rv) = if lhs_malleable && !rhs_malleable {
             let rv = self.codegen_expr(rhs, None)?;
-            let h = petunjuk(&rv.ty);
+            let h = Self::petunjuk_biner(&rv.ty);
             let lv = self.codegen_expr(lhs, h.as_ref())?;
-            let lv = if h.is_some() && skalar(&lv.ty) && skalar(&rv.ty) && boleh_ikut(&lv.ty, &rv.ty) {
-                self.coerce_longgar(&lv, &rv.ty)
-            } else { lv };
+            let lv = self.koersi_dengan_lawan(op, lhs, lv, &rv.ty, h.is_some());
             (lv, rv)
         } else {
             let lv = self.codegen_expr(lhs, None)?;
-            // Operan kiri milik `var` modul masih menunjuk penyangganya; operan kanan yang bisa
-            // menulisnya akan ikut terbaca di sini. Acuannya: kiri dibaca LEBIH DULU.
+            // Operan kiri milik `var` modul disalin dulu bila operan kanan bisa menulisnya.
             let lv = if (Self::punya_penunjuk(&lv.ty) || self.isi_dalam_perlu_salin(&lv.ty))
                 && self.akar_var_modul(lhs) && self.bisa_menulis_modul(rhs) { self.salin_dalam(&lv) } else { lv };
-            let h = petunjuk(&lv.ty);
+            let h = Self::petunjuk_biner(&lv.ty);
             let rv = self.codegen_expr(rhs, h.as_ref())?;
-            let rv = if rhs_malleable && h.is_some() && skalar(&lv.ty) && skalar(&rv.ty)
-                && boleh_ikut(&rv.ty, &lv.ty) {
-                self.coerce_longgar(&rv, &lv.ty)
+            let rv = if rhs_malleable {
+                self.koersi_dengan_lawan(op, rhs, rv, &lv.ty, h.is_some())
             } else { rv };
             (lv, rv)
         };
-        // `==` lintas golongan skalar diputuskan SEBELUM penyatuan: literal angka di samping rune
-        // atau bool sudah ikut tipenya, padahal `'o' == 111` dan `true == 1` tidak pernah sama.
+        self.gabung_biner_nilai(op, lv, Some(lhs), rv, Some(rhs), true, span)
+    }
+
+    /// Satukan dua nilai ter-lower memakai aturan operator biner LLVM (juga dipakai pola literal).
+    fn gabung_biner_nilai(
+        &mut self,
+        op: &BinaryOp,
+        lv: Val,
+        lhs: Option<&Expr>,
+        rv: Val,
+        rhs: Option<&Expr>,
+        pakai_user_op: bool,
+        span: Span,
+    ) -> Result<Val, String> {
+        // `==` lintas golongan skalar diputuskan sebelum penyatuan (`'o' == 111`, `true == -5`).
         if matches!(op, BinaryOp::Eq | BinaryOp::Ne) {
-            let angka = |e: &Expr| matches!(e, Expr::Literal(LitKind::Int(_) | LitKind::Float(_), _));
+            let angka = |e: &Expr| tipe_bawaan_ekspresi(e).is_some();
             let bukan_angka = |t: &JrgType| matches!(t, JrgType::Rune | JrgType::Bool);
-            if (angka(lhs) && bukan_angka(&rv.ty)) || (angka(rhs) && bukan_angka(&lv.ty)) {
+            if (lhs.is_some_and(angka) && bukan_angka(&rv.ty))
+                || (rhs.is_some_and(angka) && bukan_angka(&lv.ty))
+            {
                 return Ok(Val { text: if *op == BinaryOp::Ne { "1" } else { "0" }.to_string(), ty: JrgType::Bool });
             }
-            if let Some(v) = Self::banding_beda_golongan(op, &lv.ty, &rv.ty) { return Ok(v); }
         }
         let (lv, rv) = self.naikkan_campuran(lv, rv);
         if *op == BinaryOp::Pow && lv.ty.is_int() && rv.ty.is_int() {
-            if let Some(k) = eksponen_negatif_tertulis(rhs) { return Ok(self.pangkat_pecahan(&lv, k)); }
+            if let Some(k) = rhs.and_then(eksponen_negatif_tertulis) { return Ok(self.pangkat_pecahan(&lv, k)); }
         }
-
-        // Operator yang didefinisikan pengguna didahulukan atas aturan bawaan.
-        if let Some(h) = self.operator_pengguna_biner(op, &lv, &rv, span)? {
-            return Ok(h);
+        if pakai_user_op {
+            if let Some(h) = self.operator_pengguna_biner(op, &lv, &rv, span)? {
+                return Ok(h);
+            }
         }
+        if let Some(v) = Self::banding_beda_golongan(op, &lv.ty, &rv.ty) { return Ok(v); }
         self.gabung_nilai(op, lv, rv, span)
+    }
+
+    /// Uji `lv == lit` dengan definisi `==` yang sama dengan operator `==` biner.
+    pub(crate) fn bandingkan_eq_literal(&mut self, lv: Val, lit: &LitKind, span: Span) -> Result<Val, String> {
+        let rhs = expr_dari_lit_pola(lit, span);
+        let rhs_malleable = is_malleable_literal(&rhs);
+        let (h, boleh_koersi) = match lit {
+            LitKind::Int(n) if lv.ty.is_int() => {
+                let val = *n as i128;
+                let (lo, hi) = super::codegen_konversi::jangkauan(&lv.ty);
+                if val >= lo && val <= hi {
+                    (Some(lv.ty.clone()), true)
+                } else if val >= i64::MIN as i128 && val <= i64::MAX as i128 {
+                    (None, false)
+                } else {
+                    (Some(JrgType::I128), false)
+                }
+            }
+            _ => {
+                let h = Self::petunjuk_biner(&lv.ty);
+                let ok = h.is_some();
+                (h, ok)
+            }
+        };
+        let rv = self.codegen_expr(&rhs, h.as_ref())?;
+        let rv = if rhs_malleable {
+            self.koersi_dengan_lawan(&BinaryOp::Eq, &rhs, rv, &lv.ty, boleh_koersi)
+        } else { rv };
+        self.gabung_biner_nilai(&BinaryOp::Eq, lv, None, rv, Some(&rhs), false, span)
     }
 
     /// Bulat lawan pecahan: yang bulat NAIK jadi pecahan, aturan acuan — `1 + 2.5` = 3.5 dan
@@ -442,6 +513,17 @@ impl Codegen {
         // ada bentuk yang bisa lolos hanya karena `peek` tidak mengenalinya.
         if lv.ty == JrgType::Str || rv.ty == JrgType::Str {
             match op {
+                // `s + rune`: rune ditulis ke penyangga stack, bukan teks arena baru — kalau tidak, `s` bukan
+                // lagi alokasi arena terakhir dan `s = s + c` menyalin seluruh `s` tiap langkah (kuadrat).
+                BinaryOp::Add if lv.ty == JrgType::Str && rv.ty == JrgType::Rune => {
+                    self.ensure_extern("declare i64 @jrg_rune_utf8(i32, ptr)", "jrg_rune_utf8");
+                    let buf = self.alloca_raw("rbuf.", "[4 x i8]", Some(1));
+                    let (n, a, b) = (self.fresh("rbn."), self.fresh("rbs."), self.fresh("rbs."));
+                    self.emit(format!("{} = call i64 @jrg_rune_utf8(i32 {}, ptr {})", n, rv.text, buf));
+                    self.emit(format!("{} = insertvalue %JrgStr undef, ptr {}, 0", a, buf));
+                    self.emit(format!("{} = insertvalue %JrgStr {}, i64 {}, 1", b, a, n));
+                    return self.str_concat(&lv, &Val { text: b, ty: JrgType::Str });
+                }
                 BinaryOp::Add => {
                     let l = self.jadikan_string(&lv, span)?;
                     let r = self.jadikan_string(&rv, span)?;
@@ -464,6 +546,17 @@ impl Codegen {
         }
 
         // ── konkatenasi array ─────────────────────────────────────────────
+        // Jenis elemen yang berganti (`[]bertag + []int`): dua sisinya jadi array bertag, seperti
+        // dict (#861) — dulu ditolak "tipe elemennya beda".
+        let (lv, rv) = match (&lv.ty, &rv.ty) {
+            (JrgType::Array(a, _) | JrgType::Slice(a), JrgType::Array(b, _) | JrgType::Slice(b))
+                if *op == BinaryOp::Add && a != b && (super::codegen_any::ganti_jenis_isi(a, b)
+                    || super::codegen_any::ganti_jenis_isi(b, a)) => {
+                let any = JrgType::Slice(Box::new(JrgType::Any));
+                (self.coerce(&lv, &any), self.coerce(&rv, &any))
+            }
+            _ => (lv, rv),
+        };
         if *op == BinaryOp::Add {
             let elem_dari = |t: &JrgType| match t {
                 JrgType::Array(e, _) | JrgType::Slice(e) => Some((**e).clone()),
@@ -712,15 +805,56 @@ impl Codegen {
         if matches!(op, BinaryOp::Add | BinaryOp::Sub | BinaryOp::Mul) {
             return Ok(self.hitung_terperiksa(op, lv, rv));
         }
+        let pembagi = if signed && matches!(op, BinaryOp::Div | BinaryOp::Rem) {
+            self.bagi_min_negatif_satu(op, lv, rv)
+        } else { rv.text.clone() };
         let r = self.fresh("i.");
-        self.emit(format!("{} = {} {} {}, {}", r, instr, lv.ty.llvm_ty(), lv.text, rv.text));
+        self.emit(format!("{} = {} {} {}, {}", r, instr, lv.ty.llvm_ty(), lv.text, pembagi));
         Ok(Val { text: r, ty: lv.ty.clone() })
+    }
+
+    /// `MIN / -1` dan `MIN % -1` tak terdefinisi di `sdiv`/`srem`: `/` gagal dengan kalimat luapan,
+    /// `%` membagi dengan 1 (sisanya memang 0). Pembagi literal selain -1 tidak diperiksa.
+    fn bagi_min_negatif_satu(&mut self, op: &BinaryOp, lv: &Val, rv: &Val) -> String {
+        if rv.text.parse::<i64>().is_ok_and(|k| k != -1) { return rv.text.clone(); }
+        let t = lv.ty.llvm_ty();
+        let m1 = self.fresh("neg1.");
+        self.emit(format!("{} = icmp eq {} {}, -1", m1, t, rv.text));
+        if *op == BinaryOp::Rem {
+            let d = self.fresh("pembagi.");
+            self.emit(format!("{} = select i1 {}, {} 1, {} {}", d, m1, t, t, rv.text));
+            return d;
+        }
+        let bit = lv.ty.int_bits().unwrap_or(64);
+        let min = if bit >= 64 { i64::MIN as i128 } else { -(1i128 << (bit - 1)) };
+        let mn = self.fresh("min.");
+        self.emit(format!("{} = icmp eq {} {}, {}", mn, t, lv.text, min));
+        let both = self.fresh("luber.");
+        self.emit(format!("{} = and i1 {}, {}", both, m1, mn));
+        let bad = self.fresh_label("luber.");
+        let ok = self.fresh_label("muat.");
+        self.terminate_unlikely_true(&both, &bad, &ok);
+        self.start_block(bad);
+        let (a, b) = (self.ke_i64_tampil(lv), self.ke_i64_tampil(rv));
+        self.ensure_extern(
+            "declare void @jrg_panic_luber(i64, i64, i32, i32, i32) cold nounwind noreturn",
+            "jrg_panic_luber",
+        );
+        self.emit(format!("call void @jrg_panic_luber(i64 {}, i64 {}, i32 3, i32 {}, i32 1)", a, b, bit));
+        self.terminate("unreachable".to_string());
+        self.start_block(ok);
+        rv.text.clone()
     }
 
     /// `+`/`-`/`*` bilangan bulat dengan luapan DIPERIKSA (Fase LEBAR-LLVM): dulu membungkus
     /// diam-diam di lebar tipenya (`9223372036854775807 + 1` jadi negatif), sementara dua mesin
     /// lain menghitung di 128 bit. Yang sengaja membungkus menulis `math::wrap_*`.
     pub(crate) fn hitung_terperiksa(&mut self, op: &BinaryOp, lv: &Val, rv: &Val) -> Val {
+        self.hitung_terperiksa_awal(op, lv, rv, "")
+    }
+
+    /// `awal`: nama builtin di depan kalimat luapannya (`atomic::add: `), seperti di acuan.
+    pub(crate) fn hitung_terperiksa_awal(&mut self, op: &BinaryOp, lv: &Val, rv: &Val, awal: &str) -> Val {
         let t = lv.ty.llvm_ty();
         let bertanda = lv.ty.is_signed_int();
         let (nama, kode) = match op {
@@ -738,13 +872,24 @@ impl Codegen {
         let ok = self.fresh_label("muat.");
         self.terminate_unlikely_true(&o, &bad, &ok);
         self.start_block(bad);
-        self.ensure_extern(
-            "declare void @jrg_panic_luber(i64, i64, i32, i32, i32) cold nounwind noreturn",
-            "jrg_panic_luber",
-        );
         let (a, b) = (self.ke_i64_tampil(lv), self.ke_i64_tampil(rv));
-        self.emit(format!("call void @jrg_panic_luber(i64 {}, i64 {}, i32 {}, i32 {}, i32 {})",
-            a, b, kode, lv.ty.int_bits().unwrap_or(64), if bertanda { 1 } else { 0 }));
+        let ekor = format!("i64 {}, i64 {}, i32 {}, i32 {}, i32 {}",
+            a, b, kode, lv.ty.int_bits().unwrap_or(64), if bertanda { 1 } else { 0 });
+        if awal.is_empty() {
+            self.ensure_extern(
+                "declare void @jrg_panic_luber(i64, i64, i32, i32, i32) cold nounwind noreturn",
+                "jrg_panic_luber",
+            );
+            self.emit(format!("call void @jrg_panic_luber({})", ekor));
+        } else {
+            self.ensure_extern(
+                "declare void @jrg_panic_luber_awal(ptr, i64, i64, i64, i32, i32, i32) cold nounwind noreturn",
+                "jrg_panic_luber_awal",
+            );
+            let s = self.intern_string(awal);
+            let (sp, sl) = self.split_str(&s);
+            self.emit(format!("call void @jrg_panic_luber_awal(ptr {}, i64 {}, {})", sp, sl, ekor));
+        }
         self.terminate("unreachable".to_string());
         self.start_block(ok);
         Val { text: r, ty: lv.ty.clone() }
@@ -779,13 +924,22 @@ impl Codegen {
         }
         let mut buruk = self.fresh("gs.brk.");
         self.emit(format!("{} = or i1 {}, {}", buruk, neg, besar));
+        // Jumlah yang sah tapi >= lebar: dijepit ke lebar-1, lalu hasilnya dibetulkan.
+        let (jepit, mentah) = (self.fresh("gs.jpt."), self.fresh("gs.mth."));
+        self.emit(format!("{} = select i1 {}, {} {}, {} {}", jepit, lebar, t, bit - 1, t, y.text));
+        let instr = if ke_kiri { "shl" } else if signed { "ashr" } else { "lshr" };
+        self.emit(format!("{} = {} {} {}, {}", mentah, instr, t, lv.text, jepit));
         if ke_kiri {
-            // Ke kiri melewati lebarnya cuma sah kalau tidak ada bit yang dibuang.
+            // Ke kiri sah cuma kalau tidak ada bit yang dibuang: digeser balik harus sama lagi.
             let (ada, luber, b2) = (self.fresh("gs.ada."), self.fresh("gs.lbh."), self.fresh("gs.brk."));
             self.emit(format!("{} = icmp ne {} {}, 0", ada, t, lv.text));
             self.emit(format!("{} = and i1 {}, {}", luber, lebar, ada));
             self.emit(format!("{} = or i1 {}, {}", b2, buruk, luber));
-            buruk = b2;
+            let (balik, hilang, b3) = (self.fresh("gs.blk."), self.fresh("gs.hlg."), self.fresh("gs.brk."));
+            self.emit(format!("{} = {} {} {}, {}", balik, if signed { "ashr" } else { "lshr" }, t, mentah, jepit));
+            self.emit(format!("{} = icmp ne {} {}, {}", hilang, t, balik, lv.text));
+            self.emit(format!("{} = or i1 {}, {}", b3, b2, hilang));
+            buruk = b3;
         }
         let bad = self.fresh_label("geser.salah.");
         let ok = self.fresh_label("geser.ok.");
@@ -797,14 +951,9 @@ impl Codegen {
         );
         let (x64, y64) = (self.ke_i64_tampil(lv), self.ke_i64_tampil(&y));
         self.emit(format!("call void @jrg_panic_geser(i64 {}, i64 {}, i32 {}, i32 {})",
-            x64, y64, if ke_kiri { 1 } else { 0 }, bit));
+            x64, y64, if ke_kiri { 1 } else { 0 }, if signed { bit as i32 } else { -(bit as i32) }));
         self.terminate("unreachable".to_string());
         self.start_block(ok);
-        // Jumlah yang sah tapi >= lebar: dijepit ke lebar-1, lalu hasilnya dibetulkan.
-        let (jepit, mentah) = (self.fresh("gs.jpt."), self.fresh("gs.mth."));
-        self.emit(format!("{} = select i1 {}, {} {}, {} {}", jepit, lebar, t, bit - 1, t, y.text));
-        let instr = if ke_kiri { "shl" } else if signed { "ashr" } else { "lshr" };
-        self.emit(format!("{} = {} {} {}, {}", mentah, instr, t, lv.text, jepit));
         // `ashr` yang dijepit sudah benar (semua bit jadi bit tanda); dua lainnya jadi nol.
         if !ke_kiri && signed { return Val { text: mentah, ty: lv.ty.clone() }; }
         let r = self.fresh("i.");
@@ -829,23 +978,21 @@ impl Codegen {
         self.start_block(ok);
     }
 
-    /// `x ** k` dengan `x` bulat dan `k` negatif tertulis: `powi` seperti `pangkat_bulat` acuan
-    /// (eksponen di luar `i32` lewat `pow`), jadi angkanya sama sampai bit terakhir.
+    /// `x ** k` dengan `x` bulat dan `k` negatif tertulis: `pow` seperti `pangkat_bulat` acuan, jadi angkanya sama
+    /// sampai bit terakhir.
     fn pangkat_pecahan(&mut self, lv: &Val, k: f64) -> Val {
         let x = self.coerce_longgar(lv, &JrgType::F64);
         let r = self.fresh("powi.");
-        if k >= i32::MIN as f64 {
-            self.ensure_extern("declare double @llvm.powi.f64.i32(double, i32)", "llvm.powi.f64.i32");
-            self.emit(format!("{} = call double @llvm.powi.f64.i32(double {}, i32 {})", r, x.text, k as i32));
-        } else {
-            self.ensure_extern("declare double @llvm.pow.f64(double, double)", "llvm.pow.f64");
-            self.emit(format!("{} = call double @llvm.pow.f64(double {}, double 0x{:016X})", r, x.text, k.to_bits()));
-        }
+        self.ensure_extern("declare double @llvm.pow.f64(double, double)", "llvm.pow.f64");
+        self.emit(format!("{} = call double @llvm.pow.f64(double {}, double 0x{:016X})", r, x.text, k.to_bits()));
         Val { text: r, ty: JrgType::F64 }
     }
 
-    pub fn pow_binop(&mut self, lv: &Val, rv: &Val, _span: Span) -> Result<Val, String> {
-        if lv.ty.is_float() {
+    pub fn pow_binop(&mut self, lv: &Val, rv: &Val, span: Span) -> Result<Val, String> {
+        if lv.ty == JrgType::Any || rv.ty == JrgType::Any {
+            return self.arith_any(&BinaryOp::Pow, lv, rv, span);
+        }
+        if lv.ty.is_float() || rv.ty.is_float() {
             self.ensure_extern(
                 "declare double @llvm.pow.f64(double, double)",
                 "llvm.pow.f64",
@@ -861,7 +1008,7 @@ impl Codegen {
                 rv64.text
             ));
             let out = Val { text: r, ty: JrgType::F64 };
-            return Ok(self.coerce_longgar(&out, &lv.ty));
+            return Ok(if lv.ty.is_float() { self.coerce_longgar(&out, &lv.ty) } else { out });
         }
         if lv.ty.is_int() {
             self.ensure_extern("declare i64 @jrg_ipow_i64(i64, i64)", "jrg_ipow_i64");
@@ -979,27 +1126,11 @@ impl Codegen {
         self.do_cast(v, &JrgType::Str, span)
     }
 
-    /// `str * n` — pengulangan string.
+    /// `str * n` — pengulangan string; negatif dan hasil kegedean ditolak runtime dengan kalimat acuan.
     pub(crate) fn ulang_string(&mut self, sv: &Val, nv: &Val) -> Result<Val, String> {
         self.ensure_extern(
             "declare void @jrg_str_repeat(ptr, i64, i64, ptr, ptr)", "jrg_str_repeat");
-        self.ensure_extern(
-            "declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
-
         let n64 = self.coerce_longgar(nv, &JrgType::I64);
-        let neg = self.fresh("rpneg.");
-        self.emit(format!("{} = icmp slt i64 {}, 0", neg, n64.text));
-        let badlbl = self.fresh_label("rpbad.");
-        let oklbl = self.fresh_label("rpok.");
-        self.terminate_unlikely_true(&neg, &badlbl, &oklbl);
-        self.start_block(badlbl);
-        let msg = self.intern_string(
-            "tidak bisa mengulang string dengan jumlah negatif — jumlah pengulangan tidak boleh negatif");
-        let (mp, ml) = self.split_str(&msg);
-        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
-        self.terminate("unreachable".to_string());
-        self.start_block(oklbl);
-
         let (sptr, slen) = self.split_str(sv);
         let outp = self.alloca_raw("rpp.", "ptr", None);
         let outl = self.alloca_raw("rpl.", "i64", None);
@@ -1041,7 +1172,7 @@ impl Codegen {
     }
 
     /// Sambung dua koleksi ketika panjang hasilnya baru diketahui saat jalan.
-    fn sambung_slice(&mut self, lv: &Val, rv: &Val, elem: &JrgType, span: Span)
+    pub(crate) fn sambung_slice(&mut self, lv: &Val, rv: &Val, elem: &JrgType, span: Span)
         -> Result<Val, String>
     {
         let _ = span;
@@ -1152,8 +1283,7 @@ impl Codegen {
         }
     }
 
-    /// `==`/`!=` dua skalar dari golongan BERBEDA (teks, rune, bool, angka):
-    /// tidak pernah sama, seperti di dua mesin lain. `None` untuk pasangan lain.
+    /// `==`/`!=` dua nilai dari golongan BERBEDA: tidak pernah sama, seperti di dua mesin lain.
     fn banding_beda_golongan(op: &BinaryOp, l: &JrgType, r: &JrgType) -> Option<Val> {
         if !matches!(op, BinaryOp::Eq | BinaryOp::Ne) { return None; }
         let golongan = |t: &JrgType| match t {
@@ -1163,6 +1293,13 @@ impl Codegen {
             t if t.is_int() || t.is_float() => Some(3),
             JrgType::Sinkron(k) => Some(4 + *k as i32),
             JrgType::Chan(_) => Some(6),
+            JrgType::Array(_, _) | JrgType::Slice(_) => Some(7),
+            JrgType::Tuple(_) => Some(8),
+            JrgType::Struct(_) => Some(9),
+            JrgType::Enum(_) => Some(10),
+            JrgType::Dict(_) | JrgType::DictCampur(_) => Some(11),
+            JrgType::Fn(..) => Some(12),
+            JrgType::Masa(..) => Some(13),
             _ => None,
         };
         let (a, b) = (golongan(l)?, golongan(r)?);
@@ -1179,7 +1316,7 @@ impl Codegen {
     fn butuh_salin_dalam(&self, t: &JrgType, dalam: u8) -> bool {
         if dalam > 12 { return false; }
         match t {
-            JrgType::Slice(_) | JrgType::Dict(_) | JrgType::DictCampur(_) | JrgType::Any => true,
+            JrgType::Slice(_) | JrgType::Dict(_) | JrgType::DictCampur(_) | JrgType::Any | JrgType::Kotak(_) => true,
             JrgType::Array(e, n) => *n > 0 && self.butuh_salin_dalam(e, dalam + 1),
             JrgType::Tuple(ts) => ts.iter().any(|x| self.butuh_salin_dalam(x, dalam + 1)),
             JrgType::Struct(nama) => self.types.structs.get(nama)
@@ -1203,6 +1340,7 @@ impl Codegen {
     /// Salin sebuah nilai sampai ke dalam, sehingga hasilnya tidak berbagi satu
     /// buffer pun dengan aslinya.
     pub fn salin_dalam(&mut self, v: &Val) -> Val {
+        if self.butuh_salin(&v.ty) && self.lewat_bantu(&v.ty) { return self.salin_lewat_bantu(v); }
         match &v.ty {
             JrgType::Dict(_) | JrgType::DictCampur(_) => {
                 // Nilai di dalam dict ikut, lewat jalur yang sama.
@@ -1242,7 +1380,7 @@ impl Codegen {
                         fp, v.ty.llvm_ty(), tempat, i));
                     let fv = self.load_place(&fp, t);
                     let baru = self.salin_dalam(&fv);
-                    self.emit(format!("store {} {}, ptr {}", t.llvm_ty(), baru.text, fp));
+                    self.simpan_slot_mentah(&fp, t, &baru);
                 }
                 self.load_place(&tempat, &v.ty)
             }
@@ -1259,7 +1397,7 @@ impl Codegen {
                         fp, v.ty.llvm_ty(), tempat, i));
                     let fv = self.load_place(&fp, &f.1);
                     let baru = self.salin_dalam(&fv);
-                    self.emit(format!("store {} {}, ptr {}", f.1.llvm_ty(), baru.text, fp));
+                    self.simpan_slot_mentah(&fp, &f.1, &baru);
                 }
                 self.load_place(&tempat, &v.ty)
             }
@@ -1289,7 +1427,7 @@ impl Codegen {
                         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 {}", fp, ps, blob, i));
                         let fv = self.load_place(&fp, t);
                         let baru = self.salin_dalam(&fv);
-                        self.emit(format!("store {} {}, ptr {}", t.llvm_ty(), baru.text, fp));
+                        self.simpan_slot_mentah(&fp, t, &baru);
                     }
                     if !self.is_terminated() { self.terminate(format!("br label %{}", usai)); }
                 }
@@ -1497,56 +1635,46 @@ impl Codegen {
     // ── ternary / pipe ───────────────────────────────────────────────────
 
     fn codegen_ternary(&mut self, cond: &Expr, then_e: &Expr, else_e: &Expr, expected: Option<&JrgType>, _span: Span) -> Result<Val, String> {
-        let result_ty = match expected.cloned()
+        let campur = if expected.is_none() {
+            use super::codegen_any::Cabang;
+            self.jenis_cabang(&[Cabang::Ekspr(then_e), Cabang::Ekspr(else_e)])
+        } else { None };
+        let mut tipe = expected.cloned().or(campur)
             .or_else(|| self.peek_expr_type(then_e))
             .or_else(|| self.peek_expr_type(else_e))
             // Kalau kedua cabang literal angka, pakai bawaan yang SAMA dengan yang
             // dipakai literal itu di posisi mana pun.
             .or_else(|| tipe_bawaan_ekspresi(then_e))
-            .or_else(|| tipe_bawaan_ekspresi(else_e))
-        {
-            Some(t) => t,
-            None => return Err(
-                // Openernya `$`, bukan `?`. Pesan ini masih menulis `?` jauh
-                // setelah fase SINTAKS-TERNARY memindahkannya — pesan error
-                // yang mengajarkan sintaks yang sudah tidak ada.
-                "operator ternary `cond $ a : b` butuh tipe yang bisa disimpulkan \
-                 dari konteks\n\
-                 bantuan: beri anotasi tipe pada penerimanya, mis. \
-                 `var x: int = c $ a : b`".into()
-            ),
-        };
+            .or_else(|| tipe_bawaan_ekspresi(else_e));
         let cv = self.codegen_expr(cond, Some(&JrgType::Bool))?;
         let cv = self.coerce_longgar(&cv, &JrgType::Bool);
         let ci1 = self.to_i1(&cv);
         let then_lbl = self.fresh_label("tern.then.");
         let else_lbl = self.fresh_label("tern.else.");
         let merge_lbl = self.fresh_label("tern.end.");
-        let slot = if result_ty != JrgType::Unit {
-            self.alloca_typed("tern.slot.", &result_ty)
-        } else {
-            String::new()
-        };
         self.terminate(format!("br i1 {}, label %{}, label %{}", ci1, then_lbl, else_lbl));
-
-        self.start_block(then_lbl);
-        let tv = self.codegen_expr(then_e, Some(&result_ty))?;
-        if !self.is_terminated() {
-            let tv = self.coerce(&tv, &result_ty);
-            if result_ty != JrgType::Unit { self.emit(format!("store {} {}, ptr {}", result_ty.llvm_ty(), tv.text, slot)); }
+        // Tipe yang tidak tertebak diambil dari cabang yang PERTAMA bernilai (dulu ditolak "butuh tipe
+        // yang bisa disimpulkan"); tempatnya dibuat saat itu — `alloca` diangkat ke blok masuk.
+        let mut slot: Option<String> = None;
+        for (lbl, e) in [(then_lbl, then_e), (else_lbl, else_e)] {
+            self.start_block(lbl);
+            let v = self.codegen_expr(e, tipe.as_ref())?;
+            if self.is_terminated() { continue; }
+            if tipe.is_none() && v.ty != JrgType::Never { tipe = Some(v.ty.clone()); }
+            if let Some(t) = tipe.clone().filter(|t| *t != JrgType::Unit) {
+                let v = self.coerce(&v, &t);
+                let tempat = match &slot { Some(s) => s.clone(), None => { let s = self.alloca_typed("tern.slot.", &t); slot = Some(s.clone()); s } };
+                self.emit(format!("store {} {}, ptr {}", t.llvm_ty(), v.text, tempat));
+            }
             self.terminate(format!("br label %{}", merge_lbl));
         }
-
-        self.start_block(else_lbl);
-        let ev = self.codegen_expr(else_e, Some(&result_ty))?;
-        if !self.is_terminated() {
-            let ev = self.coerce(&ev, &result_ty);
-            if result_ty != JrgType::Unit { self.emit(format!("store {} {}, ptr {}", result_ty.llvm_ty(), ev.text, slot)); }
-            self.terminate(format!("br label %{}", merge_lbl));
-        }
-
         self.start_block(merge_lbl);
-        Ok(self.load_place(&slot, &result_ty))
+        match (tipe, slot) {
+            (Some(t), Some(s)) => Ok(self.load_place(&s, &t)),
+            (Some(JrgType::Unit), None) => Ok(Val::unit()),
+            (Some(t), None) => Ok(Val { text: "undef".into(), ty: t }),
+            (None, _) => Ok(Val { text: "undef".into(), ty: JrgType::Never }),
+        }
     }
 
     /// Best-effort, side-effect-free type peek used only to give ternary a
@@ -1714,11 +1842,48 @@ impl Codegen {
                     "call void @jrg_i64_to_str_desimal(i64 {}, i64 {}, ptr {}, ptr {})",
                     i.text, n, outp, outl));
             }
+            // Nilai bertag: golongannya dibaca saat jalan, kalimat gagalnya sama dengan acuan.
+            JrgType::Any => return self.str_desimal_bertag(v, n, span),
             other => return Err(format!(
                 "[{}:{}] str::format: spec `{{:.{}}}` cuma untuk angka, dapat `{}`",
                 span.lo.0, span.hi.0, n, other.display_name())),
         }
         self.join_str(&outp, &outl)
+    }
+
+    fn str_desimal_bertag(&mut self, v: &Val, n: usize, span: Span) -> Result<Val, String> {
+        use super::codegen_any::{TAG_FLOAT, TAG_INT};
+        let slot = self.alloca_typed("dsa.", &JrgType::Str);
+        let kata = self.fresh("dsa.");
+        self.emit(format!("{} = extractvalue %JrgAny {}, 0", kata, v.text));
+        let tag = self.fresh("dsa.");
+        self.emit(format!("{} = and i32 {}, 255", tag, kata));
+        let (lb, lf, ll, akhir) = (self.fresh_label("dsa.int."), self.fresh_label("dsa.float."),
+                                   self.fresh_label("dsa.lain."), self.fresh_label("dsa.end."));
+        self.terminate(format!("switch i32 {}, label %{} [ i32 {}, label %{} i32 {}, label %{} ]",
+            tag, ll, TAG_INT, lb, TAG_FLOAT, lf));
+        for (lbl, ty) in [(lb, JrgType::I64), (lf, JrgType::F64)] {
+            self.start_block(lbl);
+            let x = self.buka_any(v, &ty, span)?;
+            let t = self.str_desimal(&x, n, span)?;
+            self.emit(format!("store %JrgStr {}, ptr {}", t.text, slot));
+            self.terminate(format!("br label %{}", akhir));
+        }
+        self.start_block(ll);
+        let nama = self.typeof_any(v)?;
+        let tempat = self.spill_to_place(&nama);
+        let isi = self.lokal_sementara(tempat, JrgType::Str, span);
+        let teks = |t: String| Expr::Literal(LitKind::Str(t), span);
+        let pesan = Expr::Binary { op: BinaryOp::Add, span, rhs: Box::new(teks("`".into())),
+            lhs: Box::new(Expr::Binary { op: BinaryOp::Add, span, rhs: Box::new(isi),
+                lhs: Box::new(teks(format!("str::format: spec `{{:.{}}}` cuma untuk angka, dapat `", n))) }) };
+        let p = self.codegen_expr(&pesan, None)?;
+        self.ensure_extern("declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
+        let (mp, ml) = self.split_str(&p);
+        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+        self.terminate("unreachable".to_string());
+        self.start_block(akhir);
+        Ok(self.load_place(&slot, &JrgType::Str))
     }
 
     /// `rune` → `string`: satu karakter, dikodekan UTF-8.

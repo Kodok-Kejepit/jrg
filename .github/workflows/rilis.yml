@@ -1,7 +1,7 @@
 # Membangun biner untuk tiap platform, lalu melampirkannya ke sebuah GitHub
 # Release berikut manifes dan checksum-nya.
 #
-# Dijalankan dengan mendorong tag `v*` (mis. `v0.2.0`), atau manual dari tab
+# Dijalankan dengan mendorong tag `v*` (mis. `v0.3.0`), atau manual dari tab
 # Actions. Tidak ada yang terbit tanpa tag — sebuah rilis yang terjadi karena
 # seseorang men-push ke main adalah rilis yang tidak diputuskan siapa pun.
 #
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       versi:
-        description: "Versi tanpa awalan v (mis. 0.2.0)"
+        description: "Versi tanpa awalan v (mis. 0.3.0)"
         required: true
 
 permissions:
@@ -169,6 +169,7 @@ jobs:
           path: unduhan
 
       - name: Susun manifes
+        id: manifes
         shell: bash
         run: |
           mkdir -p dist
@@ -176,6 +177,7 @@ jobs:
             -exec cp {} dist/ \;
           versi=$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')
           python3 rilis/susun_manifes.py "$versi" dist > dist/manifes.json
+          echo "v=$versi" >> "$GITHUB_OUTPUT"
           cat dist/manifes.json
 
       # Diperiksa DI SINI, bukan dipercaya: sebuah manifes yang checksumnya
@@ -196,4 +198,6 @@ jobs:
             dist/*.zip
             dist/*.sha256
             dist/manifes.json
-          generate_release_notes: true
+          # Catatan rilis ditulis tangan (`rilis/CATATAN.md`), bukan daftar commit.
+          name: JRG ${{ steps.manifes.outputs.v }}
+          body_path: rilis/CATATAN.md

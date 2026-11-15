@@ -649,8 +649,8 @@ impl Interpreter {
             }
             // -----------------------------------------------------------
             // Method angka lain (`abs`, `sqrt`, `pow`, …) dilayani `math::` di pintu atas.
-            (Value::Int(n),   "to_string") => Ok(Value::Str(n.to_string())),
-            (Value::Float(f), "to_string") => Ok(Value::Str(format!("{}", Value::Float(*f)))),
+            (Value::Int(n),   "to_string") => Ok(Value::Str(std::sync::Arc::new(n.to_string()))),
+            (Value::Float(f), "to_string") => Ok(Value::teks(format!("{}", Value::Float(*f)))),
             // ----------------------------------------------------------- Result<T, E> /
             // Option<T> methods
             (Value::Enum { variant, .. }, "is_ok")   if variant == "Ok"   => Ok(Value::Bool(true)),
@@ -688,7 +688,7 @@ impl Interpreter {
             }
             (Value::Enum { variant, .. }, "expect") if variant == "Err" || variant == "None" => {
                 let msg = match args.first() {
-                    Some(Value::Str(s)) => s.clone(),
+                    Some(Value::Str(s)) => String::clone(s),
                     Some(other) => format!("{}", other),
                     None => "expect() gagal".to_string(),
                 };
@@ -838,7 +838,7 @@ impl Interpreter {
             // `to_string` bawaan untuk tipe yang tidak punya hook sendiri.
             (_, "to_string") => {
                 let teks = self.tampil(&obj)?;
-                Ok(Value::Str(teks))
+                Ok(Value::Str(std::sync::Arc::new(teks)))
             }
             // Canvas method dispatch
             (Value::Canvas(_), _) => {

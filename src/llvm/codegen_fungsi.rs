@@ -16,6 +16,7 @@ impl Codegen {
 
     pub(crate) fn codegen_function(&mut self, _base_name: &str, decl: &FnDecl, subst: &TypeSubst, mangled: &str, self_ty: Option<JrgType>, arity: usize) -> Result<(), String> {
         self.unit_kini = self.unit_simbol_dari(mangled);
+        self.pernah_kembali = false;
         self.galat_duga_kini = self.galat_duga.get(mangled).cloned();
         self.locals.clear();
         self.push_scope();
@@ -38,6 +39,9 @@ impl Codegen {
         };
 
         let ret_ty = self.tipe_return_duga(decl, subst, mangled, self_ty.as_ref(), arity)?;
+        // `main` tanpa anotasi membuang nilai ekornya (cuma `-> int` yang kode keluar); `Err`/`None` tetap dilaporkan.
+        let opsi = matches!(&ret_ty, JrgType::Enum(n) if self.option_args.contains_key(n) || self.result_args.contains_key(n));
+        let ret_ty = if self.is_main_fn && decl.ret_type.is_none() && !opsi { JrgType::Unit } else { ret_ty };
         self.cur_ret_ty = ret_ty.clone();
         // Penyimpul MENYERAH dan `tipe_return` menebak `()`: nilai yang ternyata
         // dikembalikan badannya akan ditolak, bukan dibuang (`periksa_nilai_terbuang`).
@@ -56,24 +60,27 @@ impl Codegen {
             _ => std::collections::HashSet::new(),
         };
         let tangkap_lama = std::mem::replace(&mut self.tangkapan, tangkap);
+        let ditangkap = match &*decl.body {
+            FnBody::Block(b) => crate::interpreter::capture::ditangkap_closure_blok(b),
+            _ => std::collections::HashSet::new(),
+        };
+        let ditangkap_lama = std::mem::replace(&mut self.ditangkap_closure, ditangkap);
         // Fungsi bersarang melihat saudara-saudaranya; fungsi tingkat atas
         // memulai dari kosong.
         let sarang = self.sarang_fn.get(mangled).cloned().unwrap_or_default();
         let sarang_lama = std::mem::replace(&mut self.fn_bersarang, sarang);
-        let arg_kini = match &*decl.body {
-            FnBody::Block(b) => {
-                let mut lokal = super::infer::Lokal::new();
-                for (i, p) in decl.params.iter().enumerate() {
-                    if let Some(n) = pattern_simple_name(&p.pattern) {
-                        if let Some(t) = self.tipe_dari_anotasi(&p.ty, subst)
-                            .or_else(|| subst.get(&format!("$param{}", i)).cloned())
-                        {
-                            lokal.insert(n, t);
-                        }
-                    }
+        let mut lokal_param = super::infer::Lokal::new();
+        for (i, p) in decl.params.iter().enumerate() {
+            if let Some(n) = pattern_simple_name(&p.pattern) {
+                if let Some(t) = self.tipe_dari_anotasi(&p.ty, subst)
+                    .or_else(|| subst.get(&format!("$param{}", i)).cloned())
+                {
+                    lokal_param.insert(n, t);
                 }
-                super::infer::tipe_argumen_dan_paruh(self, b, &lokal, subst)
             }
+        }
+        let arg_kini = match &*decl.body {
+            FnBody::Block(b) => super::infer::tipe_argumen_dan_paruh(self, b, &lokal_param, subst),
             _ => (HashMap::new(), HashMap::new()),
         };
         let (arg_kini, paruh_kini) = arg_kini;
@@ -83,8 +90,11 @@ impl Codegen {
             for (n, t) in super::infer::dict_kosong_yang_diisi(self, b, subst) {
                 self.lokal_tumbuh.entry(n).or_insert(t);
             }
-            for n in super::infer::lokal_skalar_bentrok(self, b, subst) {
+            for n in super::infer::lokal_skalar_bentrok(self, b, subst, &lokal_param) {
                 self.lokal_tumbuh.insert(n, JrgType::Any);
+            }
+            for (n, t) in super::infer::dict_ditulis_jenis_lain(self, b, subst) {
+                self.lokal_tumbuh.insert(n, t);
             }
         }
         let arg_lama = std::mem::replace(&mut self.tipe_argumen, arg_kini);
@@ -198,6 +208,11 @@ impl Codegen {
             self.siapkan_var_global()?;
         }
 
+        if self.is_main_fn {
+            self.ensure_extern("declare void @jrg_situs_pasang(ptr, ptr, ptr) nounwind", "jrg_situs_pasang");
+            self.emit("call void @jrg_situs_pasang(ptr @jrg_situs_isi, ptr @jrg_situs_n, ptr @jrg_situs_teks)".to_string());
+        }
+
         if self.is_main_fn && self.options.full_buffered_stdout {
             self.ensure_extern(
                 "declare void @jrg_set_stdout_buffering(i32) nounwind",
@@ -257,6 +272,7 @@ impl Codegen {
         self.is_main_fn = false;
         self.lokal_tumbuh = tumbuh_lama;
         self.tangkapan = tangkap_lama;
+        self.ditangkap_closure = ditangkap_lama;
         self.fn_bersarang = sarang_lama;
         self.ret_ditebak = ditebak_lama;
         self.tipe_argumen = arg_lama;
@@ -268,15 +284,27 @@ impl Codegen {
     /// implicit return (Rust-style "last expression is the value").
     pub(crate) fn codegen_fn_block(&mut self, block: &Block, ret_ty: &JrgType) -> Result<(), String> {
         self.hoist_fn_bersarang(block);
-        for stmt in &block.stmts {
+        let mut lepas = Vec::new();
+        for (i, stmt) in block.stmts.iter().enumerate() {
+            let calon = if self.is_main_fn { None }
+                else { super::codegen_lepas::calon_lepas(stmt, &block.stmts[i + 1..], block.tail.as_deref()) };
+            if i + 1 == block.stmts.len() && block.tail.is_none() { self.lepas_sebelum_kembali(stmt, &mut lepas); }
             self.codegen_stmt(stmt)?;
             if self.terminated { break; }
+            self.catat_lepas(calon, &mut lepas);
         }
         if !self.terminated {
             if let Some(tail) = &block.tail {
                 // A `Unit`-returning function's tail is discarded exactly like any other
                 // statement position — no result slot, no cross-branch type unification if …
-                if *ret_ty == JrgType::Unit {
+                if *ret_ty == JrgType::Unit && self.is_main_fn {
+                    // `main` tanpa anotasi: nilai ekornya dibuang, kecuali `Err`/`None` — dilaporkan seperti acuan.
+                    let v = self.codegen_expr(tail, None)?;
+                    match self.main_pulang_opsi(&v) {
+                        Some(h) => h?,
+                        None => self.emit_void_return(),
+                    }
+                } else if *ret_ty == JrgType::Unit {
                     // `if … else` di ekor: lewat bentuk ekspresinya kalau tipenya cuma TEBAKAN,
                     // supaya cabang yang menghasilkan nilai terlihat penjaga — dulu `() ()`.
                     let t = match tail.as_ref() {
@@ -288,12 +316,16 @@ impl Codegen {
                         _ => self.codegen_expr_discarding_tipe(tail)?,
                     };
                     self.periksa_nilai_terbuang(t.as_ref());
+                    self.lepas_titipan(&lepas);
                     self.emit_void_return();
                 } else {
                     let v = self.codegen_expr(tail, Some(ret_ty))?;
                     let v = self.lepas_dari_self(tail, v);
+                    self.lepas_titipan(&lepas);
                     self.emit_return(&v, ret_ty);
                 }
+            } else {
+                self.lepas_titipan(&lepas);
             }
         }
         self.fn_bersarang.pop();
@@ -352,10 +384,21 @@ impl Codegen {
                         }
                         }
                     }
-                    JrgType::Array(e, _) => JrgType::Slice(e.clone()),
+                    JrgType::Array(e, _) => {
+                        let elem = super::codegen_any::luruh(e);
+                        let mut semua = vec![elem.clone()];
+                        for t in self.tipe_elemen_var_global_konflik(&v.name) {
+                            let tl = super::codegen_any::luruh(&t);
+                            if !semua.contains(&tl) { semua.push(tl); }
+                        }
+                        let awal = JrgType::Slice(Box::new(if semua.len() > 1 { JrgType::Any } else { elem }));
+                        super::infer::dict_global_ditulis(self, &v.name, &awal).unwrap_or(awal)
+                    }
                     // Skalar tingkat modul yang tipenya berganti.
                     lain if super::infer::skalar_global_bentrok(self, &v.name, lain) =>
                         JrgType::Any,
+                    lain @ JrgType::Dict(_) => super::infer::dict_global_ditulis(self, &v.name, lain)
+                        .unwrap_or_else(|| lain.clone()),
                     lain => lain.clone(),
                 },
             };
@@ -386,6 +429,7 @@ impl Codegen {
 
     pub fn emit_void_return(&mut self) {
         if self.terminated { return; }
+        self.pernah_kembali = true;
         if self.is_main_fn {
             if self.lompat_ke_tunda(Some("i32 0")) { return; }
             self.tunggu_goroutine();
@@ -513,16 +557,36 @@ impl Codegen {
     /// bukan yang dipakai bersama closure, bukan `self` yang menunjuk milik pemanggil.
     pub(crate) fn akar_lokal_polos(&self, e: &Expr) -> bool {
         let Some(n) = Self::nama_akar(e) else { return false };
-        self.lookup_local(n).is_some() && !self.tangkapan.contains(n) && !self.tangkap_masuk.contains(n)
+        // Lokal yang naik ke kotak cuma karena fungsinya punya closure, tapi tidak disebut closure mana pun,
+        // tetap milik fungsi ini saja (seperti `kanan_bisa_menulis`): dulu argumennya disalin tiap panggilan.
+        let ditangkap = self.tangkapan.contains(n) && self.ditangkap_closure.contains(n);
+        self.lookup_local(n).is_some() && !ditangkap && !self.tangkap_masuk.contains(n)
             && !(n == "self" && self.self_dipinjam)
     }
 
     pub fn emit_return(&mut self, v: &Val, ret_ty: &JrgType) {
         if self.terminated { return; }
+        self.pernah_kembali = true;
         if self.is_main_fn {
-            if *ret_ty == JrgType::Unit {
+            if let Some(h) = self.main_pulang_opsi(v) {
+                if let Err(e) = h { self.errors.push(e); }
+            } else if *ret_ty == JrgType::Unit {
                 self.emit_void_return();
+            } else if !v.ty.is_int() {
+                if !matches!(v.ty, JrgType::Never) {
+                    self.errors.push(crate::host::pesan_main_bukan_kode(&v.ty.nama_typeof()));
+                }
+                self.terminate("unreachable".to_string());
             } else {
+                // Aturan `exit`: di luar 0–255 gagal saat jalan, bukan dipotong 8 bit oleh OS.
+                let w = self.coerce_longgar(v, &JrgType::I64);
+                let (luar, ok, gagal) = (self.fresh("mkl."), self.fresh_label("mk.ok."), self.fresh_label("mk.luar."));
+                self.emit(format!("{} = icmp ugt i64 {}, 255", luar, w.text));
+                self.terminate(format!("br i1 {}, label %{}, label %{}", luar, gagal, ok));
+                self.start_block(gagal);
+                let pesan = crate::host::pesan_main_kode_luar(super::codegen_konversi::PENANDA);
+                self.panik_sisip(&pesan, &super::codegen_konversi::Cetak::Bulat(v.clone()));
+                self.start_block(ok);
                 let exit_code = self.coerce_longgar(v, &JrgType::I32);
                 let sm = format!("i32 {}", exit_code.text);
                 if self.lompat_ke_tunda(Some(&sm)) { return; }
@@ -600,11 +664,17 @@ impl Codegen {
         let sebelum = salinan.errors.len();
         let jalan = salinan.codegen_function(&decl.name, decl, subst, mangled, self_ty.cloned(), arity);
         let galat = jalan.err().or_else(|| salinan.errors.get(sebelum).cloned());
+        // Diturunkan bersih tanpa satu `ret` pun: tiap jalannya panik (mis. cabang `typeof` yang pasti).
+        if galat.is_none() && salinan.hasil_duga.is_none() && !salinan.pernah_kembali {
+            self.fn_tak_kembali.insert(mangled.to_string());
+        }
         let mut hasil = salinan.hasil_duga.take().filter(|t| !Self::memuat_never(t));
-        // `return Err(..)` di satu cabang dan `return Ok(..)` di cabang lain: dua separuh itu
-        // bersama-sama menyebut `Result<T, E>` yang tidak ditulis satu pun dari keduanya.
+        // `return Err(..)` (atau `?`) di satu cabang dan `return Ok(..)` di cabang lain: dua separuh itu
+        // bersama-sama menyebut `Result<T, E>`. Separuh yang tidak terlihat bertag, seperti `Ok(..)` biasa.
         if hasil.is_none() {
-            if let (Some(t), Some(e)) = salinan.separuh_duga.clone() {
+            let (t, e) = salinan.separuh_duga.clone();
+            if t.is_some() || e.is_some() {
+                let (t, e) = (t.unwrap_or(JrgType::Any), e.unwrap_or(JrgType::Any));
                 hasil = Some(JrgType::Enum(salinan.instantiate_result(&t, &e)));
             }
         }
@@ -614,6 +684,7 @@ impl Codegen {
         // Instans struct generik yang lahir di salinan ikut pulang, dengan alasan yang sama.
         for (k, v) in &salinan.types.structs { self.types.structs.entry(k.clone()).or_insert_with(|| v.clone()); }
         for (k, v) in &salinan.struct_instans { self.struct_instans.entry(k.clone()).or_insert_with(|| v.clone()); }
+        for (k, v) in &salinan.enum_instans { self.enum_instans.entry(k.clone()).or_insert_with(|| v.clone()); }
         for n in &salinan.types.emit_order {
             if !self.types.emit_order.contains(n) { self.types.emit_order.push(n.clone()); }
         }
@@ -621,6 +692,7 @@ impl Codegen {
         for (k, v) in &salinan.result_args { self.result_args.entry(k.clone()).or_insert_with(|| v.clone()); }
         for (k, v) in salinan.cache_duga { if v.is_some() { self.cache_duga.entry(k).or_insert(v); } }
         for (k, v) in salinan.galat_duga { self.galat_duga.entry(k).or_insert(v); }
+        self.fn_tak_kembali.extend(salinan.fn_tak_kembali);
         match galat {
             Some(g) if hasil.is_none() && !g.contains("butuh anotasi") => { self.galat_duga.insert(mangled.to_string(), g); }
             _ => {}
@@ -715,6 +787,13 @@ impl Codegen {
                 let mut args = Vec::with_capacity(nt.args.len());
                 for a in &nt.args { args.push(self.resolve_type_with_subst(a, subst)?); }
                 Ok(JrgType::Struct(self.instantiate_struct(&nt.name, &args)?))
+            }
+            TypeExpr::Named(nt) if !subst.contains_key(&nt.name) && self.param_enum(&nt.name).is_some() => {
+                let n = self.param_enum(&nt.name).map(|p| p.len()).unwrap_or(0);
+                let mut args = Vec::with_capacity(n);
+                for a in &nt.args { args.push(self.resolve_type_with_subst(a, subst)?); }
+                if nt.args.is_empty() { args = vec![JrgType::Any; n]; }
+                Ok(JrgType::Enum(self.instantiate_enum(&nt.name, &args)?))
             }
             // Ditulis tanpa parameter (`[]Adegan`): instans bertag, didaftarkan juga di sini.
             TypeExpr::Named(nt) if nt.args.is_empty() && !subst.contains_key(&nt.name)

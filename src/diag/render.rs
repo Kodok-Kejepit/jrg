@@ -191,7 +191,12 @@ impl Diagnostic {
                 loc.file_name, loc.line_no, loc.col
             );
             let _ = write!(out, "\n{pad} {biru}|{reset}");
-            let _ = write!(out, "\n{biru}{}{reset} {biru}|{reset} {}", loc.line_no, loc.line_text);
+            // Pengubah arah teks dicetak sebagai `\u{FFFD}` (selebar satu kolom, caret tetap tepat):
+            // mentah, ia membalik tampilan kutipan itu sendiri di terminal (Trojan Source).
+            let teks: std::borrow::Cow<str> = if loc.line_text.chars().any(pengubah_arah) {
+                loc.line_text.chars().map(|c| if pengubah_arah(c) { '\u{FFFD}' } else { c }).collect::<String>().into()
+            } else { loc.line_text.into() };
+            let _ = write!(out, "\n{biru}{}{reset} {biru}|{reset} {}", loc.line_no, teks);
 
             // Kolom di-hitung per karakter, jadi indentasi caret juga
             // harus per karakter — bukan per byte — supaya baris yang
@@ -339,4 +344,9 @@ pub(crate) fn lebar_terminal() -> usize {
         }
     }
     80
+}
+
+/// Karakter kendali arah teks (U+202A–U+202E, U+2066–U+2069).
+fn pengubah_arah(c: char) -> bool {
+    matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
 }

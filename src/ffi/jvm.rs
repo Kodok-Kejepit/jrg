@@ -327,7 +327,7 @@ unsafe fn simpan_objek(env: Env, lokal: *mut c_void, kelas: &str) -> Result<u64,
 fn handle_objek(id: u64, kelas: &str) -> Value {
     let mut f: HashMap<String, Value> = HashMap::new();
     f.insert("id".to_string(), Value::Int(id as i128));
-    f.insert("kelas".to_string(), Value::Str(kelas.to_string()));
+    f.insert("kelas".to_string(), Value::Str(std::sync::Arc::new(kelas.to_string())));
     Value::Struct { name: "JavaObj".to_string(), fields: f.into() }
 }
 
@@ -649,7 +649,7 @@ unsafe fn panggil_menurut_return(
             // `""`, yang akan menyamarkan "tidak ada" jadi "kosong".
             let s = ambil_string(env, o);
             hapus_lokal(env, o);
-            match s { Some(t) => Value::Str(t), None => Value::Nil }
+            match s { Some(t) => Value::Str(std::sync::Arc::new(t)), None => Value::Nil }
         }
         lain => return Err(format!(
             "tipe return `{}` belum didukung — yang bisa: Z B C S I J F D V dan \
@@ -805,7 +805,7 @@ unsafe fn panggil_instance(
             let o = panggil!(idx::CALL_OBJECT_METHOD_A, *mut c_void);
             let s = ambil_string(env, o);
             hapus_lokal(env, o);
-            match s { Some(t) => Value::Str(t), None => Value::Nil }
+            match s { Some(t) => Value::Str(std::sync::Arc::new(t)), None => Value::Nil }
         }
         lain if lain.starts_with('L') && lain.ends_with(';') => {
             // Objek lain: dipegang sebagai handle, bukan di-stringify —
@@ -899,7 +899,7 @@ unsafe fn baca_field(
             let o = baca!(idx::GET_STATIC_OBJECT_FIELD, idx::GET_OBJECT_FIELD, *mut c_void);
             let s = ambil_string(env, o);
             hapus_lokal(env, o);
-            match s { Some(t) => Value::Str(t), None => Value::Nil }
+            match s { Some(t) => Value::Str(std::sync::Arc::new(t)), None => Value::Nil }
         }
         lain if lain.starts_with('L') && lain.ends_with(';') => {
             let o = baca!(idx::GET_STATIC_OBJECT_FIELD, idx::GET_OBJECT_FIELD, *mut c_void);
@@ -936,7 +936,7 @@ use crate::interpreter::{err_value, ok_value};
 
 fn teks(v: &Value, nama: &str, ke: usize) -> Result<String, String> {
     match v {
-        Value::Str(s) => Ok(s.clone()),
+        Value::Str(s) => Ok(String::clone(&s.clone())),
         lain => Err(format!(
             "{}: argumen ke-{} harus string, dapat `{}`", nama, ke + 1, lain.type_name())),
     }
@@ -988,7 +988,7 @@ pub fn b_mulai(a: &[Value]) -> Result<Value, String> {
 pub fn b_versi(a: &[Value]) -> Result<Value, String> {
     tanpa_argumen(a, "jvm::versi")?;
     match versi(&[]) {
-        Ok(v) => Ok(ok_value(Value::Str(v))),
+        Ok(v) => Ok(ok_value(Value::Str(std::sync::Arc::new(v)))),
         Err(e) => Ok(err_value(e)),
     }
 }

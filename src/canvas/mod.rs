@@ -4,7 +4,7 @@
 #![allow(dead_code, unused_imports)]
 
 use std::sync::{Arc, Mutex};
-use std::time::Instant;
+use std::time::Duration;
 use std::collections::HashSet;
 
 // ---------------------------------------------------------------------------
@@ -503,7 +503,7 @@ pub struct CanvasInner {
     /// Jari yang menempel bingkai ini (koordinat kanvas); di desktop: tetikus kiri.
     pub sentuhan:   Vec<(f32, f32)>,
     pub frame_idx:  u64,
-    pub last_tick:  Instant,
+    pub last_tick:  Duration,
     pub delta_sec:  f64,
     pub fps:        f64,
     pub headless_export_path: Option<String>,
@@ -539,7 +539,7 @@ impl CanvasInner {
             mouse_btns: [false; 3],
             sentuhan: Vec::new(),
             frame_idx: 0,
-            last_tick: Instant::now(),
+            last_tick: crate::host::monoton(),
             delta_sec: 0.0,
             fps: 0.0,
             headless_export_path: None,
@@ -594,7 +594,7 @@ pub fn canvas_baru(args: &[crate::interpreter::Value]) -> Result<CanvasHandle, S
     let ukuran = [asli[0] as usize, asli[1] as usize];
     // Judul adalah teks yang DITAMPILKAN, jadi nilai apa pun dirender.
     let judul = match args.get(2) {
-        Some(Value::Str(s)) => s.clone(),
+        Some(Value::Str(s)) => String::clone(s),
         Some(v) => format!("{}", v),
         None => "JRG Canvas".to_string(),
     };
@@ -682,8 +682,8 @@ pub fn canvas_update(handle: &CanvasHandle) -> CanvasResult<bool> {
     let mut inner = handle.lock().map_err(|e| format!("canvas lock: {}", e))?;
     if !inner.is_open { return Ok(false); }
 
-    let now = Instant::now();
-    let elapsed = now.duration_since(inner.last_tick).as_secs_f64();
+    let now = crate::host::monoton();
+    let elapsed = now.saturating_sub(inner.last_tick).as_secs_f64();
     inner.delta_sec = elapsed;
     inner.fps = if elapsed > 0.0 { 1.0 / elapsed } else { 0.0 };
     inner.last_tick = now;
@@ -967,7 +967,7 @@ pub fn dispatch_canvas_method(
     };
     let get_str = |idx: usize| -> String {
         match args.get(idx) {
-            Some(Value::Str(s)) => s.clone(),
+            Some(Value::Str(s)) => String::clone(&s.clone()),
             Some(v)             => format!("{}", v),
             None                => String::new(),
         }
@@ -975,7 +975,7 @@ pub fn dispatch_canvas_method(
     // Sebuah PATH menuntut string, dan tidak boleh jatuh ke `Display`.
     let get_path = |idx: usize, metode: &str| -> Result<String, Signal> {
         match args.get(idx) {
-            Some(Value::Str(s)) => Ok(s.clone()),
+            Some(Value::Str(s)) => Ok(String::clone(&s.clone())),
             Some(v) => Err(Signal::RuntimeError(RuntimeError::new(format!(
                 "{}: path harus string, dapat `{}` — sebuah path tidak bisa \
                  diturunkan dari rendering sebuah nilai", metode, v.type_name())))),

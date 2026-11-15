@@ -14,8 +14,8 @@ impl Codegen {
     /// `o.map(f)`, `r.map_err(f)`, `o.and_then(f)`: diturunkan ke `match` yang sama dengan tulisan
     /// tangannya. Penerima sudah dievaluasi, lalu fungsinya — urutan sebuah pemanggilan method.
     fn turunkan_peta(&mut self, optr: &str, ty: JrgType, method: &str, f: &Expr, opsi: bool,
-                     span: Span) -> Result<Val, String> {
-        let penerima = self.lokal_sementara(optr.to_string(), ty, span);
+                     span: Span, harap: Option<&JrgType>) -> Result<Val, String> {
+        let penerima = self.lokal_sementara(optr.to_string(), ty.clone(), span);
         let (nf, nv) = (format!("$petaf{}", self.penerima_lapis), format!("$petav{}", self.penerima_lapis));
         let id = |n: &str| Expr::Ident(n.to_string(), span);
         let pola = |varian: &str, isi: bool| if isi {
@@ -39,7 +39,32 @@ impl Codegen {
             init: Box::new(f.clone()), lifetime: None, span });
         let blok = Expr::Block(Block { stmts: vec![ikat],
             tail: Some(Box::new(Expr::Match { scrutinee: Box::new(penerima), arms, span })), span });
-        self.codegen_expr(&blok, None)
+        // Tipe yang diminta tempatnya (`return r.map_err(..)`) memberi separuh yang tidak ditulis lengannya.
+        let harap = harap.filter(|t| matches!(t, JrgType::Enum(n)
+            if if opsi { self.option_args.contains_key(n) } else { self.result_args.contains_key(n) })).cloned();
+        // Tanpa itu, tipenya disusun dari penerima dan hasil closure: `Ok`/`Err` buatan di lengan
+        // tanpa petunjuk dibaca penduga sebagai separuh hasil FUNGSI pemanggilnya.
+        let harap = harap.or_else(|| self.tipe_peta(&ty, method, f, opsi));
+        self.codegen_expr(&blok, harap.as_ref())
+    }
+
+    /// Tipe `r.map(f)`/`r.map_err(f)`/`o.map(f)` dari tipe penerima dan hasil closure `f`, kalau terbaca.
+    fn tipe_peta(&mut self, ty: &JrgType, method: &str, f: &Expr, opsi: bool) -> Option<JrgType> {
+        let JrgType::Enum(n) = ty else { return None };
+        let Expr::Closure { params, body, span, .. } = f else { return None };
+        if params.len() != 1 || method == "and_then" { return None; }
+        let (t, e) = if opsi { (self.option_args.get(n)?.clone(), JrgType::Unit) } else { self.result_args.get(n)?.clone() };
+        let mut lokal = super::infer::Lokal::new();
+        for scope in &self.locals { for (k, (_, tk)) in scope { lokal.insert(k.clone(), tk.clone()); } }
+        let nama = super::infer::pola_nama(&params[0].pattern)?;
+        lokal.insert(nama, if method == "map_err" { e.clone() } else { t.clone() });
+        let r = self.tipe_ekspresi(&super::infer_bentrok::pembungkus_ekor(body, *span), &lokal, &Default::default(), "")?;
+        if matches!(r, JrgType::Never | JrgType::Unit) { return None; }
+        Some(JrgType::Enum(match (opsi, method) {
+            (true, _) => self.instantiate_option(&r),
+            (false, "map_err") => self.instantiate_result(&t, &r),
+            _ => self.instantiate_result(&r, &e),
+        }))
     }
 
     /// `Option<T>` → `Option<nilai bertag>`: `Some(x)` jadi `Some(kotak(x))`, `None` tetap `None`.
@@ -70,6 +95,33 @@ impl Codegen {
         Some(self.load_place(&slot, &tuju_ty))
     }
 
+    /// `Option<nilai bertag>` → `Option<T>`: `Some(kotak)` jadi `Some(isi)` (tag diperiksa saat jalan).
+    pub(crate) fn buka_isi_opsi(&mut self, v: &Val, isi: &JrgType, sasaran: &str) -> Option<Val> {
+        let asal_l = self.types.enums.get(match &v.ty { JrgType::Enum(n) => n, _ => return None })?.clone();
+        let tuju_l = self.types.enums.get(sasaran)?.clone();
+        let (vs_asal, vs_tuju) = (asal_l.variant("Some")?.clone(), tuju_l.variant("Some")?.clone());
+        let tuju_ty = JrgType::Enum(sasaran.to_string());
+        let tempat = self.spill_to_place(v);
+        let slot = self.alloca_typed("bio.", &tuju_ty);
+        let tag = self.get_tag(&tempat, &v.ty);
+        let ada = self.fresh("bioa.");
+        self.emit(format!("{} = icmp eq i32 {}, {}", ada, tag, vs_asal.tag));
+        let (l_ada, l_tidak, l_end) = (self.fresh_label("bio.ada."), self.fresh_label("bio.tidak."), self.fresh_label("bio.end."));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", ada, l_ada, l_tidak));
+        self.start_block(l_ada);
+        let k = self.get_payload_field(&tempat, &v.ty, &vs_asal.payload.as_llvm_struct(), 0, &JrgType::Any);
+        let x = self.buka_terperiksa(&k, isi)?;
+        let some = self.build_enum_value(sasaran, &tuju_l, &vs_tuju, &[x]).ok()?;
+        self.emit(format!("store {} {}, ptr {}", tuju_ty.llvm_ty(), some.text, slot));
+        self.terminate(format!("br label %{}", l_end));
+        self.start_block(l_tidak);
+        let none = self.build_enum_unit_variant(sasaran, "None").ok()?;
+        self.emit(format!("store {} {}, ptr {}", tuju_ty.llvm_ty(), none.text, slot));
+        self.terminate(format!("br label %{}", l_end));
+        self.start_block(l_end);
+        Some(self.load_place(&slot, &tuju_ty))
+    }
+
     pub(crate) fn get_tag(&mut self, place: &str, ty: &JrgType) -> String {
         let tp = self.fresh("mtag.");
         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 0", tp, ty.llvm_ty(), place));
@@ -86,7 +138,15 @@ impl Codegen {
         self.load_place(&fp, field_ty)
     }
 
-    pub(crate) fn codegen_option_method(&mut self, optr: &str, ename: &str, t: &JrgType, method: &str, args: &[Expr], span: Span) -> Result<Val, String> {
+    /// Kalimat acuan untuk method yang memang bukan milik `Option`/`Result`; `None` kalau acuannya punya.
+    fn pesan_opsi_tak_punya(tipe: &str, method: &str) -> Option<String> {
+        let calon = crate::interpreter::calon_method_enum(tipe);
+        if calon.contains(&method) { return None; }
+        let saran = crate::diag::saran_nama_terdekat(method, calon.iter().copied());
+        Some(crate::interpreter::pesan_method_tak_ada(&format!("enum:{}", tipe), method, "", saran.as_deref()))
+    }
+
+    pub(crate) fn codegen_option_method(&mut self, optr: &str, ename: &str, t: &JrgType, method: &str, args: &[Expr], span: Span, harap: Option<&JrgType>) -> Result<Val, String> {
         let ety = JrgType::Enum(ename.to_string());
         let payload_struct = format!("{{ {} }}", t.llvm_ty());
         match method {
@@ -163,12 +223,15 @@ impl Codegen {
                 Ok(self.load_place(&slot, t))
             }
             "ok" if args.is_empty() => Ok(self.load_place(optr, &ety)),
-            "map" | "and_then" if args.len() == 1 => self.turunkan_peta(optr, ety, method, &args[0], true, span),
-            _ => Err(format!("[{}:{}] Option method `{}` belum didukung backend LLVM v1", span.lo.0, span.hi.0, method)),
+            "map" | "and_then" if args.len() == 1 => self.turunkan_peta(optr, ety, method, &args[0], true, span, harap),
+            _ => match Self::pesan_opsi_tak_punya("Option", method) {
+                Some(p) => self.gagal_sesudah_argumen(&p, args),
+                None => Err(format!("[{}:{}] Option method `{}` belum didukung backend LLVM v1", span.lo.0, span.hi.0, method)),
+            },
         }
     }
 
-    pub(crate) fn codegen_result_method(&mut self, optr: &str, ename: &str, t: &JrgType, e: &JrgType, method: &str, args: &[Expr], span: Span) -> Result<Val, String> {
+    pub(crate) fn codegen_result_method(&mut self, optr: &str, ename: &str, t: &JrgType, e: &JrgType, method: &str, args: &[Expr], span: Span, harap: Option<&JrgType>) -> Result<Val, String> {
         let ety = JrgType::Enum(ename.to_string());
         let ok_struct = format!("{{ {} }}", t.llvm_ty());
         let err_struct = format!("{{ {} }}", e.llvm_ty());
@@ -292,8 +355,11 @@ impl Codegen {
                 self.start_block(usai);
                 Ok(self.load_place(&slot, &oty))
             }
-            "map" | "map_err" | "and_then" if args.len() == 1 => self.turunkan_peta(optr, ety, method, &args[0], false, span),
-            _ => Err(format!("[{}:{}] Result method `{}` belum didukung backend LLVM v1", span.lo.0, span.hi.0, method)),
+            "map" | "map_err" | "and_then" if args.len() == 1 => self.turunkan_peta(optr, ety, method, &args[0], false, span, harap),
+            _ => match Self::pesan_opsi_tak_punya("Result", method) {
+                Some(p) => self.gagal_sesudah_argumen(&p, args),
+                None => Err(format!("[{}:{}] Result method `{}` belum didukung backend LLVM v1", span.lo.0, span.hi.0, method)),
+            },
         }
     }
 
@@ -315,6 +381,7 @@ impl Codegen {
             let sv = self.load_place(optr, &JrgType::Str);
             let (sp, sl) = self.split_str(&sv);
             let av = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
+            let av = if av.ty == JrgType::Rune { self.teks_atau_rune(&av) } else { av };
             if av.ty != JrgType::Str {
                 return Err(super::galat::tandai(span, format!(
                     "`{}` pada string butuh argumen string, diberi `{}`",
@@ -368,7 +435,8 @@ impl Codegen {
                     Ok(Val { text: b, ty: JrgType::Slice(Box::new(JrgType::Str)) })
                 }
                 "replace" => {
-                    let bv = self.codegen_expr(&args[1], Some(&JrgType::Str))?;
+                    let ke = self.teks_tampilan(&args[1], span);
+                    let bv = self.codegen_expr(&ke, Some(&JrgType::Str))?;
                     if bv.ty != JrgType::Str {
                         return Err(super::galat::tandai(span, format!(
                             "`replace` butuh argumen kedua string, diberi `{}`",

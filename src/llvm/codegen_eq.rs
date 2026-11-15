@@ -105,7 +105,13 @@ impl Codegen {
         let hasil = self.alloca_raw("bnd.", "i32", Some(4));
         self.emit(format!("store i32 0, ptr {}", hasil));
         let l_end = self.fresh_label("bnd.end.");
-        self.banding_ke(&hasil, &l_end, ty, &a.text, &b.text, nol)?;
+        // Dipanggil dari dalam `arr::sort` dkk., yang sudah memasang situsnya: galatnya memakai situs itu.
+        let lama = std::mem::replace(&mut self.urut_untuk_sort, Some(ty.nama_typeof()));
+        let warisi = std::mem::replace(&mut self.warisi_situs, true);
+        let r = self.banding_ke(&hasil, &l_end, ty, &a.text, &b.text, nol);
+        self.urut_untuk_sort = lama;
+        self.warisi_situs = warisi;
+        r?;
         if !self.is_terminated() { self.terminate(format!("br label %{}", l_end)); }
         self.start_block(l_end);
         let r = self.fresh("bndr.");
@@ -212,6 +218,29 @@ impl Codegen {
                 putus(self, lt, gt);
                 Ok(())
             }
+            // Nilai bertag (juga array bertag, leksikografis): `jrg_banding_any` di runtime C.
+            JrgType::Any => {
+                // Pengurutan menyebut nilai puncaknya, operator `<` menyebut tipe daunnya — seperti acuan.
+                // Pengurutan menyebut tipe elemen PUNCAK yang diurutkan (diketahui saat kompilasi), operator
+                // `<` menyebut tipe daunnya — seperti acuan.
+                let pola = match &self.urut_untuk_sort {
+                    Some(t) => crate::interpreter::pesan_urut_tak_sebanding("arr::sort", t, t),
+                    None => crate::interpreter::pesan_banding("\u{1}", "\u{2}"),
+                };
+                let daun = if self.urut_untuk_sort.is_some() { 0 } else { 1 };
+                let pv = self.intern_string(&pola);
+                let (pp, pl) = self.split_str(&pv);
+                self.ensure_extern("declare i32 @jrg_banding_any(ptr, ptr, ptr, i64, i32)", "jrg_banding_any");
+                let (ta, tb) = (self.alloca_typed("bka.", &JrgType::Any), self.alloca_typed("bkb.", &JrgType::Any));
+                self.emit(format!("store %JrgAny {}, ptr {}", l, ta));
+                self.emit(format!("store %JrgAny {}, ptr {}", r, tb));
+                let (h, lt, gt) = (self.fresh("bkh."), self.fresh("bkl."), self.fresh("bkg."));
+                self.emit(format!("{} = call i32 @jrg_banding_any(ptr {}, ptr {}, ptr {}, i64 {}, i32 {})", h, ta, tb, pp, pl, daun));
+                self.emit(format!("{} = icmp slt i32 {}, 0", lt, h));
+                self.emit(format!("{} = icmp sgt i32 {}, 0", gt, h));
+                putus(self, lt, gt);
+                Ok(())
+            }
             lain => Err(super::galat::tandai(span, format!(
                 "backend LLVM belum bisa mengurutkan tipe `{}` — cuma `==` dan `!=`", lain.display_name()))),
         }
@@ -235,6 +264,15 @@ impl Codegen {
         rval: &str,
         span: Span,
     ) -> Result<(), String> {
+        // Field ber-kotak: yang dibandingkan isinya, bukan alamatnya.
+        if let JrgType::Kotak(t) = ty {
+            let (l, r) = (self.load_place(lval, t).text, self.load_place(rval, t).text);
+            return self.kumpul_sama(slot, t, &l, &r, span);
+        }
+        if self.lewat_bantu(ty) {
+            self.sama_lewat_bantu(slot, ty, lval, rval);
+            return Ok(());
+        }
         match ty {
             // `() == ()` selalu benar, dan tidak ada bit apa pun untuk dibandingkan.
             JrgType::Unit | JrgType::Nil => Ok(()),
@@ -401,11 +439,26 @@ impl Codegen {
                 self.emit(format!("store i8 0, ptr {}", slot));
                 self.terminate(format!("br label %{}", l_gab));
 
+                // Array/dict: dijelajahi `jrg_sama_lukis` (C, tanpa rekursi), daunnya `@jrg_sama_daun`.
                 self.start_block(l_tolak);
-                self.panik(
-                    "membandingkan array/dict yang tersimpan di tempat campur tipe belum didukung backend --emit-llvm");
-                // `panik` sudah menutup bloknya dengan `unreachable`, jadi tidak
-                // ada cabang balik ke blok gabung dari sini.
+                if !self.is_fn_emitted_or_queued("jrg_sama_daun") {
+                    self.tandai_fn_terpakai("jrg_sama_daun");
+                    self.antre_fn(super::codegen::KerjaFn::SamaDaun);
+                }
+                self.ensure_extern("declare i8 @jrg_sama_lukis(ptr, ptr, ptr, ptr, i64)", "jrg_sama_lukis");
+                let pesan = self.intern_string(
+                    "membandingkan array/dict berisi nilai buram dari tempat campur tipe belum didukung backend --emit-llvm");
+                let (pp, pl) = (self.fresh("aqpp."), self.fresh("aqpl."));
+                self.emit(format!("{} = extractvalue %JrgStr {}, 0", pp, pesan.text));
+                self.emit(format!("{} = extractvalue %JrgStr {}, 1", pl, pesan.text));
+                let (ta, tb) = (self.alloca_typed("aqla.", &JrgType::Any), self.alloca_typed("aqlb.", &JrgType::Any));
+                self.emit(format!("store %JrgAny {}, ptr {}", lval, ta));
+                self.emit(format!("store %JrgAny {}, ptr {}", rval, tb));
+                let r = self.fresh("aqlr.");
+                self.emit(format!("{} = call i8 @jrg_sama_lukis(ptr {}, ptr {}, ptr @jrg_sama_daun, ptr {}, i64 {})",
+                                  r, ta, tb, pp, pl));
+                self.dan_ke_slot(slot, &Val { text: r, ty: JrgType::Bool });
+                self.terminate(format!("br label %{}", l_gab));
 
                 self.start_block(l_gab);
                 Ok(())
@@ -465,13 +518,11 @@ impl Codegen {
                     for (i, fty) in v.payload.field_types().iter().enumerate() {
                         let lfp = self.fresh("eqlf.");
                         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 {}", lfp, ps, lb, i));
-                        let lf = self.fresh("eqlfv.");
-                        self.emit(format!("{} = load {}, ptr {}", lf, fty.llvm_ty(), lfp));
+                        let lf = self.load_place(&lfp, fty).text;
                         let rfp = self.fresh("eqrf.");
                         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 {}", rfp, ps, rb, i));
-                        let rf = self.fresh("eqrfv.");
-                        self.emit(format!("{} = load {}, ptr {}", rf, fty.llvm_ty(), rfp));
-                        self.kumpul_sama(slot, fty, &lf, &rf, span)?;
+                        let rf = self.load_place(&rfp, fty).text;
+                        self.kumpul_sama(slot, &fty.tanpa_kotak(), &lf, &rf, span)?;
                     }
                     self.terminate(format!("br label %{}", gabung_lbl));
                 }

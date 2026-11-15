@@ -4,9 +4,9 @@
 
 use std::path::{Path, PathBuf};
 
-use jrgc::diag::{Diagnostic, SourceMap};
-use jrgc::lexer::{SourceFile, Span, Token, TokenKind};
-use jrgc::parser::{Item, parse};
+use crate::diag::{Diagnostic, SourceMap};
+use crate::lexer::{SourceFile, Span, Token, TokenKind};
+use crate::parser::{Item, parse};
 
 use super::dependensi::{graf_dependensi_dev, kumpul_jrg, path_dependensi};
 
@@ -16,7 +16,7 @@ struct Hitung { galat: usize, peringatan: usize }
 
 pub(crate) fn cmd_lint(ketat: bool) -> Result<(), String> {
     if let Some((m, r, akar)) = super::bahasa::proyek_kini()? { return super::bahasa::lint(&m, r, &akar); }
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !akar.join("jrgm.toml").is_file() {
         return Err("jrgm lint: tidak ada `jrgm.toml` di sini — jalankan dari akar proyek".into());
     }
@@ -45,23 +45,23 @@ pub(crate) fn cmd_lint(ketat: bool) -> Result<(), String> {
 
 fn periksa_berkas(f: &Path, jalur: &[PathBuf], entri: bool, berkas_uji: bool) -> Result<Hitung, String> {
     let src = std::fs::read_to_string(f)
-        .map_err(|e| format!("jrgm lint: tidak bisa baca `{}`: {}", f.display(), jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("jrgm lint: tidak bisa baca `{}`: {}", f.display(), crate::host::galat_io(&e)))?;
     let sf = SourceFile { id: 0, name: f.display().to_string(), src: src.clone() };
     let mut peta = SourceMap::with_file(sf.clone());
     let mut h = Hitung::default();
-    let Some(token) = jrgc::pipa::lex_dilaporkan(&sf, &peta) else { h.galat += 1; return Ok(h) };
+    let Some(token) = crate::pipa::lex_dilaporkan(&sf, &peta) else { h.galat += 1; return Ok(h) };
     let (ast, galat) = parse(token.clone(), true);
     if !galat.is_empty() {
-        jrgc::pipa::laporkan_galat_parse(&galat, true, &peta);
+        crate::pipa::laporkan_galat_parse(&galat, true, &peta);
         h.galat += galat.len();
         return Ok(h);
     }
     let mut cari = vec![f.parent().map(Path::to_path_buf).unwrap_or_default()];
     cari.extend(jalur.iter().cloned());
-    if let Err(gs) = jrgc::vm::periksa_dengan_paths(&ast, cari) {
+    if let Err(gs) = crate::vm::periksa_dengan_paths(&ast, cari) {
         // Galat di modul lain dilaporkan saat modul itu sendiri diperiksa, bukan dua kali.
         for g in gs.iter().filter(|g| g.span.map_or(true, |s| s.file_id == 0)) {
-            jrgc::diag::laporkan_vm(&mut peta, g);
+            crate::diag::laporkan_vm(&mut peta, g);
             h.galat += 1;
         }
     }
@@ -70,7 +70,7 @@ fn periksa_berkas(f: &Path, jalur: &[PathBuf], entri: bool, berkas_uji: bool) ->
         h.peringatan += 1;
     };
     for imp in &ast.imports {
-        let alias = imp.alias.clone().unwrap_or_else(|| jrgc::module::ModuleResolver::module_name(&imp.path));
+        let alias = imp.alias.clone().unwrap_or_else(|| crate::module::ModuleResolver::module_name(&imp.path));
         if !dipakai_sebagai_awalan(&token, &alias) {
             peringatan(format!("`import \"{}\"` tidak dipakai — tidak ada `{}::` di berkas ini", imp.path, alias),
                 Some(imp.span), "hapus baris import-nya");
@@ -79,14 +79,14 @@ fn periksa_berkas(f: &Path, jalur: &[PathBuf], entri: bool, berkas_uji: bool) ->
     for it in &ast.items {
         let Item::Fn(d) = it else { continue };
         let privat = d.name.starts_with('_');
-        let bebas = d.name == "main" || jrgc::uji::adalah_uji(&d.name);
+        let bebas = d.name == "main" || crate::uji::adalah_uji(&d.name);
         if bebas || !(privat || entri) { continue; }
         if sebutan(&token, &d.name) <= 1 {
             peringatan(format!("fungsi `{}` tidak pernah dipanggil", d.name), span_deklarasi(&token, &d.name),
                 if privat { "hapus, atau pakai" } else { "hapus, atau pindahkan ke modul yang memakainya" });
         }
     }
-    for (nama, span) in jrgc::parser::lokal_tak_dibaca(&ast) {
+    for (nama, span) in crate::parser::lokal_tak_dibaca(&ast) {
         peringatan(format!("`{}` diberi nilai tapi tidak pernah dibaca", nama), Some(span),
             &format!("hapus, atau beri awalan `_` (`_{}`) kalau memang sengaja", nama));
     }
@@ -95,11 +95,11 @@ fn periksa_berkas(f: &Path, jalur: &[PathBuf], entri: bool, berkas_uji: bool) ->
             (anotasi tidak mengubah nilai), dan ditolak `--emit-llvm`", n), Some(span),
             &format!("tulis `{}.0`", n));
     }
-    if berkas_uji && jrgc::uji::daftar_uji(&ast).is_empty() {
+    if berkas_uji && crate::uji::daftar_uji(&ast).is_empty() {
         peringatan(format!("{} tidak punya satu pun fungsi uji", f.display()), None,
             "`jrgm test` cuma menjalankan fungsi yang namanya diawali `test_` atau `uji_`");
     }
-    if matches!(jrgc::fmt::format_sumber(&sf), Ok(rapi) if rapi != src) {
+    if matches!(crate::fmt::format_sumber(&sf), Ok(rapi) if rapi != src) {
         peringatan(format!("{} belum rapi", f.display()), None, "jalankan `jrgm fmt`");
     }
     Ok(h)

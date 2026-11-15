@@ -28,6 +28,7 @@ impl Vm {
     /// Pengecekan jumlah argumen, dengan pesan yang menyebut penyebabnya —
     /// bukan sekadar "butuh N dapat M", karena dengan nilai default jumlah
     /// yang sah adalah sebuah RENTANG.
+    #[inline]
     pub(crate) fn periksa_arity(&self, func: &VmFunction, argc: usize, sp: Option<crate::lexer::Span>) -> VmResult<()> {
         // Parameter pengumpul menerima berapa pun sisanya.
         if !func.variadic && argc > func.arity as usize {
@@ -46,6 +47,7 @@ impl Vm {
 
     /// Kemas argumen sisa jadi satu array untuk parameter TERAKHIR.
     /// (Prolog default membaca [`diberi_tetap`], bukan hasil pengemasan ini.)
+    #[inline]
     pub(crate) fn kemas_variadic(&mut self, func: &VmFunction, argc: usize) -> usize {
         if !func.variadic || func.arity == 0 { return argc; }
         let tetap = func.arity as usize - 1;
@@ -87,16 +89,64 @@ impl Vm {
 
     /// Tolak rekursi yang tidak berujung SEBELUM stack habis.
     pub(crate) fn periksa_kedalaman(&self, nama: &str, sp: Option<crate::lexer::Span>) -> VmResult<()> {
-        const BATAS: usize = crate::interpreter::Interpreter::MAX_CALL_DEPTH;
+        // Bingkai VM di heap: batasnya sumber daya (`BINGKAI_MAKS`); rekursi Rust lewat callback dijaga
+        // sisa stack. Thread tanpa catatan puncak memakai batas hitungan interpreter.
+        let (menipis, batas) = match crate::interpreter::stack_menipis() {
+            Some(m) => (m, Self::BINGKAI_MAKS),
+            None => (false, crate::interpreter::Interpreter::MAX_CALL_DEPTH),
+        };
         // Dua bingkai dasar (skrip dan `main`) tidak dihitung acuan sebagai panggilan bersarang.
-        if self.frames.len() > BATAS + 1 {
-            return Err(VmError::at(
-                crate::interpreter::pesan_rekursi_dalam(nama, BATAS),
-                sp,
-            ));
+        if menipis || self.frames.len() > batas + 1 {
+            return Err(VmError::at(crate::interpreter::pesan_rekursi_dalam(nama), sp));
         }
         Ok(())
     }
+
+    /// `--jit`: bingkai yang baru didorong dijalankan kode native kalau fungsinya sudah panas.
+    #[inline]
+    fn jit_masuk(&mut self) -> VmResult<()> {
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if self.profil_jit && !self.profiling { return crate::jit::panggil::coba(self); }
+        Ok(())
+    }
+
+    /// Fungsi bawaan dengan argumennya: batas jumlah argumen, layanan khusus, hook tampilan builtin cetak.
+    /// Satu definisi untuk `call_value` dan jalur lambat JIT (`jit::lambat::bawaan`).
+    #[inline(always)]
+    pub(crate) fn panggil_native(
+        &mut self, f: super::value::VmNativeFn, mut args: Vec<VmValue>, sp: Option<crate::lexer::Span>, langsung: bool,
+    ) -> VmResult<VmValue> {
+        let argc = args.len();
+        // SATU pencarian per panggilan: batas argumen, layanan khusus, cetak.
+        let info = super::info_native::info(f);
+        if let Some(i) = info {
+            let (lebih, kurang) = (i.maks.filter(|m| argc > *m), i.min.filter(|m| argc < *m));
+            if lebih.is_some() || kurang.is_some() {
+                use crate::interpreter::arity as ar;
+                let nama = self.nama_ditulis(f, langsung).unwrap_or_else(|| i.kanonik.clone());
+                let pesan = match lebih {
+                    Some(m) => ar::pesan_kebanyakan(&nama, m, argc),
+                    None => ar::pesan_kurang(&nama, kurang.unwrap_or(0), i.maks, argc,
+                                             ar::tanda_tangan(&nama).or(i.tanda)),
+                };
+                return Err(VmError::at(pesan, sp));
+            }
+        }
+        // Builtin cetak menerima argumennya SESUDAH hook tampilan dijalankan — `def`
+        // memberi penunjuk fungsi biasa yang tidak bisa memanggil balik ke VM.
+        if let Some(hasil) = info.and_then(|i| i.khusus).and_then(|apa| self.coba_native_pemanggil(apa, &args)) {
+            return hasil.map_err(|e| if e.span.is_none() { VmError::at(e.msg, sp) } else { e });
+        }
+        if info.is_some_and(|i| i.cetak) {
+            // Error dari hook lahir tanpa span; span situs pemanggilanlah yang benar.
+            self.siapkan_argumen_cetak(&mut args)
+                .map_err(|e| if e.span.is_none() { VmError::at(e.msg, sp) } else { e })?;
+        }
+        f(&args).map_err(|e| VmError::at(crate::vm::value::perjelas_pesan_native(e, &args), sp))
+    }
+
+    /// Bingkai VM paling banyak di thread ber-stack besar.
+    pub(crate) const BINGKAI_MAKS: usize = 1_000_000;
 
     pub(crate) fn call_value(&mut self, callee: VmValue, argc: usize, fn_idx: usize, sp: Option<crate::lexer::Span>, langsung: bool) -> VmResult<()> {
         match callee {
@@ -104,64 +154,35 @@ impl Vm {
                 self.periksa_arity(&func, argc, sp)?;
                 self.periksa_penerima(&func, argc, fn_idx, sp)?;
                 self.periksa_kedalaman(&func.name, sp)?;
+                if self.profil_jit { if let Some(p) = &func.chunk.profil { p.catat_panggilan(); } }
                 if self.profiling { crate::profiler::enter(&func.name); }
                 let diberi = diberi_tetap(&func, argc);
                 let argc = self.kemas_variadic(&func, argc);
                 // Parameter bernilai default yang tidak diisi tetap harus
                 // punya slot di stack; prolog fungsinya yang mengisinya.
                 for _ in argc..func.arity as usize { self.push(VmValue::Nil); }
-                self.frames.push(CallFrame { func, ip: 0, slot: fn_idx, defers: Vec::new(), argc: diberi, closure: None });
-                Ok(())
+                self.dorong_bingkai(CallFrame { func, ip: 0, slot: fn_idx, defers: Vec::new(), argc: diberi, closure: None });
+                self.jit_masuk()
             }
             // Sama seperti Function, cuma frame-nya ikut membawa closure-nya
             // supaya `LoadUpval`/`StoreUpval` punya sel yang mau dibaca.
             VmValue::Closure(c) => {
                 self.periksa_arity(&c.func, argc, sp)?;
                 self.periksa_kedalaman(&c.func.name, sp)?;
+                if self.profil_jit { if let Some(p) = &c.func.chunk.profil { p.catat_panggilan(); } }
                 if self.profiling { crate::profiler::enter(&c.func.name); }
                 let diberi = diberi_tetap(&c.func, argc);
                 let argc = self.kemas_variadic(&c.func, argc);
                 for _ in argc..c.func.arity as usize { self.push(VmValue::Nil); }
                 let func = Arc::clone(&c.func);
-                self.frames.push(CallFrame { func, ip: 0, slot: fn_idx, defers: Vec::new(), argc: diberi, closure: Some(c) });
-                Ok(())
+                self.dorong_bingkai(CallFrame { func, ip: 0, slot: fn_idx, defers: Vec::new(), argc: diberi, closure: Some(c) });
+                self.jit_masuk()
             }
             VmValue::NativeFn(f) => {
-                // SATU pencarian per panggilan: batas argumen, layanan khusus, cetak.
-                let info = super::info_native::info(f);
-                if let Some(i) = info {
-                    let (lebih, kurang) = (i.maks.filter(|m| argc > *m), i.min.filter(|m| argc < *m));
-                    if lebih.is_some() || kurang.is_some() {
-                        use crate::interpreter::arity as ar;
-                        let nama = self.nama_ditulis(f, langsung).unwrap_or_else(|| i.kanonik.clone());
-                        let pesan = match lebih {
-                            Some(m) => ar::pesan_kebanyakan(&nama, m, argc),
-                            None => ar::pesan_kurang(&nama, kurang.unwrap_or(0), i.maks, argc,
-                                                     ar::tanda_tangan(&nama).or(i.tanda)),
-                        };
-                        return Err(VmError::at(pesan, sp));
-                    }
-                }
-                let start = fn_idx + 1;
-                let mut args: Vec<VmValue> = self.stack[start..].to_vec();
+                let args: Vec<VmValue> = self.stack[fn_idx + 1..].to_vec();
                 self.stack.truncate(fn_idx);
-                // Builtin cetak menerima argumennya SESUDAH hook tampilan dijalankan — `def`
-                // memberi penunjuk fungsi biasa yang tidak bisa memanggil balik ke VM, jadi …
-                if let Some(hasil) = info.and_then(|i| i.khusus).and_then(|apa| self.coba_native_pemanggil(apa, &args)) {
-                    let v = hasil.map_err(|e| if e.span.is_none() { VmError::at(e.msg, sp) } else { e })?;
-                    self.push(v);
-                    return Ok(());
-                }
-                if info.is_some_and(|i| i.cetak) {
-                    self.siapkan_argumen_cetak(&mut args)
-                        // Error dari hook lahir tanpa span (ia tidak tahu di
-                        // mana ia dipanggil); span situs pemanggilanlah yang
-                        // benar, dan tanpa ini diagnostiknya kehilangan caret.
-                        .map_err(|e| if e.span.is_none() { VmError::at(e.msg, sp) } else { e })?;
-                }
-                let result = f(&args).map_err(|e| VmError::at(
-                    crate::vm::value::perjelas_pesan_native(e, &args), sp))?;
-                self.push(result);
+                let v = self.panggil_native(f, args, sp, langsung)?;
+                self.push(v);
                 Ok(())
             }
             // Fungsi `extern "C"`. Marshalling-nya dikerjakan lapisan yang
@@ -174,6 +195,13 @@ impl Vm {
                 let result = super::ffi_jembatan::panggil(&info, &args)
                     .map_err(|e| VmError::at(e, sp))?;
                 self.push(result);
+                Ok(())
+            }
+            VmValue::Asing(super::ffi_asing::Asing::Fungsi(g)) => {
+                let args: Vec<VmValue> = self.stack[fn_idx + 1..].to_vec();
+                self.stack.truncate(fn_idx);
+                let v = (g.panggil)(&args).map_err(|e| VmError::at(e, sp))?;
+                self.push(v);
                 Ok(())
             }
             // Method atas handle asing (`df.head(5)`): penerimanya argumen pertama.
@@ -190,7 +218,7 @@ impl Vm {
             VmValue::Ktor(k) => {
                 if argc != k.arity {
                     return Err(VmError::at(crate::interpreter::pesan_konstruktor_argumen(
-                        &k.tipe, &k.varian, k.arity, argc), sp));
+                        &k.nama.tipe, &k.nama.varian, k.arity, argc), sp));
                 }
                 let mut args: Vec<VmValue> = self.stack[fn_idx + 1..].to_vec();
                 self.stack.truncate(fn_idx);
@@ -200,8 +228,8 @@ impl Vm {
                     _ => Some(VmValue::tuple(args)),
                 };
                 self.push(VmValue::Map(Arc::new(super::value::Peta::baru(
-                    super::value::Label::Enum { tipe: k.tipe.clone(), varian: k.varian.clone(), payload },
-                    std::collections::HashMap::new(),
+                    super::value::Label::Enum { nama: k.nama, payload },
+                    std::iter::empty::<(crate::vm::value::Kunci, VmValue)>(),
                 ))));
                 Ok(())
             }

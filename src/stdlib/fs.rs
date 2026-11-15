@@ -291,6 +291,7 @@ pub fn register(vm: &mut Vm) {
 
     vm.def("fs::read_base64", |a| crate::stdlib::sistem::lewat_hasil(a, b_read_base64));
     vm.def("fs::try_read", |a| crate::stdlib::sistem::lewat_hasil(a, b_try_read));
+    vm.def("fs::safe_join", |a| crate::stdlib::sistem::lewat_hasil(a, b_safe_join));
     vm.def("fs::write_base64", |a| crate::stdlib::sistem::lewat_hasil(a, |a| b_tulis_base64(a, "fs::write_base64", false)));
     vm.def("fs::append_base64", |a| crate::stdlib::sistem::lewat_hasil(a, |a| b_tulis_base64(a, "fs::append_base64", true)));
 }
@@ -310,7 +311,7 @@ fn teks_b64(a: &[Value], ke: usize, nama: &str) -> Result<String, String> {
 fn b_try_read(a: &[Value]) -> Result<Value, String> {
     let p = teks_b64(a, 0, "fs::try_read")?;
     Ok(match std::fs::read_to_string(&p) {
-        Ok(isi) => ok_value(Value::Str(isi.into())),
+        Ok(isi) => ok_value(Value::teks(isi)),
         Err(e) => err_value(format!("fs::try_read '{}': {}", p, crate::host::galat_io(&e))),
     })
 }
@@ -355,4 +356,80 @@ fn coba_fs(a: &[VmValue], nama: &'static str, f: fn(&str, &str) -> std::io::Resu
             Err(e) => err_value(format!("{} '{}': {}", nama, p, crate::host::galat_io(&e))),
         })
     })
+}
+
+/// `fs::safe_join(dasar, relatif)` → `Result<string>`: jalur di bawah `dasar` yang tidak bisa keluar darinya —
+/// aturan nama dari penjaga arsip, lalu tiap bagian yang sudah ada diperiksa: tautan simbolik boleh selama
+/// tujuannya tetap di dalam `dasar`.
+fn b_safe_join(a: &[Value]) -> Result<Value, String> {
+    let dasar = teks_b64(a, 0, "fs::safe_join")?;
+    let rel = teks_b64(a, 1, "fs::safe_join")?;
+    Ok(match gabung_aman(&dasar, &rel) {
+        Ok(p) => ok_value(Value::teks(p)),
+        Err(e) => err_value(format!("fs::safe_join: {}", e)),
+    })
+}
+
+pub fn gabung_aman(dasar: &str, rel: &str) -> Result<String, String> {
+    use std::path::{Path, PathBuf};
+    if dasar.is_empty() || dasar.contains('\0') {
+        return Err("folder dasar kosong atau memuat NUL".into());
+    }
+    let akar = Path::new(dasar);
+    let akar_asli = match std::fs::canonicalize(akar) {
+        Ok(p) if p.is_dir() => p,
+        Ok(_) => return Err(format!("folder dasar `{}` bukan folder", dasar)),
+        Err(e) => return Err(format!("folder dasar `{}`: {}", dasar, crate::host::galat_io(&e))),
+    };
+    let inti = rel.strip_suffix('/').unwrap_or(rel);
+    if inti.is_empty() { return Ok(dasar.to_string()); }
+    if let Some(alasan) = crate::stdlib::zip::alasan_jalur(rel) {
+        return Err(format!("`{}` ditolak: {}", rel.escape_debug(), alasan));
+    }
+    let mut p = PathBuf::from(akar);
+    for (i, b) in inti.split('/').enumerate() {
+        p.push(b);
+        match std::fs::symlink_metadata(&p) {
+            Ok(m) if m.file_type().is_symlink() => {
+                let nama = inti.split('/').take(i + 1).collect::<Vec<_>>().join("/");
+                match std::fs::canonicalize(&p) {
+                    Ok(t) if t.starts_with(&akar_asli) => {}
+                    Ok(_) => return Err(format!("`{}` adalah tautan simbolik ke luar folder dasar", nama)),
+                    Err(_) => return Err(format!("`{}` adalah tautan simbolik yang tujuannya tidak ada", nama)),
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
+        }
+    }
+    Ok(akar.join(inti).display().to_string())
+}
+
+#[cfg(test)]
+mod uji {
+    use super::gabung_aman;
+
+    #[test]
+    fn tautan_simbolik_ke_luar_dasar_ditolak() {
+        let akar = std::env::temp_dir().join(format!("jrg-uji-gabung-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&akar);
+        let (dasar, luar) = (akar.join("dasar"), akar.join("luar"));
+        std::fs::create_dir_all(dasar.join("asli")).unwrap();
+        std::fs::create_dir_all(&luar).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::symlink;
+            symlink(dasar.join("asli"), dasar.join("dalam")).unwrap();
+            symlink(&luar, dasar.join("kabur")).unwrap();
+            symlink(akar.join("hilang"), dasar.join("gantung")).unwrap();
+            let d = dasar.to_str().unwrap();
+            assert!(gabung_aman(d, "dalam/a.txt").is_ok());
+            let e = gabung_aman(d, "kabur/a.txt").unwrap_err();
+            assert!(e.contains("`kabur` adalah tautan simbolik ke luar"), "{}", e);
+            let e = gabung_aman(d, "gantung").unwrap_err();
+            assert!(e.contains("tujuannya tidak ada"), "{}", e);
+        }
+        assert!(gabung_aman(dasar.to_str().unwrap(), "../luar").unwrap_err().contains("`..`"));
+        let _ = std::fs::remove_dir_all(&akar);
+    }
 }

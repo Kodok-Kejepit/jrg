@@ -1,0 +1,231 @@
+package std_markdown
+
+// Markdown ke HTML yang aman untuk masukan dari luar: HTML mentah SELALU di-escape, tautan/gambar cuma `http`,
+// `https`, `mailto` dan relatif (skema dibaca sesudah huruf kecil dan kendali/spasi dibuang — `JaVaScRiPt:`,
+// `java\tscript:`), nama bahasa blok kode disaring. Subset: judul, paragraf, daftar, kutipan, garis, kode, tebal/miring.
+
+fn _escape(s) {
+    return str::replace(str::replace(str::replace(str::replace(str::replace(s, "&", "&amp;"), "<", "&lt;"), ">", "&gt;"), "\"", "&quot;"), "'", "&#39;")
+}
+
+// Skema dari URL setelah kendali, spasi dan huruf besar tidak berarti apa-apa lagi.
+fn _url_aman(u) {
+    var bersih = ""
+    for _, r in str::chars(u) {
+        let k = r as int
+        if k > 32 && k != 127 { bersih = bersih + str(r) }
+    }
+    let kecil = str::lower(bersih)
+    match str::index_of(kecil, ":") {
+        Some(i) => {
+            // `:` sesudah `/`, `?` atau `#` bukan pemisah skema (`a/b:c` relatif).
+            for _, p in ["/", "?", "#"] {
+                match str::index_of(kecil, p) {
+                    Some(j) => { if j < i { return Some(bersih) } }
+                    None => {}
+                }
+            }
+            let skema = kecil[0:i]
+            if skema == "http" || skema == "https" || skema == "mailto" { return Some(bersih) }
+            return None
+        }
+        None => { return Some(bersih) }
+    }
+}
+
+// Ganti pasangan penanda (`**`, `*`, `` ` ``) di teks yang SUDAH di-escape.
+fn _pasang(s, tanda, buka, tutup) {
+    let bagian = str::split(s, tanda)
+    if len(bagian) < 3 { return s }
+    var o = bagian[0]
+    var i = 1
+    while i < len(bagian) {
+        if i + 1 < len(bagian) {
+            o = o + buka + bagian[i] + tutup + bagian[i + 1]
+            i += 2
+        } else {
+            o = o + tanda + bagian[i]
+            i += 1
+        }
+    }
+    return o
+}
+
+// `[teks](url)` / `![alt](url)` atas teks yang sudah di-escape, lewat tabel loncatan: label paling panjang 1000
+// karakter, URL 2048 dan 64 kurung — teks penuh `[` atau `(` tetap linear (dulu kuadrat, 3000 tautan 8,6 s).
+fn _tautan(s, gambar) {
+    let cs = arr::map(str::chars(s), |r| str(r))
+    let n = len(cs)
+    // Tabel loncatan, sekali O(n): `](` berikutnya, dan `(`/`)` berikutnya, dari tiap posisi.
+    var lanjut_tutup = arr::fill(n, n + 1)
+    var lanjut_kurung = arr::fill(n, n + 1)
+    var k = n - 1
+    while k >= 0 {
+        lanjut_tutup[k] = (k + 1 < n && cs[k] == "]" && cs[k + 1] == "(") $ k : lanjut_tutup[k + 1]
+        lanjut_kurung[k] = (cs[k] == "(" || cs[k] == ")") $ k : lanjut_kurung[k + 1]
+        k -= 1
+    }
+    var o = []
+    var i = 0
+    var dari = 0
+    while i < n {
+        let mulai_gambar = cs[i] == "!" && i + 1 < n && cs[i + 1] == "["
+        let mulai = gambar $ mulai_gambar : (cs[i] == "[" && !(i > 0 && cs[i - 1] == "!"))
+        if !mulai {
+            i += 1
+            continue
+        }
+        let a = gambar $ i + 2 : i + 1
+        let b = a <= n $ lanjut_tutup[a] : n
+        if b >= n || b - a > 1000 {
+            i += 1
+            continue
+        }
+        var c = lanjut_kurung[b + 2]
+        var dalam = 0
+        var ketemu = false
+        var langkah = 0
+        while c < n && c - b <= 2048 && langkah < 64 {
+            if cs[c] == "(" { dalam += 1 }
+            if cs[c] == ")" {
+                if dalam == 0 {
+                    ketemu = true
+                    break
+                }
+                dalam -= 1
+            }
+            c = lanjut_kurung[c + 1]
+            langkah += 1
+        }
+        if !ketemu {
+            i += 1
+            continue
+        }
+        o = arr::push(o, str::join(cs[dari:i], ""))
+        let label = str::join(cs[a:b], "")
+        match _url_aman(str::join(cs[b + 2:c], "")) {
+            Some(u0) => {
+                // `*` di atribut akan dibaca penanda miring sesudahnya: tulis bentuk yang tidak bisa disalahartikan.
+                let u = str::replace(u0, "*", "%2A")
+                let alt = str::replace(label, "*", "&#42;")
+                if gambar {
+                    if str::starts_with(str::lower(u), "mailto:") { o = arr::push(o, label) } else { o = arr::push(o, «<img src="${u}" alt="${alt}">») }
+                } else {
+                    o = arr::push(o, «<a href="${u}">${label}</a>»)
+                }
+            }
+            None => { o = arr::push(o, label) }
+        }
+        i = c + 1
+        dari = i
+    }
+    o = arr::push(o, str::join(cs[dari:], ""))
+    return str::join(o, "")
+}
+
+fn _sebaris(s) {
+    // Kode sebaris dulu, supaya isinya tidak ikut ditafsirkan; `` ` `` terakhir yang tak berpasangan tetap teks.
+    let p = str::split(_escape(s), "`")
+    let n = len(p)
+    var o = ""
+    for i, x in p {
+        let kode = i % 2 == 1 && !(n % 2 == 0 && i == n - 1)
+        if kode {
+            o = o + "<code>" + x + "</code>"
+        } else {
+            var t = i % 2 == 1 $ "`" + x : x
+            t = _tautan(_tautan(t, true), false)
+            t = _pasang(t, "**", "<strong>", "</strong>")
+            t = _pasang(t, "*", "<em>", "</em>")
+            o = o + t
+        }
+    }
+    return o
+}
+
+fn _bahasa(t) {
+    var o = ""
+    for _, r in str::chars(str::lower(str::trim(t))) {
+        let c = str(r)
+        if (c >= "a" && c <= "z") || (c >= "0" && c <= "9") || c == "-" || c == "+" { o = o + c }
+    }
+    return o
+}
+
+/// Ubah Markdown jadi HTML. Tidak pernah meloloskan HTML dari masukan.
+pub fn ke_html(teks) {
+    let baris = str::split(str::replace(teks, "\r\n", "\n"), "\n")
+    var o = []
+    var para = []
+    var daftar = ""
+    var i = 0
+    let tutup_para = |o2, p2| len(p2) == 0 $ o2 : arr::push(o2, "<p>" + _sebaris(str::join(p2, " ")) + "</p>")
+    while i < len(baris) {
+        let b = baris[i]
+        let t = str::trim(b)
+        let jenis_daftar = (str::starts_with(t, "- ") || str::starts_with(t, "* ")) $ "ul" : ""
+        var nomor = ""
+        match str::index_of(t, ". ") {
+            Some(k) => {
+                var semua = k > 0
+                for _, r in str::chars(t[0:k]) { if !(str(r) >= "0" && str(r) <= "9") { semua = false } }
+                if semua { nomor = "ol" }
+            }
+            None => {}
+        }
+        let jd = jenis_daftar != "" $ jenis_daftar : nomor
+        if daftar != "" && jd != daftar {
+            o = arr::push(o, «</${daftar}>»)
+            daftar = ""
+        }
+        if str::starts_with(t, "```") {
+            o = tutup_para(o, para)
+            para = []
+            let bhs = _bahasa(t[3:])
+            var kode = []
+            i += 1
+            while i < len(baris) && !str::starts_with(str::trim(baris[i]), "```") {
+                kode = arr::push(kode, _escape(baris[i]))
+                i += 1
+            }
+            let kelas = bhs == "" $ "" : « class="bahasa-${bhs}"»
+            o = arr::push(o, «<pre><code${kelas}>» + str::join(kode, "\n") + "</code></pre>")
+        } else if t == "" {
+            o = tutup_para(o, para)
+            para = []
+        } else if str::starts_with(t, "#") {
+            o = tutup_para(o, para)
+            para = []
+            var n = 0
+            while n < len(t) && t[n:n + 1] == "#" { n += 1 }
+            if n <= 6 && n < len(t) && t[n:n + 1] == " " {
+                o = arr::push(o, «<h${n}>» + _sebaris(str::trim(t[n:])) + «</h${n}>»)
+            } else {
+                para = arr::push(para, t)
+            }
+        } else if t == "---" || t == "***" {
+            o = tutup_para(o, para)
+            para = []
+            o = arr::push(o, "<hr>")
+        } else if str::starts_with(t, "> ") || t == ">" {
+            o = tutup_para(o, para)
+            para = []
+            o = arr::push(o, "<blockquote>" + _sebaris(str::trim(t[1:])) + "</blockquote>")
+        } else if jd != "" {
+            o = tutup_para(o, para)
+            para = []
+            if daftar == "" {
+                o = arr::push(o, «<${jd}>»)
+                daftar = jd
+            }
+            let isi = jd == "ul" $ t[2:] : t[str::index_of(t, ". ").unwrap() + 2:]
+            o = arr::push(o, "<li>" + _sebaris(isi) + "</li>")
+        } else {
+            para = arr::push(para, t)
+        }
+        i += 1
+    }
+    o = tutup_para(o, para)
+    if daftar != "" { o = arr::push(o, «</${daftar}>») }
+    return str::join(o, "\n")
+}

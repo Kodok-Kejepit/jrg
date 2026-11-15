@@ -1,0 +1,227 @@
+package std_glob
+
+// Pola nama berkas: `*` `?` `[a-z]` `[!x]` `**` dan `\` pelolos. Pencocoknya tabel DP (waktu paling banyak
+// panjang pola kali panjang jalur, tanpa mundur eksponensial). `*`, `?` dan kelas tidak melewati `/` dan tidak
+// mencocokkan titik di awal nama (berkas tersembunyi) kecuali polanya menulis titik itu.
+
+pub struct Pola {
+    pub teks: string,
+    pub bagian: array = [],
+}
+
+fn _kutip(s) {
+    for _, r in str::chars(s) {
+        let k = r as int
+        if k < 32 || k == 127 { return «(${len(s)} karakter, memuat karakter kendali)» }
+    }
+    return len(s) <= 64 $ «`${s}`» : «(${len(s)} karakter)»
+}
+
+fn _token_bagian(seg, pola) {
+    let cs = str::chars(seg)
+    var tok = []
+    var i = 0
+    while i < len(cs) {
+        let c = str(cs[i])
+        if c == "*" {
+            if i + 1 < len(cs) && str(cs[i + 1]) == "*" {
+                return Err(«pola ${_kutip(pola)}: `**` harus berdiri sendiri di antara `/`»)
+            }
+            tok = arr::push(tok, dict { j: "bintang", c: "", neg: false, r: [] })
+            i += 1
+        } else if c == "?" {
+            tok = arr::push(tok, dict { j: "satu", c: "", neg: false, r: [] })
+            i += 1
+        } else if c == "\\" {
+            if i + 1 >= len(cs) { return Err(«pola ${_kutip(pola)}: `\\` di ujung tanpa karakter yang diloloskan») }
+            tok = arr::push(tok, dict { j: "lit", c: str(cs[i + 1]), neg: false, r: [] })
+            i += 2
+        } else if c == "[" {
+            var k = i + 1
+            var neg = false
+            if k < len(cs) && (str(cs[k]) == "!" || str(cs[k]) == "^") {
+                neg = true
+                k += 1
+            }
+            var r = []
+            var pertama = true
+            var tutup = false
+            while k < len(cs) {
+                var a = str(cs[k])
+                if a == "]" && !pertama {
+                    tutup = true
+                    break
+                }
+                pertama = false
+                if a == "\\" {
+                    if k + 1 >= len(cs) { break }
+                    k += 1
+                    a = str(cs[k])
+                }
+                if k + 2 < len(cs) && str(cs[k + 1]) == "-" && str(cs[k + 2]) != "]" {
+                    var b = str(cs[k + 2])
+                    var lompat = 3
+                    if b == "\\" && k + 3 < len(cs) {
+                        b = str(cs[k + 3])
+                        lompat = 4
+                    }
+                    if b < a { return Err(«pola ${_kutip(pola)}: rentang `${a}-${b}` terbalik») }
+                    r = arr::push(r, [a, b])
+                    k += lompat
+                } else {
+                    r = arr::push(r, [a, a])
+                    k += 1
+                }
+            }
+            if !tutup { return Err(«pola ${_kutip(pola)}: `[` tidak ditutup — tulis `\\[` untuk huruf `[`») }
+            tok = arr::push(tok, dict { j: "kelas", c: "", neg: neg, r: r })
+            i = k + 1
+        } else {
+            tok = arr::push(tok, dict { j: "lit", c: c, neg: false, r: [] })
+            i += 1
+        }
+    }
+    return Ok(tok)
+}
+
+// `[a/b]` akan terbelah dua oleh pemisah jalur; tolak dengan alasannya sendiri.
+fn _tanpa_garis_di_kelas(pola) {
+    let cs = arr::map(str::chars(pola), |r| str(r))
+    var i = 0
+    while i < len(cs) {
+        if cs[i] == "\\" {
+            i += 2
+            continue
+        }
+        if cs[i] == "[" {
+            var k = i + 1
+            if k < len(cs) && (cs[k] == "!" || cs[k] == "^") { k += 1 }
+            if k < len(cs) && cs[k] == "]" { k += 1 }
+            while k < len(cs) && cs[k] != "]" {
+                if cs[k] == "/" { return Err(«pola ${_kutip(pola)}: `/` tidak bisa ada di dalam `[...]`») }
+                k += 1
+            }
+            i = k
+        }
+        i += 1
+    }
+    return Ok(())
+}
+
+/// Kompilasi pola sekali, untuk dicocokkan berkali-kali. `Err` kalau polanya cacat.
+pub fn kompilasi(pola) {
+    if pola == "" { return Err("pola kosong") }
+    if str::starts_with(pola, "/") { return Err(«pola ${_kutip(pola)}: harus relatif, tidak diawali `/`») }
+    _tanpa_garis_di_kelas(pola)?
+    var bagian = []
+    for _, seg in str::split(pola, "/") {
+        if seg == "" { return Err(«pola ${_kutip(pola)}: ada bagian kosong (`//` atau `/` di ujung)») }
+        if seg == ".." { return Err(«pola ${_kutip(pola)}: `..` tidak boleh — pola tidak keluar dari foldernya») }
+        if seg == "**" {
+            bagian = arr::push(bagian, dict { dua: true, tok: [] })
+        } else {
+            let tok = _token_bagian(seg, pola)?
+            bagian = arr::push(bagian, dict { dua: false, tok: tok })
+        }
+    }
+    return Ok(Pola { teks: pola, bagian: bagian })
+}
+
+fn _satu_cocok(t, c) {
+    if t["j"] == "lit" { return t["c"] == c }
+    if t["j"] == "satu" { return true }
+    var ada = false
+    for _, r in t["r"] {
+        if c >= r[0] && c <= r[1] { ada = true }
+    }
+    return ada != t["neg"]
+}
+
+// Satu bagian pola lawan satu nama; dp[j] = tok[i:] cocok dengan cs[j:].
+fn _cocok_nama(tok, nama) {
+    let cs = arr::map(str::chars(nama), |r| str(r))
+    if len(cs) > 0 && cs[0] == "." && (len(tok) == 0 || tok[0]["j"] != "lit" || tok[0]["c"] != ".") { return false }
+    let n = len(cs)
+    var bawah = arr::fill(false, n + 1)
+    bawah[n] = true
+    var i = len(tok) - 1
+    while i >= 0 {
+        let t = tok[i]
+        var kini = arr::fill(false, n + 1)
+        if t["j"] == "bintang" {
+            kini[n] = bawah[n]
+            var j = n - 1
+            while j >= 0 {
+                kini[j] = bawah[j] || kini[j + 1]
+                j -= 1
+            }
+        } else {
+            var j = n - 1
+            while j >= 0 {
+                kini[j] = bawah[j + 1] && _satu_cocok(t, cs[j])
+                j -= 1
+            }
+        }
+        bawah = kini
+        i -= 1
+    }
+    return bawah[0]
+}
+
+/// Cocokkan pola yang sudah dikompilasi dengan jalur relatif (`a/b/c.jrg`).
+pub fn cocok_pola(k, jalur) {
+    let nama = arr::filter(str::split(jalur, "/"), |s| s != "")
+    let p = k.bagian
+    let n = len(nama)
+    var bawah = arr::fill(false, n + 1)
+    bawah[n] = true
+    var i = len(p) - 1
+    while i >= 0 {
+        var kini = arr::fill(false, n + 1)
+        if p[i]["dua"] {
+            // `**`: nol bagian, atau satu bagian tak tersembunyi lalu `**` lagi.
+            kini[n] = bawah[n]
+            var j = n - 1
+            while j >= 0 {
+                kini[j] = bawah[j] || (!str::starts_with(nama[j], ".") && kini[j + 1])
+                j -= 1
+            }
+        } else {
+            var j = n - 1
+            while j >= 0 {
+                kini[j] = bawah[j + 1] && _cocok_nama(p[i]["tok"], nama[j])
+                j -= 1
+            }
+        }
+        bawah = kini
+        i -= 1
+    }
+    return bawah[0]
+}
+
+/// `Ok(true)` kalau `jalur` cocok dengan `pola`; `Err` kalau polanya cacat.
+pub fn cocok(pola, jalur) {
+    let k = kompilasi(pola)?
+    return Ok(cocok_pola(k, jalur))
+}
+
+/// Unsur `daftar` yang cocok, urutannya tetap.
+pub fn saring(pola, daftar) {
+    let k = kompilasi(pola)?
+    return Ok(arr::filter(daftar, |s| cocok_pola(k, s)))
+}
+
+/// Berkas di bawah `folder` yang jalurnya (relatif terhadap `folder`) cocok, terurut. Folder tidak ikut,
+/// tautan simbolik ke folder tidak diikuti.
+pub fn cari(folder, pola) {
+    let k = kompilasi(pola)?
+    if !fs::is_dir(folder) { return Err(«folder ${_kutip(folder)} tidak ada atau bukan folder») }
+    var awal = folder
+    if !str::ends_with(awal, "/") { awal = awal + "/" }
+    var hasil = []
+    for _, f in fs::walk(folder) {
+        let rel = str::starts_with(f, awal) $ f[len(awal):] : f
+        if cocok_pola(k, rel) { hasil = arr::push(hasil, f) }
+    }
+    return Ok(hasil)
+}

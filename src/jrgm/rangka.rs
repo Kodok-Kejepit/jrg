@@ -111,7 +111,7 @@ pub fn main() {{
 pub(crate) fn cmd_new(name: &str, kind: &str) -> Result<(), String> {
     let root = PathBuf::from(name);
     std::fs::create_dir_all(root.join("src"))
-        .map_err(|e| format!("tidak bisa buat direktori project: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa buat direktori project: {}", crate::host::galat_io(&e)))?;
 
     if !["bin", "lib", "web", "android"].contains(&kind) {
         return Err(format!(
@@ -160,7 +160,7 @@ pub fn main() {{
     };
 
     std::fs::write(root.join(entry), entry_content)
-        .map_err(|e| format!("tidak bisa tulis entry file: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa tulis entry file: {}", crate::host::galat_io(&e)))?;
 
     let manifest = format!(
         "[package]\nname        = \"{name}\"\nversion     = \"0.1.0\"\n\
@@ -185,7 +185,7 @@ pub fn main() {{
                  port     = 8080\n")
     } else { manifest };
     let manifest = if kind == "android" {
-        let paket = jrgc::llvm::apk::nama_paket(name);
+        let paket = crate::llvm::apk::nama_paket(name);
         format!("{manifest}\n\
                  # Identitas APK untuk `jrgm apk` dan `jrgm run --android`.\n\
                  [android]\n\
@@ -206,17 +206,17 @@ pub fn main() {{
                  # Kunci rilis: `jrgm kunci` sekali, lalu `jrgm apk --rilis`.\n")
     } else { manifest };
     std::fs::write(root.join("jrgm.toml"), manifest)
-        .map_err(|e| format!("tidak bisa tulis jrgm.toml: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa tulis jrgm.toml: {}", crate::host::galat_io(&e)))?;
 
     // Kunci rilis Android tidak boleh ikut ke repositori.
     let abaikan = if kind == "android" { "/target\njrgm.lock\n*.jks\n*.keystore\n" } else { "/target\njrgm.lock\n" };
     std::fs::write(root.join(".gitignore"), abaikan)
-        .map_err(|e| format!("tidak bisa tulis .gitignore: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa tulis .gitignore: {}", crate::host::galat_io(&e)))?;
 
     // Sebuah berkas uji contoh, supaya `jrgm test` berhasil sejak menit pertama
     // dan konvensinya terlihat tanpa perlu dicari di dokumentasi.
     std::fs::create_dir_all(root.join("tests"))
-        .map_err(|e| format!("tidak bisa buat direktori tests: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa buat direktori tests: {}", crate::host::galat_io(&e)))?;
     let contoh_uji = format!(
         "// Test untuk `{name}`. Dijalankan dengan `jrgm test`.\n\
          //\n\
@@ -236,7 +236,7 @@ pub fn main() {{
          //     }}\n"
     );
     std::fs::write(root.join("tests").join("dasar.jrg"), contoh_uji)
-        .map_err(|e| format!("tidak bisa tulis contoh test: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa tulis contoh test: {}", crate::host::galat_io(&e)))?;
 
     eprintln!("Created `{}` ({}) package", name, kind);
     Ok(())

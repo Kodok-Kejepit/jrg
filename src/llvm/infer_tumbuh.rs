@@ -33,12 +33,13 @@ impl Codegen {
         let calon2 = calon.clone();
 
         let mut hasil = HashMap::new();
-        // Beberapa putaran: lokal bertumbuh yang isinya lokal bertumbuh LAIN baru terbaca
-        // sesudah yang di dalam punya tipe.
-        for _putaran in 0..3 {
-        let sebelum = hasil.len();
-        for (nama, elem_awal) in calon.clone() {
-            if hasil.contains_key(&nama) { continue; }
+        // Sampai titik tetap, urut nama: lokal bertumbuh yang isinya lokal bertumbuh LAIN membaca tipe
+        // terbarunya. Dulu urutan `HashMap` yang menentukan, jadi pemanggil dan badan bisa beda tipe.
+        let mut urut: Vec<(String, Option<JrgType>)> = calon.clone().into_iter().collect();
+        urut.sort_by(|a, b| a.0.cmp(&b.0));
+        for _putaran in 0..4 {
+        let mut berubah = false;
+        for (nama, elem_awal) in urut.iter().cloned() {
             let Some(nilai) = ditugasi.get(&nama) else { continue };
             if nilai.is_empty() {
                 continue;
@@ -60,15 +61,34 @@ impl Codegen {
             }
             if let Some(t) = elem {
                 // Elemen berukuran tetap diluruhkan: yang didorong belakangan boleh beda panjang.
-                let t = match t {
+                let mut t = match t {
                     JrgType::Array(x, _) => JrgType::Slice(x),
                     lain => lain,
                 };
-                lokal.insert(nama.clone(), JrgType::Slice(Box::new(t.clone())));
-                hasil.insert(nama, JrgType::Slice(Box::new(t)));
+                // Yang didorong berjenis lain (`xs = arr::push(xs, "a")` atas `[1]`): elemennya bertag.
+                for (e, t_saat_itu) in nilai {
+                    let tx = t_saat_itu.clone().or_else(|| self.tipe_ekspresi(e, &lokal, subst, &decl.name));
+                    if let Some(JrgType::Array(x, n)) = &tx {
+                        if *n > 0 { t = super::codegen_any::satukan_jenis(&t, &super::codegen_any::luruh(x)); }
+                    }
+                    if let Some(JrgType::Slice(x)) = &tx {
+                        t = super::codegen_any::satukan_jenis(&t, &super::codegen_any::luruh(x));
+                    }
+                    for x in elemen_didorong(e, &nama) {
+                        if let Some(tx) = self.tipe_ekspresi(x, &lokal, subst, &decl.name) {
+                            t = super::codegen_any::satukan_jenis(&t, &super::codegen_any::luruh(&tx));
+                        }
+                    }
+                }
+                let baru = JrgType::Slice(Box::new(t));
+                if hasil.get(&nama) != Some(&baru) {
+                    lokal.insert(nama.clone(), baru.clone());
+                    hasil.insert(nama, baru);
+                    berubah = true;
+                }
             }
         }
-        if hasil.len() == sebelum { break; }
+        if !berubah { break; }
         }
         // `var a = []` yang ditugasi ulang tapi elemennya tak terbaca dari mana pun: array bertag.
         for (nama, elem_awal) in &calon {
@@ -184,22 +204,7 @@ impl Codegen {
                     ForStmt::Classic { body, .. } =>
                         self.kumpul_calon(body, lokal, subst, nama_diri, calon, ditugasi),
                     ForStmt::Range { vars, iter, body, .. } => {
-                        for (k, nama) in vars.iter().enumerate() {
-                            let t = if k == 0 {
-                                self.tipe_var_loop_pertama(iter, lokal, subst, nama_diri)
-                            } else {
-                                match self.tipe_ekspresi(iter, lokal, subst, nama_diri) {
-                                    Some(JrgType::Array(e, _)) | Some(JrgType::Slice(e)) => *e,
-                                    Some(JrgType::Str) => JrgType::Rune,
-                                    // `for k, v in d`: yang pertama kunci,
-                                    // yang kedua NILAINYA.
-                                    Some(JrgType::Dict(v)) => *v,
-                                    Some(JrgType::DictCampur(_)) => JrgType::Any,
-                                    _ => continue,
-                                }
-                            };
-                            lokal.insert(nama.clone(), t);
-                        }
+                        self.ikat_var_loop(vars, iter, lokal, subst, nama_diri);
                         self.kumpul_calon(body, lokal, subst, nama_diri, calon, ditugasi)
                     }
                 },
@@ -299,6 +304,22 @@ impl Codegen {
     }
 }
 
+/// Elemen yang ditambahkan `e` ke array `nama`: `arr::push(nama, v)`, `nama.push(v)`, `nama + [..]`.
+pub(crate) fn elemen_didorong<'a>(e: &'a Expr, nama: &str) -> Vec<&'a Expr> {
+    let diri = |x: &Expr| matches!(x, Expr::Ident(n, _) if n == nama);
+    match e {
+        Expr::Call { func, args, .. } if args.len() == 2 && diri(&args[0])
+            && matches!(&**func, Expr::PathExpr { segments, .. }
+                if segments.len() == 2 && segments[0] == "arr" && segments[1] == "push") => vec![&args[1]],
+        Expr::Method { obj, method, args, .. } if method == "push" && args.len() == 1 && diri(obj) => vec![&args[0]],
+        Expr::Binary { op: BinaryOp::Add, lhs, rhs, .. } if diri(lhs) => match &**rhs {
+            Expr::Array { elems, .. } => elems.iter().collect(),
+            _ => Vec::new(),
+        },
+        _ => Vec::new(),
+    }
+}
+
 /// Gabungkan sebuah kandidat ke kesimpulan yang sedang dikumpulkan.
 pub(crate) fn pilih(ketemu: &mut Option<JrgType>, kandidat: JrgType) {
     match ketemu {
@@ -359,4 +380,32 @@ pub fn blok_punya_return_bernilai(b: &crate::parser::Block) -> bool {
         }
     }
     b.stmts.iter().any(di_stmt) || b.tail.as_deref().map_or(false, di_ekspr)
+}
+
+impl Codegen {
+    /// Tipe variabel `for a, b in iter` di penyimpul; yang tak diketahui dilupakan.
+    pub(crate) fn ikat_var_loop(
+        &self, vars: &[String], iter: &Expr, lokal: &mut Lokal, subst: &TypeSubst, nama_diri: &str,
+    ) {
+        for (k, nama) in vars.iter().enumerate() {
+            let t = if k == 0 {
+                self.tipe_var_loop_pertama(iter, lokal, subst, nama_diri)
+            } else {
+                match self.tipe_ekspresi(iter, lokal, subst, nama_diri) {
+                    Some(JrgType::Array(e, _)) | Some(JrgType::Slice(e)) => Some(*e),
+                    Some(JrgType::Str) => Some(JrgType::Rune),
+                    // `for k, v in d`: yang pertama kunci, yang kedua NILAINYA.
+                    Some(JrgType::Dict(v)) => Some(*v),
+                    Some(JrgType::DictCampur(_)) => Some(JrgType::Any),
+                    _ => None,
+                }
+            };
+            match t {
+                Some(t) => { lokal.insert(nama.clone(), t); }
+                // Perilaku lama: cuma variabel pertama yang dilupakan.
+                None if k == 0 => { lokal.remove(nama); }
+                None => {}
+            }
+        }
+    }
 }

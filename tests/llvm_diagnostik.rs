@@ -46,13 +46,13 @@ const LOKASI_TEPAT: &[Kasus] = &[
     // Kasus intinya dulu `fn ubah(a)` tanpa anotasi, yang dilaporkan di baris
     // PEMANGGILNYA — 25 baris dari masalahnya.
     Kasus {
-        nama: "index tuple non-konstan ditunjuk pada ekspresi indexnya",
+        nama: "tulis tuple campur tipe berindeks variabel ditunjuk pada sasarannya",
         src: "package main\n\
               \n\
               pub fn main() {\n\
               \x20   var t: (int, string) = (1, \"a\")\n\
               \x20   var i: int = 0\n\
-              \x20   wok(t[i])\n\
+              \x20   t[i] = 5\n\
               }\n",
         pesan_memuat: "sudah pasti saat kompilasi",
         baris: 6,
@@ -66,12 +66,12 @@ const LOKASI_TEPAT: &[Kasus] = &[
         src: "package main\n\
               \n\
               pub fn main() {\n\
-              \x20   var r = py::eval(\"1\")\n\
+              \x20   var r = jvm::baru(\"java.lang.Object\", \"()V\")\n\
               \x20   wok(r)\n\
               }\n",
-        pesan_memuat: "namespace `py::`",
+        pesan_memuat: "namespace `jvm::`",
         baris: 4,
-        kutipan: "py::eval",
+        kutipan: "jvm::baru",
     },
     // Closure dan `defer` dulu ada di sini dan dua-duanya sekarang jalan.
     // Di sini dulu berdiri dua kasus berturut-turut, dan KEDUANYA dicabut oleh
@@ -214,8 +214,8 @@ const SEBAB_DISEBUT: &[(&str, &str, &str)] = &[
     (
         "var [] tak tersimpulkan dipakai sebagai string",
         "package main\nvar jejak = []\nfn catat(s) { jejak = arr::push(jejak, s) }\n\
-         pub fn main() { catat(bikin())\n assert_eq(jejak, [\"a\"]) }\n\
-         fn bikin() { return \"a\" }\n",
+         pub fn main() { catat(bikin(1))\n assert_eq(jejak, [\"a\"]) }\n\
+         fn bikin(n) { return \"a\" }\n",
         "`jejak` dideklarasikan sebagai array kosong",
     ),
 ];
@@ -289,7 +289,7 @@ const PATH_HILANG: &[(&str, &str, &str, &str)] = &[
     (
         "namespace TIDAK di-import: tetap menawar",
         "package main\npub fn main() { wok(hantu::x()) }\n",
-        "periksa ejaan",
+        "cek lagi penulisan namespace/nama-nya",
         "tidak memuat modul antar-berkas",
     ),
     (

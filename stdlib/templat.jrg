@@ -1,0 +1,129 @@
+package std_templat
+
+// Templat teks biasa: `{{ jalur }}` dan `{{ jalur | filter }}`, tidak lebih. Tidak ada ekspresi, pemanggilan atau
+// perulangan, jadi templat dari luar tidak bisa menjalankan apa pun (kelas SSTI Jinja2/Twig/Handlebars). Kunci
+// yang hilang, `{{` tak ditutup dan filter asing jadi `Err` — Mustache menulis teks kosong di situ tanpa suara.
+
+pub const FILTER = ["json", "upper", "lower", "trim"]
+
+fn _jalur_sah(j) {
+    if j == "" { return false }
+    for _, bagian in str::split(j, ".") {
+        if bagian == "" { return false }
+        for _, r in str::chars(bagian) {
+            let c = str(r)
+            let huruf = (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_"
+            if !(huruf || (c >= "0" && c <= "9")) { return false }
+        }
+    }
+    return true
+}
+
+fn _ambil(data, j) {
+    var v = data
+    for _, k in str::split(j, ".") {
+        let t = typeof(v)
+        if t == "dict" {
+            if !dict::has(v, k) { return Err(«kunci `${k}` tidak ada») }
+            v = v[k]
+        } else if t == "array" {
+            var digit = true
+            for _, r in str::chars(k) { if !(str(r) >= "0" && str(r) <= "9") { digit = false } }
+            if !digit { return Err(«array dibaca dengan `${k}` — indeks array berupa angka») }
+            let n = str::to_int(k)
+            if str(n) != k || n >= len(v) { return Err(«indeks `${k}` di luar array berisi ${len(v)}») }
+            v = v[n]
+        } else {
+            return Err(«`${k}` dibaca dari nilai bertipe `${t}`»)
+        }
+    }
+    return Ok(v)
+}
+
+fn _tampil(v, filter, jalur) {
+    if filter == "json" { return Ok(json::stringify(v)) }
+    let t = typeof(v)
+    if t == "array" || t == "dict" || t == "tuple" {
+        return Err(«`${jalur}` bertipe `${t}` — tulis `{{ ${jalur} | json }}` kalau memang mau dicetak»)
+    }
+    let s = str(v)
+    if filter == "upper" { return Ok(str::upper(s)) }
+    if filter == "lower" { return Ok(str::lower(s)) }
+    if filter == "trim" { return Ok(str::trim(s)) }
+    return Ok(s)
+}
+
+fn _kutip(s) {
+    for _, r in str::chars(s) {
+        let k = r as int
+        if k < 32 || k == 127 { return «(${len(s)} karakter, memuat karakter kendali)» }
+    }
+    return len(s) <= 40 $ «`${s}`» : «`${s[0:40]}…`»
+}
+
+// Cari `pola` (dua karakter) di `cs` mulai `dari`; -1 kalau tidak ada.
+fn _cari(cs, dari, a, b) {
+    var i = dari
+    while i + 1 < len(cs) {
+        if cs[i] == a && cs[i + 1] == b { return i }
+        i += 1
+    }
+    return -1
+}
+
+/// Isi templat dengan `data` (dict). `\{{` menulis `{{` apa adanya. `Err` menyebut baris dan sebabnya.
+pub fn isi(teks, data) {
+    let cs = arr::map(str::chars(teks), |r| str(r))
+    var keluar = []
+    var baris = 1
+    var i = 0
+    while i < len(cs) {
+        let a = _cari(cs, i, "{", "{")
+        let ujung = a < 0 $ len(cs) : a
+        var j = i
+        while j < ujung {
+            if cs[j] == "\n" { baris += 1 }
+            j += 1
+        }
+        if a < 0 {
+            keluar = arr::push(keluar, str::join(cs[i:], ""))
+            break
+        }
+        if a > i && cs[a - 1] == "\\" {
+            keluar = arr::push(keluar, str::join(cs[i:a - 1], "") + "{{")
+            i = a + 2
+            continue
+        }
+        keluar = arr::push(keluar, str::join(cs[i:a], ""))
+        let t = _cari(cs, a + 2, "}", "}")
+        if t < 0 { return Err(«baris ${baris}: `{{` tidak ditutup `}}`») }
+        let isi_tag = str::trim(str::join(cs[a + 2:t], ""))
+        if str::contains(isi_tag, "{{") { return Err(«baris ${baris}: `{{` di dalam tag — tutup yang pertama dulu») }
+        let bagian = arr::map(str::split(isi_tag, "|"), |x| str::trim(x))
+        if len(bagian) > 2 { return Err(«baris ${baris}: satu tag paling banyak satu filter») }
+        let jalur = bagian[0]
+        let filter = len(bagian) == 2 $ bagian[1] : ""
+        if !_jalur_sah(jalur) {
+            return Err(«baris ${baris}: ${_kutip(jalur)} bukan jalur nilai — templat ini cuma menerima nama, titik dan indeks, bukan ekspresi»)
+        }
+        if filter != "" && !arr::contains(FILTER, filter) {
+            return Err(«baris ${baris}: filter ${_kutip(filter)} tidak dikenal — yang ada: ${str::join(FILTER, ", ")}»)
+        }
+        match _ambil(data, jalur) {
+            Ok(v) => {
+                match _tampil(v, filter, jalur) {
+                    Ok(s) => { keluar = arr::push(keluar, s) }
+                    Err(e) => { return Err(«baris ${baris}: ${e}») }
+                }
+            }
+            Err(e) => { return Err(«baris ${baris}: `${jalur}` — ${e}») }
+        }
+        var k = a
+        while k < t {
+            if cs[k] == "\n" { baris += 1 }
+            k += 1
+        }
+        i = t + 2
+    }
+    return Ok(str::join(keluar, ""))
+}

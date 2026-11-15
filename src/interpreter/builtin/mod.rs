@@ -140,7 +140,7 @@ pub enum NativeFnKind {
     PtrNew, PtrNull, PtrIsNull, PtrAddr, PtrGet, PtrSet, PtrFree, PtrUpdate, PtrInc, PtrDec, MutexWithLock,
 
     // crypto:: — hashing, HMAC, CRC32, base64/hex, random aman, AES-256-CBC.
-    CryptoMd5, CryptoSha1, CryptoSha256, CryptoSha512, CryptoHmacSha256, CryptoCrc32,
+    CryptoMd5, CryptoSha1, CryptoSha256, CryptoSha512, CryptoHmacSha256, CryptoCompareDigest, CryptoCrc32,
     CryptoBase64Encode, CryptoBase64Decode, CryptoHexEncode, CryptoHexDecode,
     CryptoRandomHex, CryptoRandomInt,
     CryptoAesGenKey, CryptoAesGenIv, CryptoAesEncrypt, CryptoAesDecrypt,
@@ -610,6 +610,7 @@ impl Env {
         self.n("dok::delete", DokHttpDelete);
         self.n("crypto::sha512",         CryptoSha512);
         self.n("crypto::hmac_sha256",    CryptoHmacSha256);
+        self.n("crypto::compare_digest", CryptoCompareDigest);
         self.n("crypto::crc32",          CryptoCrc32);
         self.n("crypto::base64_encode",  CryptoBase64Encode);
         self.n("crypto::base64_decode",  CryptoBase64Decode);

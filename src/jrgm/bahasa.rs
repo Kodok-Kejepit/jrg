@@ -203,7 +203,7 @@ pub(crate) fn resep_proyek(m: &Manifest) -> Result<Option<&'static Resep>, Strin
 
 /// Proyek bahasa lain di direktori kerja, atau `None` (tanpa jrgm.toml, atau proyek JRG).
 pub(crate) fn proyek_kini() -> Result<Option<(Manifest, &'static Resep, PathBuf)>, String> {
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !akar.join("jrgm.toml").is_file() { return Ok(None); }
     let m = Manifest::load(&akar)?;
     if let Some(k) = m.perintah_asing.first() {
@@ -267,18 +267,23 @@ impl Isian {
                     continue;
                 }
                 match t.as_str() {
-                    "{sumber}" => argv.extend(self.sumber.iter().cloned()),
-                    "{pustaka}" => argv.extend(self.sumber.iter().filter(|s| **s != self.entri).cloned()),
-                    "{tiap}" => argv.extend(satu.cloned()),
+                    "{sumber}" => argv.extend(self.sumber.iter().map(|s| jalur_bukan_opsi(s))),
+                    "{pustaka}" => argv.extend(self.sumber.iter().filter(|s| **s != self.entri).map(|s| jalur_bukan_opsi(s))),
+                    "{tiap}" => argv.extend(satu.map(|s| jalur_bukan_opsi(s))),
                     _ => {
-                        let mut s = t.replace("{entri}", &self.entri).replace("{nama}", &self.nama)
+                        let mut s = t.replace("{entri}", &jalur_bukan_opsi(&self.entri)).replace("{nama}", &self.nama)
                             .replace("{keluaran}", &self.keluaran).replace("{kelas}", &self.kelas());
                         if s.contains("{uji") {
                             let (Some(u), Some(n)) = (self.uji.as_ref(), uji_nama.as_ref()) else {
                                 return Err(format!("`{}` memakai {{uji..}} di luar langkah uji", templat));
                             };
                             s = s.replace("{uji_keluaran}", &format!("target/uji/{}", n))
-                                .replace("{uji_nama}", n).replace("{uji}", u);
+                                .replace("{uji_nama}", n).replace("{uji}", &jalur_bukan_opsi(u));
+                        }
+                        // Isi dari proyek (nama, kelas) yang membuat argumen diawali `-` akan dibaca perkakas sebagai opsi.
+                        if s.starts_with('-') && !t.starts_with('-') {
+                            return Err(format!("jrgm: `{}` di `{}` jadi `{}`, diawali `-` — perkakasnya akan membacanya \
+                                sebagai opsi, jadi ditolak; ganti nama berkas/paketnya", t, templat, s));
                         }
                         argv.push(s);
                     }
@@ -289,6 +294,12 @@ impl Isian {
         }
         Ok(hasil)
     }
+}
+
+/// Jalur relatif diawali `-` (`-Wl,-plugin=x.c` di proyek asing) diberi `./`: tanpa itu kompilator membacanya
+/// sebagai OPSI, dan membangun proyek orang lain berarti menjalankan kodenya.
+fn jalur_bukan_opsi(s: &str) -> String {
+    if s.starts_with('-') { format!("./{}", s) } else { s.to_string() }
 }
 
 fn env_tugas(t: &str) -> bool {
@@ -373,8 +384,8 @@ fn jalan_diam(isi: &Isian, bahasa: &str, templat: &str, judul: &str) -> Result<(
     for (env, argv) in isi.rakit(templat)? {
         if !ketemu(&argv[0], &isi.akar) { return Err(tak_ketemu(&argv[0], bahasa)); }
         let mut c = command(&isi.akar, &env, &argv);
-        let out = jrgc::putar::jalankan(&mut c, judul)
-            .map_err(|e| format!("jrgm: gagal menjalankan `{}`: {}", argv[0], jrgc::host::galat_io(&e)))?;
+        let out = crate::putar::jalankan(&mut c, judul)
+            .map_err(|e| format!("jrgm: gagal menjalankan `{}`: {}", argv[0], crate::host::galat_io(&e)))?;
         let teks = String::from_utf8_lossy(&out.stderr);
         if !teks.trim().is_empty() { eprint!("{}", teks); }
         if !out.status.success() {
@@ -393,7 +404,7 @@ fn jalan_terbuka(isi: &Isian, bahasa: &str, templat: &str, tambahan: &[String]) 
         if !ketemu(&argv[0], &isi.akar) { return Err(tak_ketemu(&argv[0], bahasa)); }
         argv.extend(tambahan.iter().cloned());
         let st = command(&isi.akar, &env, &argv).status()
-            .map_err(|e| format!("jrgm: gagal menjalankan `{}`: {}", argv[0], jrgc::host::galat_io(&e)))?;
+            .map_err(|e| format!("jrgm: gagal menjalankan `{}`: {}", argv[0], crate::host::galat_io(&e)))?;
         kode = kode_dari(&st);
         if kode != 0 { break; }
     }
@@ -412,7 +423,7 @@ fn status_teks(st: &std::process::ExitStatus) -> String {
 
 fn siapkan_target(akar: &Path) -> Result<(), String> {
     std::fs::create_dir_all(akar.join("target/uji"))
-        .map_err(|e| format!("jrgm: tidak bisa membuat target/: {}", jrgc::host::galat_io(&e)))
+        .map_err(|e| format!("jrgm: tidak bisa membuat target/: {}", crate::host::galat_io(&e)))
 }
 
 fn wajib(langkah: &[String], m: &Manifest, apa: &str, kunci: &str) -> Result<(), String> {
@@ -568,10 +579,10 @@ pub(crate) fn resep_berkas(f: &Path) -> Option<&'static Resep> {
 
 /// `jrgm exec berkas.py`: tanpa proyek; hasil kompilasi di direktori sementara.
 pub(crate) fn exec(f: &Path, r: &Resep, args: &[String]) -> Result<i32, String> {
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !f.is_file() { return Err(format!("jrgm: berkas `{}` tidak ada", f.display())); }
     let tmp = std::env::temp_dir().join(format!("jrgm-exec-{}", std::process::id()));
-    std::fs::create_dir_all(&tmp).map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    std::fs::create_dir_all(&tmp).map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     let stem = f.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "program".into());
     let isi = Isian { akar, nama: stem.clone(), entri: f.to_string_lossy().to_string(),
         keluaran: tmp.join(&stem).to_string_lossy().to_string(), sumber: vec![f.to_string_lossy().to_string()], uji: None };
@@ -614,7 +625,7 @@ pub(crate) fn awasi(m: &Manifest, r: &Resep, akar: &Path, args: &[String], bersi
             let (env, mut argv) = daftar.remove(0);
             if !ketemu(&argv[0], akar) { return Err(tak_ketemu(&argv[0], r.nama)); }
             argv.extend(args.iter().cloned());
-            anak = Some(command(akar, &env, &argv).spawn().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?);
+            anak = Some(command(akar, &env, &argv).spawn().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?);
             Ok(())
         })();
         if let Err(e) = siap { eprintln!("{}", e); }
@@ -641,8 +652,8 @@ pub(crate) fn rangka(nama: &str, r: &Resep) -> Result<(), String> {
     if akar.exists() { return Err(format!("jrgm: `{}` sudah ada", nama)); }
     let tulis = |p: &str, isi: &str| -> Result<(), String> {
         let f = akar.join(p);
-        if let Some(d) = f.parent() { std::fs::create_dir_all(d).map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?; }
-        std::fs::write(&f, isi.replace("{nama}", nama)).map_err(|e| format!("jrgm: tidak bisa menulis {}: {}", p, jrgc::host::galat_io(&e)))
+        if let Some(d) = f.parent() { std::fs::create_dir_all(d).map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?; }
+        std::fs::write(&f, isi.replace("{nama}", nama)).map_err(|e| format!("jrgm: tidak bisa menulis {}: {}", p, crate::host::galat_io(&e)))
     };
     for (p, isi) in r.rangka { tulis(p, isi)?; }
     let baris = |k: &str, l: &[&str]| -> String {
@@ -687,6 +698,19 @@ mod tes {
         assert_eq!(r[0].1, vec!["cc", "-o", "target/app", "src/a.c", "src/main.c", "src/a.c", "tests/u.c", "target/uji/u"]);
         assert_eq!(isi.rakit("node --check {tiap}").unwrap().len(), 2, "{{tiap}} mengulang per berkas");
         assert_eq!(isi.rakit("java -cp k {kelas}").unwrap()[0].1[3], "main");
+    }
+
+    /// Nama berkas proyek tidak pernah jadi OPSI perkakas (kelas injeksi opsi, `-Wl,-plugin=x.c`): jalur diberi
+    /// `./`, dan isi lain yang membuat argumen diawali `-` ditolak.
+    #[test]
+    fn nama_berkas_tidak_jadi_opsi() {
+        let isi = Isian { akar: PathBuf::from("/p"), nama: "app".into(), entri: "-Wl,-plugin=x.java".into(),
+            keluaran: "target/app".into(), sumber: vec!["-v.c".into(), "a.c".into()], uji: Some("-u.c".into()) };
+        let r = isi.rakit("cc -o {keluaran} {sumber} {entri} {uji}").unwrap();
+        assert_eq!(r[0].1, vec!["cc", "-o", "target/app", "./-v.c", "a.c", "./-Wl,-plugin=x.java", "./-u.c"]);
+        assert_eq!(isi.rakit("node --check {tiap}").unwrap()[0].1[2], "./-v.c");
+        let e = isi.rakit("java -cp k {kelas}").unwrap_err();
+        assert!(e.contains("diawali `-`"), "{}", e);
     }
 
     #[test]

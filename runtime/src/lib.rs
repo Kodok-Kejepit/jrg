@@ -148,6 +148,8 @@ pub extern "C" fn jrg_alloc(size: i64, align: i64) -> *mut u8 {
         return core::ptr::NonNull::<u8>::dangling().as_ptr();
     }
     let align = if align <= 0 { 1 } else { align as usize };
+    // `Layout` di atas isize::MAX adalah UB; perkalian ukuran yang jenuh di C berakhir di sini.
+    if size as u64 > (isize::MAX as u64) - align as u64 { memori_habis() }
     unsafe {
         let l = core::alloc::Layout::from_size_align_unchecked(size as usize, align);
         let p = alloc::alloc::alloc(l);
@@ -157,16 +159,32 @@ pub extern "C" fn jrg_alloc(size: i64, align: i64) -> *mut u8 {
 }
 
 /// Alokasi gagal: dilaporkan, bukan dibiarkan jadi SIGSEGV saat penunjuk nolnya ditulisi.
-/// Pesannya tetap — di titik ini tidak ada memori untuk merakit kalimat.
+/// Kalimatnya dirakit di arena cadangan, karena arena biasa sudah tidak bisa diisi.
 #[cold]
 #[inline(never)]
 fn memori_habis() -> ! {
-    const PESAN: &str = "memori habis — program ini meminta lebih banyak memori daripada yang tersedia\n  \
+    unsafe { pakai_cadangan() };
+    jrg_panic(PESAN_MEMORI_HABIS.as_ptr(), PESAN_MEMORI_HABIS.len() as i64)
+}
+
+/// Ruang untuk MELAPOR saat memori habis: kalimat galat dan lokasinya dirakit di memori juga.
+static mut CADANGAN: [u8; 1 << 20] = [0; 1 << 20];
+static mut CADANGAN_TERPAKAI: bool = false;
+
+unsafe fn pakai_cadangan() {
+    if CADANGAN_TERPAKAI { return; }
+    CADANGAN_TERPAKAI = true;
+    let a = &mut *core::ptr::addr_of_mut!(ARENA);
+    let awal = core::ptr::addr_of_mut!(CADANGAN) as usize;
+    a.kursor = awal;
+    a.ujung = awal + (1 << 20);
+    a.terakhir = awal;
+}
+
+const PESAN_MEMORI_HABIS: &str = "memori habis — program ini meminta lebih banyak memori daripada yang tersedia\n  \
         bantuan: biner `--emit-llvm` tidak membebaskan salinan lama, jadi menyalin koleksi besar \
         berulang-ulang menghabiskan memori; pakai bentuk yang mengubah di tempat \
         (`a += [x]`, `q = q.push(x)`, `q = q.rest()`), atau jalankan tanpa `--emit-llvm`";
-    jrg_panic(PESAN.as_ptr(), PESAN.len() as i64)
-}
 
 /// Kalau `ptr..ptr+len` berakhir PERSIS di kursor arena, perpanjang kursornya
 /// sebanyak `tambahan` byte dan kembalikan `true`.
@@ -273,8 +291,15 @@ static ALLOCATOR: BumpAllocator = BumpAllocator;
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     flush_stdout();
+    // Cadangannya pun habis saat melapor: kalimatnya ditulis apa adanya, tanpa lokasi.
+    if unsafe { CADANGAN_TERPAKAI } {
+        write_all(FD_STDERR, b"error: ");
+        write_all(FD_STDERR, PESAN_MEMORI_HABIS.as_bytes());
+        write_all(FD_STDERR, b"\n");
+        unsafe { exit(PANIC_EXIT_CODE) }
+    }
     write_all(FD_STDERR, b"ada yang gagal saat program jalan\n");
-    unsafe { exit(101) }
+    unsafe { exit(PANIC_EXIT_CODE) }
 }
 
 /// Never actually called: nothing here unwinds (`panic = "abort"`), but
@@ -300,7 +325,16 @@ unsafe fn borrow_bytes<'a>(ptr: *const u8, len: i64) -> &'a [u8] {
 fn cari_byte(bak: &[u8], pola: &[u8]) -> Option<usize> {
     if pola.is_empty() { return Some(0); }
     if pola.len() > bak.len() { return None; }
-    bak.windows(pola.len()).position(|w| w == pola)
+    // Byte pertama dipindai dulu (jalur cepat pola satu byte), sisanya dibandingkan di kandidat saja.
+    let (awal, sisa) = (pola[0], &pola[1..]);
+    let akhir = bak.len() - pola.len();
+    let mut i = 0;
+    while i <= akhir {
+        let j = i + bak[i..=akhir].iter().position(|&b| b == awal)?;
+        if &bak[j + 1..j + pola.len()] == sisa { return Some(j); }
+        i = j + 1;
+    }
+    None
 }
 
 unsafe fn borrow_str<'a>(ptr: *const u8, len: i64) -> &'a str {
@@ -526,9 +560,54 @@ struct Panik {
     sedang: bool,
     pesan: Option<String>,
     ikut: Vec<String>,
+    /// Situs (nomor dari `jrg_situs`) tempat kalimat pertamanya lahir; 0 = tidak diketahui.
+    situs: i32,
 }
 
-static mut PANIK: Panik = Panik { sedang: false, pesan: None, ikut: Vec::new() };
+static mut PANIK: Panik = Panik { sedang: false, pesan: None, ikut: Vec::new(), situs: 0 };
+
+/// Ditulis IR tepat sebelum panggilan panik di blok dingin; dibaca (lalu dinolkan) saat kalimatnya dicatat.
+#[no_mangle]
+pub static mut jrg_situs: i32 = 0;
+
+/// Tabel lokasi dari IR: per situs `[awal, panjang, lebar gutter]` di dalam `teks` (blok `-->` yang sudah dirender).
+static mut SITUS: (*const [u32; 3], i32, *const u8) = (core::ptr::null(), 0, core::ptr::null());
+
+#[no_mangle]
+pub unsafe extern "C" fn jrg_situs_pasang(isi: *const [u32; 3], n: *const i32, teks: *const u8) {
+    SITUS = (isi, *n, teks);
+}
+
+/// Bentuk galat acuan: `error: kalimat`, blok lokasi kalau situsnya diketahui, lalu `= bantuan:`/`= catatan:`.
+fn bentuk_galat(s: &str, situs: i32) -> String {
+    let mut baris = s.lines();
+    let mut out = String::from("error: ");
+    out.push_str(baris.next().unwrap_or(""));
+    let mut gutter = 2usize;
+    let (isi, n, teks) = unsafe { SITUS };
+    if situs > 0 && situs <= n && !isi.is_null() {
+        let [awal, panjang, lebar] = unsafe { *isi.add((situs - 1) as usize) };
+        if panjang > 0 {
+            let b = unsafe { core::slice::from_raw_parts(teks.add(awal as usize), panjang as usize) };
+            out.push_str(core::str::from_utf8(b).unwrap_or(""));
+            gutter = lebar as usize + 1;
+        }
+    }
+    for sisa in baris {
+        let t = sisa.trim();
+        let (jenis, isi) = if let Some(x) = t.strip_prefix("bantuan:") { ("bantuan", x.trim()) }
+            else if let Some(x) = t.strip_prefix("catatan:") { ("catatan", x.trim()) }
+            else { ("catatan", t) };
+        if isi.is_empty() { continue; }
+        out.push('\n');
+        for _ in 0..gutter { out.push(' '); }
+        out.push_str("= ");
+        out.push_str(jenis);
+        out.push_str(": ");
+        out.push_str(isi);
+    }
+    out
+}
 
 /// Kalimat galat dicatat dulu, tidak langsung dicetak: `defer` yang masih
 /// terdaftar jalan lebih dulu (`mati`), dan keluarannya harus mendahuluinya.
@@ -536,7 +615,11 @@ fn eprint_line(args: fmt::Arguments<'_>) {
     let mut s = String::new();
     let _ = s.write_fmt(args);
     let p = unsafe { &mut *core::ptr::addr_of_mut!(PANIK) };
-    if p.pesan.is_none() { p.pesan = Some(s); } else { p.ikut.push(s); }
+    if p.pesan.is_none() {
+        p.pesan = Some(s);
+        p.situs = unsafe { jrg_situs };
+    } else { p.ikut.push(s); }
+    unsafe { jrg_situs = 0 };
 }
 
 /// Ujung tiap panik: jalankan `defer` korutin ini, cetak galatnya, keluar.
@@ -557,14 +640,17 @@ fn mati() -> ! {
         unsafe { jrg_masa_gagal(s.as_ptr(), s.len() as i64) };
         p.sedang = true;
     }
-    s.push('\n');
+    let situs = core::mem::replace(&mut p.situs, 0);
     // Goroutine `spawn` yang gagal cuma menghentikan dirinya; stack yang habis tidak bisa.
     if unsafe { !TAK_GUGUR && jrg_ko_gugur(1) != 0 } {
+        s.push('\n');
         write_all(FD_STDERR, b"goroutine error: ");
         write_all(FD_STDERR, s.as_bytes());
         p.sedang = false;
         unsafe { jrg_ko_gugur(0) };
     }
+    let mut s = bentuk_galat(&s, situs);
+    s.push_str("\n\n");
     write_all(FD_STDERR, s.as_bytes());
     unsafe { exit(PANIC_EXIT_CODE) }
 }
@@ -740,6 +826,55 @@ pub extern "C" fn jrg_char_to_str(cp: u32, out_ptr: *mut *const u8, out_len: *mu
 // String operations
 // ─────────────────────────────────────────────────────────────────────────
 
+/// Satu bagian `jrg_str_concat_n`: `jenis` 0 = teks (`p`, `n` panjang), 1 = bilangan bulat `n` (desimal).
+#[repr(C)]
+pub struct BagianTeks { jenis: i64, p: *const u8, n: i64 }
+
+/// `a + b + c + ..` atas teks dalam SATU alokasi: panjang dihitung dulu, bulat ditulis langsung (tanpa teks
+/// sementara `str(x)`). Kalau bagian pertama alokasi arena terakhir, sisanya ditempel di belakangnya.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_str_concat_n(bagian: *const BagianTeks, jumlah: i64, out_ptr: *mut *const u8, out_len: *mut i64) {
+    let bs = core::slice::from_raw_parts(bagian, jumlah.max(0) as usize);
+    // Digit sebuah bulat ditulis dari belakang ke penyangga tumpukan; tanpa alokasi sementara.
+    let digit = |x: i64, buf: &mut [u8; 20]| -> usize {
+        let mut i = buf.len();
+        let mut u = x.unsigned_abs();
+        loop { i -= 1; buf[i] = b'0' + (u % 10) as u8; u /= 10; if u == 0 { break; } }
+        i
+    };
+    let mut total = 0usize;
+    for b in bs {
+        total += if b.jenis == 1 { let mut buf = [0u8; 20]; 20 - digit(b.n, &mut buf) + (b.n < 0) as usize } else { b.n.max(0) as usize };
+    }
+    let tulis = |mut dst: *mut u8, dari: usize| {
+        for b in &bs[dari..] {
+            if b.jenis == 1 {
+                let mut buf = [0u8; 20];
+                let i = digit(b.n, &mut buf);
+                if b.n < 0 { *dst = b'-'; dst = dst.add(1); }
+                core::ptr::copy_nonoverlapping(buf.as_ptr().add(i), dst, 20 - i);
+                dst = dst.add(20 - i);
+            } else if b.n > 0 {
+                core::ptr::copy_nonoverlapping(b.p, dst, b.n as usize);
+                dst = dst.add(b.n as usize);
+            }
+        }
+    };
+    if let Some(p0) = bs.first().filter(|b| b.jenis == 0 && b.n > 0) {
+        let a = p0.n as usize;
+        if arena_perpanjang(p0.p, a, total - a) {
+            tulis((p0.p as *mut u8).add(a), 1);
+            *out_ptr = p0.p;
+            *out_len = total as i64;
+            return;
+        }
+    }
+    let mut v: Vec<u8> = Vec::with_capacity(total);
+    tulis(v.as_mut_ptr(), 0);
+    v.set_len(total);
+    emit_bytes(v, out_ptr, out_len);
+}
+
 #[no_mangle]
 pub extern "C" fn jrg_str_concat(
     aptr: *const u8, alen: i64,
@@ -789,9 +924,25 @@ pub extern "C" fn jrg_str_lt(aptr: *const u8, alen: i64, bptr: *const u8, blen: 
 /// matching the tree-walking interpreter's `s.chars().count()`.
 #[no_mangle]
 pub extern "C" fn jrg_str_char_count(ptr: *const u8, len: i64) -> i64 {
-    let s = unsafe { borrow_str(ptr, len) };
-    s.chars().count() as i64
+    // Bita yang bukan lanjutan (10xxxxxx) dihitung langsung: teks JRG selalu UTF-8 sah (tiap pintu byte → teks
+    // memvalidasinya). Hasilnya diingat per (ptr, len) — kunci yang sama dengan memo `jrg_str_char_at`.
+    unsafe {
+        if jrg_teks_memo_p == ptr && jrg_teks_memo_l == len && !ptr.is_null() { return jrg_teks_memo_n; }
+    }
+    let b = unsafe { borrow_bytes(ptr, len) };
+    let n = b.iter().filter(|&&x| (x as i8) >= -64).count() as i64;
+    unsafe { jrg_teks_memo_p = ptr; jrg_teks_memo_l = len; jrg_teks_memo_n = n; }
+    n
 }
+
+// (ptr, len, jumlah karakter) teks terakhir yang dihitung: `for i in 0..len(s) { s[i] }` menghitung sekali. Dibaca
+// juga oleh IR (`jumlah_karakter`), jadi memo yang kena tidak memanggil runtime; isi teks di arena tidak berubah.
+#[no_mangle]
+pub static mut jrg_teks_memo_p: *const u8 = core::ptr::null();
+#[no_mangle]
+pub static mut jrg_teks_memo_l: i64 = 0;
+#[no_mangle]
+pub static mut jrg_teks_memo_n: i64 = 0;
 
 #[no_mangle]
 pub extern "C" fn jrg_str_to_upper(ptr: *const u8, len: i64, out_ptr: *mut *const u8, out_len: *mut i64) {
@@ -881,6 +1032,13 @@ pub extern "C" fn jrg_str_contains(aptr: *const u8, alen: i64, bptr: *const u8, 
 pub extern "C" fn jrg_str_reverse(ptr: *const u8, len: i64, out_ptr: *mut *const u8, out_len: *mut i64) {
     // Panjang byte hasilnya PERSIS sama dengan masukannya — membalik urutan
     // karakter tidak mengubah berapa byte yang dipakai masing-masing.
+    // ASCII: tiap byte satu karakter, dibalik langsung tanpa mendekode.
+    let b = unsafe { borrow_bytes(ptr, len) };
+    if b.is_ascii() {
+        let v: Vec<u8> = b.iter().rev().copied().collect();
+        unsafe { emit_bytes(v, out_ptr, out_len) };
+        return;
+    }
     let s = unsafe { borrow_str(ptr, len) };
     let mut v: Vec<u8> = Vec::with_capacity(s.len());
     for c in s.chars().rev() {
@@ -892,9 +1050,20 @@ pub extern "C" fn jrg_str_reverse(ptr: *const u8, len: i64, out_ptr: *mut *const
 
 #[no_mangle]
 pub extern "C" fn jrg_str_repeat(ptr: *const u8, len: i64, n: i64, out_ptr: *mut *const u8, out_len: *mut i64) {
+    // Aturan dan kalimatnya `interpreter::ulang_string`: negatif dan hasil di atas 256 MiB ditolak.
     let s = unsafe { borrow_bytes(ptr, len) };
-    let n = if n < 0 { 0 } else { n as usize };
-    unsafe { emit_bytes(s.repeat(n), out_ptr, out_len) };
+    let total = s.len() as i128 * n as i128;
+    if n < 0 || total > 256 * 1024 * 1024 {
+        let pesan = if n < 0 {
+            format!("tidak bisa mengulang string sebanyak {} kali — jumlah pengulangan tidak boleh negatif", n)
+        } else {
+            let karakter = s.iter().filter(|b| *b & 0xC0 != 0x80).count();
+            format!("hasil pengulangan kegedean: {} karakter x {} kali = sekitar {} byte \
+                     (batasnya 256 MiB). Cek lagi angka pengulangannya", karakter, n, total)
+        };
+        jrg_panic(pesan.as_ptr(), pesan.len() as i64);
+    }
+    unsafe { emit_bytes(s.repeat(n as usize), out_ptr, out_len) };
 }
 
 #[no_mangle]
@@ -996,6 +1165,11 @@ pub extern "C" fn jrg_str_slice(
 #[no_mangle]
 pub extern "C" fn jrg_str_char_at(ptr: *const u8, len: i64, idx: i64) -> u32 {
     if idx < 0 { return 0; }
+    unsafe {
+        if jrg_teks_memo_p == ptr && jrg_teks_memo_l == len && jrg_teks_memo_n == len && !ptr.is_null() {
+            return if idx < len { *ptr.add(idx as usize) as u32 } else { 0 };
+        }
+    }
     let target = idx;
 
     // Reuse the memo when this is the same string as last time; otherwise
@@ -1055,12 +1229,20 @@ pub extern "C" fn jrg_str_next_char(
     ptr: *const u8, len: i64, offset: i64,
     out_cp: *mut u32, out_next_offset: *mut i64,
 ) -> i32 {
-    let s = unsafe { borrow_str(ptr, len) };
+    // Cuma jendela 4 bita di `offset` yang dibaca: `borrow_str` memvalidasi SELURUH teks, jadi tiap langkah
+    // `for c in s` dulu O(panjang) — perulangan atas teks di biner LLVM kuadrat.
+    if ptr.is_null() || len <= 0 { return 0; }
+    let bita = unsafe { core::slice::from_raw_parts(ptr, len as usize) };
     let off = if offset < 0 { 0usize } else { offset as usize };
-    if off >= s.len() {
+    if off >= bita.len() {
         return 0;
     }
-    match s[off..].chars().next() {
+    let jendela = &bita[off..bita.len().min(off + 4)];
+    let sah = match core::str::from_utf8(jendela) {
+        Ok(t) => t,
+        Err(e) => unsafe { core::str::from_utf8_unchecked(&jendela[..e.valid_up_to()]) },
+    };
+    match sah.chars().next() {
         Some(c) => {
             unsafe {
                 *out_cp = c as u32;
@@ -1075,7 +1257,8 @@ pub extern "C" fn jrg_str_next_char(
 // ─────────────────────────────────────────────────────────────────────────
 // Panics — every one prints to stderr and terminates the process with exit …
 
-const PANIC_EXIT_CODE: i32 = 101;
+/// Sama dengan interpreter dan `--vm`: galat saat jalan keluar dengan 1 (dulu 101, konvensi panik Rust).
+const PANIC_EXIT_CODE: i32 = 1;
 
 #[no_mangle]
 pub extern "C" fn jrg_panic(ptr: *const u8, len: i64) -> ! {
@@ -1083,6 +1266,41 @@ pub extern "C" fn jrg_panic(ptr: *const u8, len: i64) -> ! {
     flush_stdout();
     eprint_line(format_args!("{}", s));
     mati()
+}
+
+// ── Mode `--uji` (`llvm::uji`): templat kalimatnya dirakit `jrgc` dari `crate::uji` ──
+
+static mut UJI: (i64, i64) = (0, 0);
+
+/// Laporan satu tes. `rc` 0 = lulus; selain itu `pesan` kalimat galatnya, dan situsnya masih di `PANIK`
+/// (`mati` menitipkan galat badan tugas tanpa mengosongkannya). `baris[situs - 1]` 0 = tanpa baris.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_uji_lapor(rc: i32, pp: *const u8, pl: i64, okp: *const u8, okl: i64,
+    gp: *const u8, gl: i64, gbp: *const u8, gbl: i64, baris: *const i32, n: *const i32) {
+    let situs = core::mem::replace(&mut (*core::ptr::addr_of_mut!(PANIK)).situs, 0);
+    let uji = &mut *core::ptr::addr_of_mut!(UJI);
+    if rc == 0 {
+        uji.0 += 1;
+        write_out(&format!("{}\n", borrow_str(okp, okl)), 0);
+        return;
+    }
+    uji.1 += 1;
+    // Sebabnya baris pertama yang tidak kosong, dirapikan — aturan `uji::baris_hasil`.
+    let pesan = borrow_str(pp, pl);
+    let sebab = pesan.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let b = if situs > 0 && situs <= *n { *baris.add((situs - 1) as usize) } else { 0 };
+    let t = if b > 0 { borrow_str(gbp, gbl).replacen('\u{2}', &b.to_string(), 1) } else { borrow_str(gp, gl).to_string() };
+    write_out(&format!("{}\n", t.replacen('\u{1}', sebab, 1)), 0);
+}
+
+/// Rangkuman (`\u{3}` total, `\u{4}` lulus, `\u{5}` gagal); jawabannya kode keluar `main` buatan.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_uji_akhir(tp: *const u8, tl: i64) -> i64 {
+    let (l, g) = *core::ptr::addr_of!(UJI);
+    let t = borrow_str(tp, tl).replacen('\u{3}', &(l + g).to_string(), 1)
+        .replacen('\u{4}', &l.to_string(), 1).replacen('\u{5}', &g.to_string(), 1);
+    write_out(&format!("{}\n", t), 0);
+    if g > 0 { 1 } else { 0 }
 }
 
 // ── Pesan panik ────────────────────────────────────────────────────────
@@ -1120,17 +1338,48 @@ pub extern "C" fn jrg_panic_index_oob_jenis(
 #[no_mangle]
 pub extern "C" fn jrg_panic_slice_oob(lo: i64, hi: i64, len: i64) -> ! {
     flush_stdout();
-    if lo > hi {
-        eprint_line(format_args!(
-            "potongan [{}:{}] terbalik — batas awal tidak boleh lebih besar dari batas akhir",
-            lo, hi
-        ));
-    } else {
-        eprint_line(format_args!(
-            "batas potongan [{}:{}] di luar jangkauan — panjangnya {}, jadi batas yang sah 0..{} (atau negatif kalau mau hitung dari belakang)",
-            lo, hi, len, len
-        ));
+    // Urutan dan kalimatnya sama dengan `Interpreter::slice_bound`/`slice_bounds`: awal, akhir, lalu urutan.
+    let pos = |b: i64| if b < 0 { b + len } else { b };
+    let (s, e) = (pos(lo), pos(hi));
+    for (sisi, mentah, p) in [("awal", lo, s), ("akhir", hi, e)] {
+        if p < 0 || p > len {
+            eprint_line(format_args!(
+                "batas {} potongan [{}] di luar jangkauan — panjangnya {}, jadi batas yang sah 0..{} (atau -1..{} kalau dihitung dari belakang)",
+                sisi, mentah, len, len, -len));
+            mati()
+        }
     }
+    eprint_line(format_args!(
+        "potongan [{}:{}] terbalik — batas awal ({}) lebih besar dari batas akhir ({}); tulis yang kecil dulu, mis. [{}:{}]",
+        s, e, s, e, e, s));
+    mati()
+}
+
+/// Kunci yang tidak ada di `d[k]`: kalimatnya sama dengan `galat_index::key_hilang` (urut, paling banyak 12 nama).
+#[no_mangle]
+pub unsafe extern "C" fn jrg_panic_kunci_hilang(ptr: *const u8, len: i64, stride: i64, kp: *const u8, kl: i64) -> ! {
+    flush_stdout();
+    let mut ada: Vec<&[u8]> = (0..len.max(0)).map(|i| kunci_di(ptr, i, stride)).collect();
+    ada.sort_unstable();
+    let kunci = String::from_utf8_lossy(borrow_bytes(kp, kl));
+    let nama: Vec<String> = ada.iter().take(12).map(|k| String::from_utf8_lossy(k).into_owned()).collect();
+    let ekor = if ada.is_empty() { " — belum ada key sama sekali di sini".to_string() }
+        else if ada.len() <= 12 { format!(" — key yang ada: {}", nama.join(", ")) }
+        else { format!(" — key yang ada: {}, dan {} lagi", nama.join(", "), ada.len() - 12) };
+    eprint_line(format_args!("key `{}` tidak ada di dict ini{}", kunci, ekor));
+    mati()
+}
+
+/// `d.k` atas dict tanpa kunci itu: `depan` + daftar kunci (urut) + `belakang`, seperti acuannya.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_panic_field_dict(ptr: *const u8, len: i64, stride: i64,
+    ap: *const u8, al: i64, bp: *const u8, bl: i64) -> ! {
+    flush_stdout();
+    let mut ada: Vec<&[u8]> = (0..len.max(0)).map(|i| kunci_di(ptr, i, stride)).collect();
+    ada.sort_unstable();
+    let nama: Vec<String> = ada.iter().map(|k| String::from_utf8_lossy(k).into_owned()).collect();
+    let tengah = if nama.is_empty() { String::new() } else { format!(" (kalau maksudnya field/key, yang ada: {})", nama.join(", ")) };
+    eprint_line(format_args!("{}{}{}", String::from_utf8_lossy(borrow_bytes(ap, al)), tengah, String::from_utf8_lossy(borrow_bytes(bp, bl))));
     mati()
 }
 
@@ -1154,18 +1403,22 @@ pub extern "C" fn jrg_panic_div_by_zero(kiri: i64, sisa: i32) -> ! {
 pub extern "C" fn jrg_panic_geser(x: i64, y: i64, ke_kiri: i32, bit: i32) -> ! {
     flush_stdout();
     let (op, balik) = if ke_kiri != 0 { ("<<", ">>") } else { (">>", "<<") };
+    // `bit` negatif berarti tipe tak bertanda; hasilnya dihitung seperti acuan, di 128 bit.
+    let (lebar, tipe) = if bit < 0 { (-bit, "tak bertanda") } else { (bit, "bertanda") };
+    let xs = if bit < 0 { x as u64 as i128 } else { x as i128 };
     if y < 0 {
         eprint_line(format_args!(
             "`{} {} {}` — jumlah geseran tidak boleh negatif; kalau maksudnya menggeser ke arah sebaliknya, pakai `{}` dengan jumlah positif",
-            x, op, y, balik));
+            xs, op, y, balik));
     } else if y >= 128 {
         eprint_line(format_args!(
             "`{} {} {}` — integer JRG cuma 128 bit, jadi menggeser {} kali tidak punya arti (semua bitnya sudah keluar jauh sebelum itu)",
-            x, op, y, y));
+            xs, op, y, y));
     } else {
+        let h = if ke_kiri != 0 { xs.wrapping_shl(y as u32) } else { xs >> y };
         eprint_line(format_args!(
-            "`{} {} {}` — hasilnya tidak muat di bilangan bulat {} bit backend LLVM, sementara mesin acuan memakai 128 bit. Jalankan tanpa `--emit-llvm` kalau angkanya memang sebesar itu",
-            x, op, y, bit));
+            "hasil `{} {} {}` = {} tidak muat di bilangan bulat {} bit {} backend LLVM (dua mesin lain menghitung di 128 bit) — jalankan tanpa `--emit-llvm`, atau pakai float",
+            xs, op, y, h, lebar, tipe));
     }
     mati()
 }
@@ -1174,22 +1427,38 @@ pub extern "C" fn jrg_panic_geser(x: i64, y: i64, ke_kiri: i32, bit: i32) -> ! {
 /// di 128 bit supaya pesannya menyebut angka yang dimaksud penulisnya.
 #[no_mangle]
 pub extern "C" fn jrg_panic_luber(a: i64, b: i64, op: i32, bit: i32, bertanda: i32) -> ! {
+    luber("", a, b, op, bit, bertanda)
+}
+
+/// Sama dengan `jrg_panic_luber`, berawalan nama builtin yang menghitungnya (`atomic::add: `).
+#[no_mangle]
+pub extern "C" fn jrg_panic_luber_awal(p: *const u8, n: i64, a: i64, b: i64, op: i32, bit: i32, bertanda: i32) -> ! {
+    let awal = unsafe { core::str::from_utf8_unchecked(core::slice::from_raw_parts(p, n as usize)) };
+    luber(awal, a, b, op, bit, bertanda)
+}
+
+fn luber(awal: &str, a: i64, b: i64, op: i32, bit: i32, bertanda: i32) -> ! {
     let (x, y) = if bertanda != 0 { (a as i128, b as i128) } else { (a as u64 as i128, b as u64 as i128) };
     let (simbol, hasil) = match op {
         0 => ("+", x.checked_add(y)),
         1 => ("-", x.checked_sub(y)),
+        3 => ("/", x.checked_div(y)),
         _ => ("*", x.checked_mul(y)),
     };
     let tipe = if bertanda != 0 { "bertanda" } else { "tak bertanda" };
     flush_stdout();
     match hasil {
+        Some(h) if bit <= 64 && op == 3 => eprint_line(format_args!(
+            "{}hasil `{} {} {}` = {} tidak muat di bilangan bulat {} bit {} backend LLVM (dua mesin lain \
+             menghitung di 128 bit) — jalankan tanpa `--emit-llvm`, atau pakai float",
+            awal, x, simbol, y, h, bit, tipe)),
         Some(h) if bit <= 64 => eprint_line(format_args!(
-            "hasil `{} {} {}` = {} tidak muat di bilangan bulat {} bit {} backend LLVM (dua mesin lain \
+            "{}hasil `{} {} {}` = {} tidak muat di bilangan bulat {} bit {} backend LLVM (dua mesin lain \
              menghitung di 128 bit) — jalankan tanpa `--emit-llvm`, pakai float, atau tulis \
              `math::wrap_add`/`wrap_sub`/`wrap_mul` kalau memang ingin membungkus di 64 bit",
-            x, simbol, y, h, bit, tipe)),
+            awal, x, simbol, y, h, bit, tipe)),
         _ => eprint_line(format_args!(
-            "hasil `{} {} {}` kelewat besar buat bilangan bulat {} bit {} backend LLVM", x, simbol, y, bit, tipe)),
+            "{}hasil `{} {} {}` kelewat besar buat bilangan bulat {} bit {} backend LLVM", awal, x, simbol, y, bit, tipe)),
     }
     mati()
 }
@@ -1206,6 +1475,38 @@ pub extern "C" fn jrg_panic_unwrap_err(ptr: *const u8, len: i64) -> ! {
     let s = unsafe { borrow_str(ptr, len) };
     flush_stdout();
     eprint_line(format_args!("unwrap() pada Result::Err: {}", s));
+    mati()
+}
+
+/// Nilai panjang dipotong seperti acuan (`galat_index::potong_nilai`): 60 karakter, lalu jumlah aslinya.
+fn potong_nilai(v: &str) -> String {
+    let n = v.chars().count();
+    if n <= 60 { return v.to_string(); }
+    let mut s: String = v.chars().take(60).collect();
+    s.push_str(&format!("… ({} karakter)", n));
+    s
+}
+
+/// `match` tanpa lengan yang cocok: templat acuan (`pesan_match_tak_cocok`) dengan `\u{1}` di tempat nilainya.
+#[no_mangle]
+pub extern "C" fn jrg_panic_match(tp: *const u8, tl: i64, vp: *const u8, vl: i64) -> ! {
+    let (t, v) = unsafe { (borrow_str(tp, tl), borrow_str(vp, vl)) };
+    flush_stdout();
+    eprint_line(format_args!("{}", t.replacen('\u{1}', &potong_nilai(v), 1)));
+    mati()
+}
+
+/// `assert_eq` gagal, kalimat acuan (`interpreter::pesan_assert_eq`); `tl < 0`: tanpa argumen ketiga.
+#[no_mangle]
+pub extern "C" fn jrg_panic_assert_eq(
+    kp: *const u8, kl: i64, ktp: *const u8, ktl: i64,
+    np: *const u8, nl: i64, ntp: *const u8, ntl: i64, tp: *const u8, tl: i64,
+) -> ! {
+    let t = |p, l| unsafe { borrow_str(p, l) };
+    let ekor = if tl < 0 { String::new() } else { format!(" — {}", t(tp, tl)) };
+    flush_stdout();
+    eprint_line(format_args!("assert_eq gagal — kiri `{}` ({}), kanan `{}` ({}){}",
+        potong_nilai(t(kp, kl)), t(ktp, ktl), potong_nilai(t(np, nl)), t(ntp, ntl), ekor));
     mati()
 }
 
@@ -1273,7 +1574,7 @@ pub extern "C" fn jrg_panic_sisip_teks(
     pre_ptr: *const u8, pre_len: i64, s_ptr: *const u8, s_len: i64,
     suf_ptr: *const u8, suf_len: i64,
 ) -> ! {
-    let t = unsafe { borrow_str(s_ptr, s_len) }.trim();
+    let t = kutip_inti::kutip(unsafe { borrow_str(s_ptr, s_len) }.trim());
     panik_sisip((pre_ptr, pre_len), &t, (suf_ptr, suf_len))
 }
 
@@ -1292,7 +1593,9 @@ pub extern "C" fn jrg_urai_bulat(ptr: *const u8, len: i64, out_lo: *mut u64, out
         }
         Err(e) => match e.kind() {
             IntErrorKind::Empty => 1,
-            IntErrorKind::PosOverflow | IntErrorKind::NegOverflow => 2,
+            // Sama dengan acuan: luapan cuma kalau semuanya digit (`777…7x` bukan bilangan).
+            IntErrorKind::PosOverflow | IntErrorKind::NegOverflow
+                if t.strip_prefix(['+', '-']).unwrap_or(t).bytes().all(|b| b.is_ascii_digit()) => 2,
             _ if t.parse::<f64>().is_ok() => 4,
             _ => 3,
         },
@@ -1457,22 +1760,32 @@ pub extern "C" fn jrg_fact_i64(n: i64) -> i64 {
     }
 }
 
+fn fpb_u64(a: i64, b: i64) -> u64 {
+    let (mut a, mut b) = (a.unsigned_abs(), b.unsigned_abs());
+    while b != 0 { let t = b; b = a % b; a = t; }
+    a
+}
+
+/// Hasil `math::gcd`/`lcm` yang benar tapi di luar 64 bit: dua mesin lain menjawabnya (128 bit).
+fn hasil_64_atau_mati(nama: &str, h: u128) -> i64 {
+    if h <= i64::MAX as u128 { return h as i64; }
+    flush_stdout();
+    eprint_line(format_args!(
+        "{}: hasilnya {} tidak muat di bilangan bulat 64 bit bertanda backend LLVM (dua mesin lain \
+         menghitung di 128 bit) — jalankan tanpa `--emit-llvm`, atau pakai float", nama, h));
+    mati()
+}
+
 #[no_mangle]
 pub extern "C" fn jrg_gcd_i64(a: i64, b: i64) -> i64 {
-    let (mut a, mut b) = (a.wrapping_abs(), b.wrapping_abs());
-    while b != 0 {
-        let t = b;
-        b = a % b;
-        a = t;
-    }
-    a
+    hasil_64_atau_mati("math::gcd", fpb_u64(a, b) as u128)
 }
 
 #[no_mangle]
 pub extern "C" fn jrg_lcm_i64(a: i64, b: i64) -> i64 {
     if a == 0 || b == 0 { return 0; }
-    let g = jrg_gcd_i64(a, b);
-    (a / g * b).wrapping_abs()
+    let g = fpb_u64(a, b) as u128;
+    hasil_64_atau_mati("math::lcm", a.unsigned_abs() as u128 / g * b.unsigned_abs() as u128)
 }
 
 #[no_mangle]
@@ -1739,6 +2052,18 @@ unsafe fn slot_baru(s: SlotJawa) -> i64 {
     let r = registri();
     r.push(s);
     (r.len() - 1) as i64
+}
+
+/// `jawa::stats`: hidup per jenis (tunggal, array, buffer), total dialokasi, total dilepas.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_jawa_stats(out: *mut i64) {
+    let r = registri();
+    let hidup = |j: i32| r.iter().skip(1).filter(|s| s.sah && s.jenis == j).count() as i64;
+    let total = (r.len() - 1) as i64;
+    let lepas = r.iter().skip(1).filter(|s| !s.sah).count() as i64;
+    for (i, x) in [hidup(JAWA_TUNGGAL), hidup(JAWA_ARRAY), hidup(JAWA_BUFFER), total, lepas].into_iter().enumerate() {
+        *out.add(i) = x;
+    }
 }
 
 #[no_mangle]
@@ -2115,6 +2440,8 @@ pub extern "C" fn jrg_acak63() -> i64 {
 // ── `json::` untuk backend LLVM: pengurai/penyandi bersama atas nilai bertag ──
 // `json_inti.rs` di sini SALINAN PERSIS `src/json_inti.rs` (dijaga tes di `tests/llvm_parity.rs`).
 mod json_inti;
+// `kutip_inti.rs` juga SALINAN PERSIS `src/kutip_inti.rs`.
+mod kutip_inti;
 
 #[cfg(not(test))]
 mod json_llvm {

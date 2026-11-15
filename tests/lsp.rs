@@ -6,19 +6,11 @@ use std::process::{Command, Stdio};
 
 // ─── Alat ──────────────────────────────────────────────────────────────────
 
-fn jrgm() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") { p.pop(); }
-    p.join("jrgm")
-}
+// Dari Cargo, bukan dari letak biner tes: tata letak direktori build berubah antar versi Cargo.
+fn jrgm() -> PathBuf { PathBuf::from(env!("CARGO_BIN_EXE_jrgm")) }
 
-fn jrgc() -> PathBuf {
-    let mut p = std::env::current_exe().unwrap();
-    p.pop();
-    if p.ends_with("deps") { p.pop(); }
-    p.join("jrgc")
-}
+// Dari Cargo, bukan dari letak biner tes: tata letak direktori build berubah antar versi Cargo.
+fn jrgc() -> PathBuf { PathBuf::from(env!("CARGO_BIN_EXE_jrgc")) }
 
 fn bingkai(isi: &str) -> Vec<u8> {
     let mut v = format!("Content-Length: {}\r\n\r\n", isi.len()).into_bytes();

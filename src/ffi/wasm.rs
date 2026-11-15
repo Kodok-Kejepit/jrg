@@ -42,6 +42,14 @@ impl<'a> Baca<'a> {
         Err("LEB128 u32 lebih dari 5 byte".to_string())
     }
 
+    /// Hitungan dari berkas, dibatasi SEBELUM dipakai mengalokasi (batas `wasmparser`); tiap
+    /// elemen memakan paling sedikit satu byte, jadi kapasitasnya tidak pernah melebihi sisa berkas.
+    pub fn hitungan(&mut self, apa: &str, maks: u32) -> Result<(u32, usize), String> {
+        let n = self.u32v()?;
+        if n > maks { return Err(format!("{} {} melewati batas {}", apa, n, maks)); }
+        Ok((n, (n as usize).min(self.b.len().saturating_sub(self.i))))
+    }
+
     pub fn u64v(&mut self) -> Result<u64, String> {
         let mut hasil: u64 = 0;
         let mut geser = 0;
@@ -200,11 +208,11 @@ pub fn baca_modul(b: &[u8]) -> Result<Modul, String> {
                     if r.byte()? != 0x60 {
                         return Err("entri seksi tipe bukan functype".to_string());
                     }
-                    let np = r.u32v()?;
-                    let mut param = Vec::with_capacity(np as usize);
+                    let (np, kap) = r.hitungan("jumlah parameter", MAKS_PARAM)?;
+                    let mut param = Vec::with_capacity(kap);
                     for _ in 0..np { param.push(Tipe::dari(r.byte()?)?); }
-                    let nh = r.u32v()?;
-                    let mut hasil = Vec::with_capacity(nh as usize);
+                    let (nh, kap) = r.hitungan("jumlah hasil", MAKS_PARAM)?;
+                    let mut hasil = Vec::with_capacity(kap);
                     for _ in 0..nh { hasil.push(Tipe::dari(r.byte()?)?); }
                     m.tipe.push(TipeFungsi { param, hasil });
                 }
@@ -282,8 +290,8 @@ pub fn baca_modul(b: &[u8]) -> Result<Modul, String> {
                     for _ in 0..nl {
                         let ulang = r.u32v()?;
                         let t = Tipe::dari(r.byte()?)?;
-                        if ulang > 100_000 {
-                            return Err("jumlah lokal tidak masuk akal".to_string());
+                        if ulang as usize > MAKS_LOKAL - lokal.len() {
+                            return Err(format!("jumlah lokal satu fungsi melewati batas {}", MAKS_LOKAL));
                         }
                         for _ in 0..ulang { lokal.push(t); }
                     }
@@ -352,6 +360,10 @@ const HALAMAN: usize = 65_536;
 /// batas sebuah berkas rusak (atau jahat) bisa meminta 4 TiB sebelum satu …
 const MAKS_HALAMAN: u32 = 4096; // 256 MiB
 const MAKS_KEDALAMAN: usize = 1024;
+/// Batas `wasmparser` (Wasmtime): parameter/hasil per tipe, lokal per fungsi, cabang `br_table`.
+const MAKS_PARAM: u32 = 1000;
+const MAKS_LOKAL: usize = 50_000;
+const MAKS_BR_TABLE: u32 = 128 * 1024;
 
 pub struct Mesin {
     pub modul: Modul,
@@ -632,8 +644,8 @@ impl Mesin {
                     if c != 0 { cabang(stack, &mut label, l, &mut r)?; }
                 }
                 0x0e => {
-                    let n = r.u32v()?;
-                    let mut target = Vec::with_capacity(n as usize);
+                    let (n, kap) = r.hitungan("ukuran br_table", MAKS_BR_TABLE)?;
+                    let mut target = Vec::with_capacity(kap);
                     for _ in 0..n { target.push(r.u32v()? as usize); }
                     let bawaan = r.u32v()? as usize;
                     let i = stack.pop().ok_or("stack wasm kosong")?.i32()?;
@@ -1090,7 +1102,7 @@ fn wasm_ke_nilai(v: Nilai) -> Value {
 
 fn teks(v: &Value, nama: &str, ke: usize) -> Result<String, String> {
     match v {
-        Value::Str(s) => Ok(s.clone()),
+        Value::Str(s) => Ok(String::clone(&s.clone())),
         lain => Err(format!("{}: argumen ke-{} harus string, dapat `{}`",
                             nama, ke + 1, lain.type_name())),
     }
@@ -1133,7 +1145,7 @@ pub fn b_ekspor(a: &[Value]) -> Result<Value, String> {
         Some(m) => {
             let mut nama: Vec<&str> = m.modul.ekspor.keys().map(|s| s.as_str()).collect();
             nama.sort();
-            let v: Vec<Value> = nama.into_iter().map(|n| Value::Str(n.to_string())).collect();
+            let v: Vec<Value> = nama.into_iter().map(|n| Value::Str(std::sync::Arc::new(n.to_string()))).collect();
             Ok(ok_value(Value::Array(v.into())))
         }
     }
@@ -1213,7 +1225,7 @@ fn baca_memori(a: &[Value], nama: &str, byte: bool) -> Result<Value, String> {
     }
     if byte { return Ok(ok_value(crate::dok::crypto::byte_ke_array(m.memori[a0..a1].to_vec()))); }
     Ok(match std::str::from_utf8(&m.memori[a0..a1]) {
-        Ok(t) => ok_value(Value::Str(t.to_string())),
+        Ok(t) => ok_value(Value::Str(std::sync::Arc::new(t.to_string()))),
         Err(_) => err_value(format!(
             "memori wasm {}..{} bukan teks UTF-8 yang sah; pakai `wasm::baca_memori_bytes` untuk mengambil byte-nya", a0, a1)),
     })
@@ -1249,5 +1261,36 @@ pub fn b_tutup(a: &[Value]) -> Result<Value, String> {
     match reg.get_mut(id) {
         Some(slot) if slot.is_some() => { *slot = None; Ok(ok_value(Value::Unit)) }
         _ => Ok(err_value("modul wasm ini sudah ditutup")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn leb(mut n: u64) -> Vec<u8> {
+        let mut o = Vec::new();
+        loop { let b = (n & 0x7f) as u8; n >>= 7; if n == 0 { o.push(b); return o } o.push(b | 0x80) }
+    }
+    fn seksi(i: u8, isi: Vec<u8>) -> Vec<u8> { [vec![i], leb(isi.len() as u64), isi].concat() }
+    fn modul(badan: Vec<u8>) -> Vec<u8> {
+        let kode = [leb(1), leb(badan.len() as u64), badan].concat();
+        [b"\0asm\x01\0\0\0".to_vec(), seksi(1, [leb(1), vec![0x60, 0, 0]].concat()), seksi(3, vec![1, 0]),
+         seksi(7, vec![1, 1, b'f', 0, 0]), seksi(10, kode)].concat()
+    }
+
+    // Kelas RUSTSEC-2026-0432/0435: hitungan dari berkas dulu langsung dipakai mengalokasi, jadi berkas
+    // 17 byte membunuh proses ("memory allocation of 4294967280 bytes failed"), bukan menjawab `Err`.
+    #[test]
+    fn hitungan_dari_berkas_dibatasi_sebelum_alokasi() {
+        let param = [b"\0asm\x01\0\0\0".to_vec(), seksi(1, [leb(1), vec![0x60], leb(0xFFFF_FFF0)].concat())].concat();
+        assert!(baca_modul(&param).err().unwrap().contains("jumlah parameter"));
+        let entri: Vec<u8> = (0..20).flat_map(|_| [leb(5000), vec![0x7e]].concat()).collect();
+        let lokal = modul([leb(20), entri, vec![0x0b]].concat());
+        assert!(baca_modul(&lokal).err().unwrap().contains("jumlah lokal"));
+        let br = modul([leb(0), vec![0x41, 0, 0x0e], leb(0xFFFF_FFF0), vec![0x0b]].concat());
+        let mut m = Mesin::baru(baca_modul(&br).unwrap()).unwrap();
+        assert!(m.panggil_ekspor("f", &[]).err().unwrap().contains("br_table"));
+        let pas = modul([leb(1), leb(50_000), vec![0x7e, 0x0b]].concat());
+        assert!(Mesin::baru(baca_modul(&pas).unwrap()).unwrap().panggil_ekspor("f", &[]).is_ok());
     }
 }

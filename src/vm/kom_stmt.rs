@@ -366,18 +366,23 @@ impl Compiler {
                     Expr::Method { obj, method, args, .. } => {
                         // Penerima ikut dibekukan: `defer f.tutup()` memakai
                         // `f` yang berlaku di baris defer.
+                        use crate::vm::opcode::{ARGC_NANTI, TANDA_TUNDA};
+                        let ni = self.chunk.add_name(method);
+                        if ni >= TANDA_TUNDA || args.len() >= ARGC_NANTI as usize {
+                            return Err(CompileError::new(format!(
+                                "method `{}`: nama atau argumennya terlalu banyak untuk satu instruksi", method)));
+                        }
                         self.compile_expr(obj)?;
                         self.chunk.emit(OpCode::Dup);
-                        let ni = self.chunk.add_name(method);
-                        // Argc ikut, sama seperti situs method biasa: tanpa ini
-                        // `arg >> 24` di sana terbaca 0 dan `defer f.tulis(x)`
-                        // dituduh kurang argumen.
-                        self.chunk.emit_arg(OpCode::GetMethod, ni | ((args.len() as u32) << 24));
+                        // Jumlah argumennya diperiksa sesudah argumennya dievaluasi, dan galatnya
+                        // baru muncul saat panggilan tundanya jalan — seperti acuan.
+                        self.chunk.emit_arg(OpCode::GetMethod, ni | (ARGC_NANTI << 24));
                         self.chunk.emit(OpCode::Swap);
                         // Penerima defer dulu disalin di sini supaya "beku".
                         for (i, a) in args.iter().enumerate() {
                             self.dgn_temp(2 + i, |c| c.compile_value_expr(a))?;
                         }
+                        self.chunk.emit_arg(OpCode::PeriksaArgMetode, ni | TANDA_TUNDA | ((args.len() as u32) << 24));
                         self.chunk.emit_arg(OpCode::DeferPush, args.len() as u32 + 1);
                     }
                     lain => {
@@ -525,6 +530,19 @@ impl Compiler {
                     }
                 }
 
+                // Lengan yang siap dicoba mulai dari lengan ACAK (aturan Go, `rand::int` seperti acuan):
+                // `k` titik mulai, `j` hitungan coba, `idx` lengan berikutnya — dipasang sebelum `poll_start`.
+                let m = captured.len();
+                let acak = m > 1;
+                let mut gilir = (0, 0, 0);
+                if acak {
+                    for nama in ["__select_k__", "__select_j__", "__select_idx__"] {
+                        self.chunk.emit_arg(OpCode::IntImm, 0);
+                        let slot = self.slot_berikutnya();
+                        self.define_local(nama);
+                        if nama == "__select_k__" { gilir.0 = slot } else if nama == "__select_j__" { gilir.1 = slot } else { gilir.2 = slot }
+                    }
+                }
                 let n = ss.cases.len() + if ss.default.is_some() { 1 } else { 0 };
                 let poll_start = self.chunk.code.len();
                 self.chunk.emit_arg(OpCode::SelectBegin, n as u32);
@@ -537,8 +555,46 @@ impl Compiler {
                     self.chunk.emit_arg(OpCode::CekTutupSelect, jenis);
                 }
                 let mut end_jumps: Vec<usize> = Vec::new();
+                let (mut ke_lengan, mut uji, mut habis) = (Vec::new(), 0usize, None);
+                if acak {
+                    let (k, j, idx) = gilir;
+                    self.emit_bawaan("rand::int")?;
+                    self.chunk.emit_arg(OpCode::IntImm, 0);
+                    self.chunk.emit_arg(OpCode::IntImm, (m - 1) as u32);
+                    self.chunk.emit_arg(OpCode::Call, 2);
+                    self.chunk.emit_arg(OpCode::SimpanBuang, k as u32);
+                    self.chunk.emit_arg(OpCode::IntImm, 0);
+                    self.chunk.emit_arg(OpCode::SimpanBuang, j as u32);
+                    uji = self.chunk.code.len();
+                    self.chunk.emit_arg(OpCode::LoadLocal, j as u32);
+                    self.chunk.emit_arg(OpCode::IntImm, m as u32);
+                    self.chunk.emit(OpCode::Lt);
+                    habis = Some(self.chunk.emit_jump(OpCode::JumpFalse));
+                    self.chunk.emit_arg(OpCode::LoadLocal, k as u32);
+                    self.chunk.emit_arg(OpCode::LoadLocal, j as u32);
+                    self.chunk.emit(OpCode::Add);
+                    self.chunk.emit_arg(OpCode::IntImm, m as u32);
+                    self.chunk.emit(OpCode::Mod);
+                    self.chunk.emit_arg(OpCode::SimpanBuang, idx as u32);
+                    self.chunk.emit_arg(OpCode::LoadLocal, j as u32);
+                    self.chunk.emit_arg(OpCode::IntImm, 1);
+                    self.chunk.emit(OpCode::Add);
+                    self.chunk.emit_arg(OpCode::SimpanBuang, j as u32);
+                    for i in 0..m - 1 {
+                        self.chunk.emit_arg(OpCode::LoadLocal, idx as u32);
+                        self.chunk.emit_arg(OpCode::IntImm, i as u32);
+                        self.chunk.emit(OpCode::Eq);
+                        ke_lengan.push(self.chunk.emit_jump(OpCode::JumpTrue));
+                    }
+                    ke_lengan.push(self.chunk.emit_jump(OpCode::Jump));
+                }
+                // Lengan yang tidak siap kembali ke `uji` (bukan ke lengan sesudahnya) bila urutannya diputar.
+                let lewati = |c: &mut crate::vm::chunk::Chunk, skip: usize| {
+                    if acak { c.code[skip].arg = uji as u32 } else { c.patch_jump(skip) }
+                };
 
-                for case in captured {
+                for (ke, case) in captured.into_iter().enumerate() {
+                    if acak { self.chunk.patch_jump(ke_lengan[ke]); }
                     match case {
                         CapturedSelectCase::Recv {
                             names,
@@ -579,7 +635,7 @@ impl Compiler {
                                 self.chunk.emit(OpCode::Pop);
                             }
                             end_jumps.push(self.chunk.emit_jump(OpCode::Jump));
-                            self.chunk.patch_jump(skip);
+                            lewati(&mut self.chunk, skip);
                         }
                         CapturedSelectCase::Send { chan_slot, val_slot, body } => {
                             self.chunk.emit_arg(OpCode::LoadLocal, chan_slot as u32);
@@ -589,7 +645,7 @@ impl Compiler {
                             self.compile_block_stmts(body)?;
                             self.end_scope();
                             end_jumps.push(self.chunk.emit_jump(OpCode::Jump));
-                            self.chunk.patch_jump(skip);
+                            lewati(&mut self.chunk, skip);
                         }
                         CapturedSelectCase::Let { pattern, chan_slot, body } => {
                             self.chunk.emit_arg(OpCode::LoadLocal, chan_slot as u32);
@@ -608,10 +664,11 @@ impl Compiler {
                             self.locals.pop();
                             self.chunk.emit(OpCode::Pop);
                             end_jumps.push(self.chunk.emit_jump(OpCode::Jump));
-                            self.chunk.patch_jump(skip);
+                            lewati(&mut self.chunk, skip);
                         }
                     }
                 }
+                if let Some(h) = habis { self.chunk.patch_jump(h); }
                 if let Some(default_body) = &ss.default {
                     self.chunk.emit(OpCode::SelectDefault);
                     self.begin_scope();

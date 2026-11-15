@@ -3,6 +3,7 @@
 // Tanpa kunci di mana pun; kebuntuan dilaporkan.
 #if defined(__unix__) || defined(__APPLE__)
 #include <sys/mman.h>
+#include <signal.h>
 #if defined(__ANDROID__)
 // bionic tidak punya swapcontext/makecontext: stack ditukar sendiri (cuma register callee-saved).
 typedef struct { void *sp; } JrgKonteks;
@@ -41,6 +42,7 @@ typedef ucontext_t JrgKonteks;
 void jrg_flush(int32_t);
 
 #define JRG_KO_STACK ((size_t)1 << 20)
+#define JRG_KO_SELAMAT ((size_t)8 << 20)
 
 // Sama dengan `DaftarTunda` di runtime: tiap korutin punya tumpukan `defer` sendiri.
 typedef struct { void *ptr; int64_t len, kap; } JrgTunda;
@@ -54,9 +56,14 @@ typedef struct JrgKo {
     int64_t bangun;          // tenggat tidur (mikrodetik sejak epoch), 0 = tidak tidur
     JrgTunda tunda;          // tumpukan `defer` miliknya selagi ia tidak jalan
     int masa;                // badan sebuah Future/Task: gagalnya milik yang menunggu hasilnya
+    char *selamat;           // stack penyelamat sesudah stack-nya habis (0 = belum)
+    int32_t situs;
+    const void *asan_bawah;  // wilayah stack-nya untuk ASan (cuma dipakai biner ber-`-fsanitize=address`)
+    size_t asan_ukuran;
     struct JrgKo *next;
 } JrgKo;
 
+extern int32_t jrg_situs;
 static JrgKo jrg_ko_utama;
 static JrgKo *jrg_ko_kini = &jrg_ko_utama;
 static JrgKo *jrg_ko_siap, *jrg_ko_siap_ekor;   // antrean yang bisa jalan
@@ -64,6 +71,21 @@ static JrgKo *jrg_ko_tidur_daftar;              // yang sedang tidur
 static JrgKo *jrg_ko_mayat;                     // selesai, stack-nya belum dilepas
 static int64_t jrg_ko_hidup;                    // goroutine yang belum selesai
 static int jrg_ko_utama_menunggu;               // `main` sudah habis dan menunggu sisanya
+
+// ASan diberi tahu tiap perpindahan stack, atau ia menilai stack korutin sebagai luapan stack `main`.
+#if defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define JRG_ASAN 1
+#endif
+#endif
+#ifndef JRG_ASAN
+#define JRG_ASAN 0
+#endif
+#if JRG_ASAN
+void __sanitizer_start_switch_fiber(void **simpan, const void *bawah, size_t ukuran);
+void __sanitizer_finish_switch_fiber(void *simpan, const void **bawah, size_t *ukuran);
+static JrgKo *jrg_ko_asal;                      // yang baru saja menyerahkan stack-nya
+#endif
 
 static int64_t jrg_ko_jam(void) {
     struct timespec ts;
@@ -82,20 +104,46 @@ static void jrg_ko_pindah(JrgKo *ke) {
     if (ke == dari) return;
     dari->tunda = jrg_tunda_kini;
     jrg_tunda_kini = ke->tunda;
+    // Situs panggilan yang sedang ditunggu milik korutin itu sendiri, bukan yang mendapat giliran.
+    dari->situs = jrg_situs;
+    jrg_situs = ke->situs;
     jrg_ko_kini = ke;
+#if JRG_ASAN
+    void *palsu = 0;
+    jrg_ko_asal = dari;
+    __sanitizer_start_switch_fiber(dari == jrg_ko_mayat ? 0 : &palsu, ke->asan_bawah, ke->asan_ukuran);
+#endif
 #if defined(__ANDROID__)
     jrg_ko_tukar(&dari->ctx.sp, ke->ctx.sp);
 #else
     swapcontext(&dari->ctx, &ke->ctx);
 #endif
+#if JRG_ASAN
+    __sanitizer_finish_switch_fiber(palsu, &jrg_ko_asal->asan_bawah, &jrg_ko_asal->asan_ukuran);
+#endif
 }
+
+// Kebuntuan milik seluruh program: panik di goroutine mana pun mengakhiri programnya, bukan cuma goroutine itu
+// (dulu goroutine-nya tamat, penjadwal menemukan kebuntuan yang sama lagi, berulang sampai stack habis).
+static int jrg_ko_fatal;
 
 static void jrg_ko_buntu(void) {
     static const char pesan[] =
-        "kebuntuan: semua goroutine sedang menunggu channel dan tidak ada yang bisa melanjutkan\n"
+        "kebuntuan: semua goroutine sedang menunggu channel atau kunci dan tidak ada yang bisa melanjutkan\n"
         "  catatan: di interpreter dan `--vm` program ini menggantung selamanya; backend "
         "`--emit-llvm` menjalankan goroutine sebagai korutin satu utas, jadi ia bisa melihatnya";
+    jrg_ko_fatal = 1;
     jrg_panic((const unsigned char *)pesan, (int64_t)(sizeof pesan - 1));
+}
+
+// Yang tenggat tidurnya sudah lewat pindah ke antrean siap.
+static void jrg_ko_bangunkan(void) {
+    int64_t kini = jrg_ko_jam();
+    JrgKo **p = &jrg_ko_tidur_daftar;
+    while (*p) {
+        JrgKo *k = *p;
+        if (k->bangun <= kini) { *p = k->next; k->bangun = 0; jrg_ko_antre(k); } else p = &k->next;
+    }
 }
 
 // Yang memanggil sudah TIDAK ada di antrean siap (diparkir, tidur, atau selesai).
@@ -116,12 +164,7 @@ static void jrg_ko_jadwal(void) {
             struct timespec ts = { (time_t)(sisa / 1000000), (long)(sisa % 1000000) * 1000 };
             while (nanosleep(&ts, &ts) != 0 && errno == EINTR) {}
         }
-        int64_t kini = jrg_ko_jam();
-        JrgKo **p = &jrg_ko_tidur_daftar;
-        while (*p) {
-            JrgKo *k = *p;
-            if (k->bangun <= kini) { *p = k->next; k->bangun = 0; jrg_ko_antre(k); } else p = &k->next;
-        }
+        jrg_ko_bangunkan();
     }
 }
 
@@ -137,6 +180,9 @@ static void jrg_ko_tamat(JrgKo *k) {
 }
 
 static void jrg_ko_masuk(void) {
+#if JRG_ASAN
+    __sanitizer_finish_switch_fiber(0, &jrg_ko_asal->asan_bawah, &jrg_ko_asal->asan_ukuran);
+#endif
     JrgKo *k = jrg_ko_kini;
     k->fn(k->arg);
     jrg_ko_tamat(k);
@@ -146,7 +192,7 @@ static void jrg_ko_masuk(void) {
 // badan Future/Task tidak (jawab 0). `tanya` bukan nol: cuma bertanya, tidak menghentikan.
 int jrg_ko_gugur(int tanya) {
     JrgKo *k = jrg_ko_kini;
-    if (k == &jrg_ko_utama || k->masa) return 0;
+    if (k == &jrg_ko_utama || k->masa || jrg_ko_fatal) return 0;
     if (!tanya) jrg_ko_tamat(k);
     return 1;
 }
@@ -157,6 +203,7 @@ static int jrg_ko_baru_masa;
 void jrg_ko_spawn(void (*fn)(void *), void *arg) {
     if (jrg_ko_mayat && jrg_ko_mayat != jrg_ko_kini) {
         munmap(jrg_ko_mayat->stack, JRG_KO_STACK);
+        if (jrg_ko_mayat->selamat) munmap(jrg_ko_mayat->selamat, JRG_KO_SELAMAT);
         jrg_ko_mayat = 0;
     }
     JrgKo *k = jrg_alloc((int64_t)sizeof(JrgKo), 16);
@@ -185,12 +232,19 @@ void jrg_ko_spawn(void (*fn)(void *), void *arg) {
     k->ctx.uc_link = 0;
     makecontext(&k->ctx, jrg_ko_masuk, 0);
 #endif
+    k->asan_bawah = k->stack;
+    k->asan_ukuran = JRG_KO_STACK;
     jrg_ko_hidup++;
     jrg_ko_antre(k);
 }
 
 // Beri giliran ke yang lain, lalu lanjut.
+// Goroutine yang belum selesai: selama ada, builtin jembatan dijalankan di thread pembantu.
+int64_t jrg_ko_lain(void) { return jrg_ko_hidup; }
+
 void jrg_ko_serah(void) {
+    // Yang tidur ikut dibangunkan: penunggu builtin pemblokir memanggil ini berulang-ulang.
+    if (jrg_ko_tidur_daftar) jrg_ko_bangunkan();
     if (jrg_ko_siap == 0) return;
     jrg_ko_antre(jrg_ko_kini);
     jrg_ko_jadwal();
@@ -223,7 +277,43 @@ void jrg_ko_tunggu_semua(void) {
 // Wilayah stack goroutine yang sedang jalan, untuk penjaga stack.
 int jrg_ko_di_stack(uintptr_t alamat) {
     JrgKo *k = jrg_ko_kini;
+    if (k->selamat && alamat >= (uintptr_t)k->selamat && alamat < (uintptr_t)k->selamat + JRG_KO_SELAMAT) return 1;
     return k->stack != 0 && alamat >= (uintptr_t)k->stack && alamat < (uintptr_t)k->stack + JRG_KO_STACK;
+}
+
+// Dari penangan sinyal stack habis: lanjutkan `fn` di stack baru milik korutin ini, supaya
+// `defer`-nya bisa jalan. Jawab 0 kalau stack penyelamatnya sendiri yang habis.
+int jrg_ko_selamatkan(void (*fn)(void)) {
+    JrgKo *k = jrg_ko_kini;
+    if (k->selamat) return 0;
+    char *st = mmap(0, JRG_KO_SELAMAT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (st == MAP_FAILED) return 0;
+    mprotect(st, 4096, PROT_NONE);
+    k->selamat = st;
+    sigset_t sinyal;
+    sigemptyset(&sinyal);
+    sigaddset(&sinyal, SIGSEGV);
+    sigaddset(&sinyal, SIGBUS);
+#if defined(__ANDROID__)
+    sigprocmask(SIG_UNBLOCK, &sinyal, 0);
+    uintptr_t puncak = ((uintptr_t)st + JRG_KO_SELAMAT) & ~(uintptr_t)15;
+    void **bingkai = (void **)(puncak - JRG_KO_BINGKAI);
+    memset(bingkai, 0, JRG_KO_BINGKAI);
+    bingkai[JRG_KO_KEMBALI] = (void *)fn;
+    void *buang;
+    jrg_ko_tukar(&buang, bingkai);
+#else
+    static ucontext_t ctx;
+    getcontext(&ctx);
+    ctx.uc_stack.ss_sp = st;
+    ctx.uc_stack.ss_size = JRG_KO_SELAMAT;
+    ctx.uc_link = 0;
+    sigdelset(&ctx.uc_sigmask, SIGSEGV);
+    sigdelset(&ctx.uc_sigmask, SIGBUS);
+    makecontext(&ctx, fn, 0);
+    setcontext(&ctx);
+#endif
+    return 0;
 }
 
 // ── channel ──
@@ -231,6 +321,7 @@ typedef struct JrgTunggu { JrgKo *k; void *data; int beres; struct JrgTunggu *ne
 
 typedef struct {
     int64_t kap, esize, n, kepala;
+    int64_t ruang;   // slot yang sudah dipesan di `buf`; tumbuh sampai `kap`, tidak dipesan di depan
     char *buf;
     int tutup;
     int sekali;      // channel milik sebuah Future (1) atau Task (2): hasilnya diserahkan satu kali
@@ -248,7 +339,8 @@ void *jrg_chan_new(int64_t kap, int64_t esize) {
     memset(c, 0, sizeof *c);
     c->kap = kap;
     c->esize = esize;
-    c->buf = jrg_alloc((kap > 0 ? kap : 1) * (esize > 0 ? esize : 1), 8);
+    c->ruang = kap < 8 ? kap : 8;
+    c->buf = jrg_alloc((c->ruang > 0 ? c->ruang : 1) * (esize > 0 ? esize : 1), 8);
     return c;
 }
 
@@ -264,8 +356,25 @@ static JrgTunggu *jrg_ch_ambil(JrgTunggu **kepala, JrgTunggu **ekor) {
     return t;
 }
 
+// Elemen `()` berukuran 0 dan penunjuknya boleh null; `memcpy` atas null tetap UB walau 0 byte.
+static void jrg_ch_salin(void *ke, const void *dari, size_t n) { if (n) memcpy(ke, dari, n); }
+
+// Penyangga penuh tapi kapasitas belum: digandakan (paling banyak `kap`), isinya diluruskan dari `kepala`.
+static void jrg_ch_tumbuh(JrgChan *c) {
+    int64_t baru = c->ruang > c->kap / 2 ? c->kap : c->ruang * 2;
+    int64_t es = c->esize > 0 ? c->esize : 1;
+    if (baru > INT64_MAX / es) jrg_ch_panik("memori habis: kapasitas channel melebihi alamat yang ada");
+    char *b = jrg_alloc(baru * es, 8);
+    for (int64_t i = 0; i < c->n; i++)
+        jrg_ch_salin(b + i * c->esize, c->buf + ((c->kepala + i) % c->ruang) * c->esize, (size_t)c->esize);
+    c->buf = b;
+    c->ruang = baru;
+    c->kepala = 0;
+}
+
 static void jrg_ch_masuk_buf(JrgChan *c, const void *v) {
-    memcpy(c->buf + ((c->kepala + c->n) % c->kap) * c->esize, v, (size_t)c->esize);
+    if (c->n == c->ruang) jrg_ch_tumbuh(c);
+    jrg_ch_salin(c->buf + ((c->kepala + c->n) % c->ruang) * c->esize, v, (size_t)c->esize);
     c->n++;
 }
 
@@ -274,7 +383,7 @@ static int32_t jrg_ch_coba_kirim(JrgChan *c, const void *v) {
     if (c->tutup) return 2;
     JrgTunggu *t = jrg_ch_ambil(&c->penerima, &c->penerima_ekor);
     if (t) {
-        memcpy(t->data, v, (size_t)c->esize);
+        jrg_ch_salin(t->data, v, (size_t)c->esize);
         t->beres = 1;
         jrg_ko_antre(t->k);
         return 1;
@@ -297,7 +406,7 @@ void jrg_chan_send(JrgChan *c, const void *v, int64_t esize) {
     JrgTunggu *t = jrg_ch_ambil(&c->penerima, &c->penerima_ekor);
     if (t) {
         // Penerimanya sudah menunggu: nilainya diserahkan dan IA yang jalan lebih dulu.
-        memcpy(t->data, v, (size_t)c->esize);
+        jrg_ch_salin(t->data, v, (size_t)c->esize);
         t->beres = 1;
         jrg_ko_antre(jrg_ko_kini);
         JrgKo *k = t->k;
@@ -315,8 +424,8 @@ void jrg_chan_send(JrgChan *c, const void *v, int64_t esize) {
 // 1 ada nilai yang langsung diambil, 0 harus menunggu, 2 tertutup dan kosong.
 static int32_t jrg_ch_coba_terima(JrgChan *c, void *out) {
     if (c->n > 0) {
-        memcpy(out, c->buf + c->kepala * c->esize, (size_t)c->esize);
-        c->kepala = (c->kepala + 1) % c->kap;
+        jrg_ch_salin(out, c->buf + c->kepala * c->esize, (size_t)c->esize);
+        c->kepala = (c->kepala + 1) % c->ruang;
         c->n--;
         JrgTunggu *t = jrg_ch_ambil(&c->pengirim, &c->pengirim_ekor);
         if (t) { jrg_ch_masuk_buf(c, t->data); t->beres = 1; jrg_ko_antre(t->k); }
@@ -324,7 +433,7 @@ static int32_t jrg_ch_coba_terima(JrgChan *c, void *out) {
     }
     JrgTunggu *t = jrg_ch_ambil(&c->pengirim, &c->pengirim_ekor);
     if (t) {
-        memcpy(out, t->data, (size_t)c->esize);
+        jrg_ch_salin(out, t->data, (size_t)c->esize);
         t->beres = 1;
         jrg_ko_antre(t->k);
         return 1;
@@ -358,8 +467,10 @@ void jrg_chan_close(JrgChan *c) {
     while ((t = jrg_ch_ambil(&c->pengirim, &c->pengirim_ekor)) != 0) jrg_ko_antre(t->k);
 }
 
-// 0 panjang, 1 kapasitas, 2 sudah ditutup, 3 ada nilai yang bisa diambil.
+// 0 panjang, 1 kapasitas, 2 sudah ditutup, 3 ada nilai yang bisa diambil; 4/5 = 2/0 tanpa memberi giliran (`select`).
 int64_t jrg_chan_info(const JrgChan *c, int32_t apa) {
+    if (apa == 4) return c->tutup;
+    if (apa == 5) return c->n;
     // Pertanyaan yang jawabannya "belum" memberi giliran dulu: loop yang cuma BERTANYA
     // (`while !c.is_closed() { .. }`) tidak pernah menunggu, jadi tanpa ini pengirimnya tak jalan.
     if (apa == 1) return c->kap;
@@ -396,7 +507,7 @@ static void jrg_masa_sudah(const JrgChan *c, const char *nama, int64_t nl) {
 // Jawab 0 kalau yang sedang jalan bukan badan sebuah tugas.
 int jrg_masa_gagal(const char *s, int64_t n) {
     JrgKo *k = jrg_ko_kini;
-    if (k == &jrg_ko_utama || !k->masa) return 0;
+    if (k == &jrg_ko_utama || !k->masa || jrg_ko_fatal) return 0;
     JrgChan *c = ((void **)k->arg)[1];
     c->gagal = jrg_alloc(n > 0 ? n : 1, 1);
     memcpy(c->gagal, s, (size_t)n);
@@ -434,17 +545,31 @@ int32_t jrg_masa_coba(JrgChan *c, void *out, int64_t mikro, const char *nama, in
     for (;;) {
         if (c->n > 0) { jrg_chan_recv(c, out, c->esize); jrg_masa_periksa(c); return 1; }
         if (mikro <= 0 || jrg_ko_jam() >= tenggat) {
-            // Beri goroutine lain satu giliran dulu: tugasnya mungkin tinggal menyerahkan hasil.
-            if (mikro <= 0) { jrg_ko_serah(); if (c->n > 0) continue; }
+            // Jawabannya keadaan SAAT ditanya, seperti mesin acuan; giliran sesudahnya membuat
+            // tugas lain maju, jadi pertanyaan berikutnya bisa menemukan hasilnya.
+            if (mikro <= 0) jrg_ko_serah();
             return 0;
         }
         jrg_ko_tidur(200);
     }
 }
 
+// Fungsi milik program yang dipanggil balik dari `jrgc`: jalan sebagai badan tugas, dan kalau gagal
+// galatnya DIKEMBALIKAN (-1, kalimatnya di `pesan`), tidak menghentikan proses.
+int32_t jrg_masa_lindung(void (*jalan)(void *), void *env, const char **pesan, int64_t *n) {
+    JrgChan *c = jrg_masa_baru(jalan, env, NULL, 0, 1);
+    char nol[8];
+    jrg_chan_recv(c, nol, 0);
+    if (!c->gagal) return 0;
+    *pesan = c->gagal;
+    *n = c->gagal_n;
+    return -1;
+}
+
 int32_t jrg_masa_selesai(JrgChan *c) {
-    if (c->n == 0 && !c->diambil) jrg_ko_serah();
-    return c->n > 0 || c->diambil;
+    int32_t siap = c->n > 0 || c->diambil;
+    if (!siap) jrg_ko_serah();
+    return siap;
 }
 
 // Indeks tugas pertama yang hasilnya siap, dari `n` penunjuk channel.

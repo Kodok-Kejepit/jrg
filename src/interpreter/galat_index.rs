@@ -22,6 +22,35 @@ pub fn bukan_wadah(wadah: &str) -> String {
     )
 }
 
+/// `x[a:b]` atas nilai yang tidak bisa dipotong. Menyebut TIPE-nya, bukan isinya.
+pub fn bukan_bisa_dipotong(tipe: &str) -> String {
+    format!("tidak bisa slice `{}` — yang bisa dipotong: array, string, tuple", tipe)
+}
+
+/// Batas potongan yang bukan bilangan bulat; `sisi` = "awal" atau "akhir".
+pub fn batas_potongan_tipe(sisi: &str, tipe: &str) -> String {
+    let saran = if tipe == "float" { " — tulis `x as int` kalau memang mau dipotong ke bawah" } else { "" };
+    format!("batas {} potongan harus bilangan bulat, dapat `{}`{}", sisi, tipe, saran)
+}
+
+/// Batas potongan (sudah bilangan bulat) yang melewati panjangnya.
+pub fn batas_potongan_luar(sisi: &str, tertulis: i128, panjang: usize) -> String {
+    format!(
+        "batas {} potongan [{}] di luar jangkauan — panjangnya {}, jadi batas yang sah \
+         0..{} (atau -1..-{} kalau dihitung dari belakang)",
+        sisi, tertulis, panjang, panjang, panjang
+    )
+}
+
+/// `a[2:1]`, sesudah kedua batas jadi posisi nyata.
+pub fn potongan_terbalik(awal: usize, akhir: usize) -> String {
+    format!(
+        "potongan [{}:{}] terbalik — batas awal ({}) lebih besar dari batas akhir ({}); \
+         tulis yang kecil dulu, mis. [{}:{}]",
+        awal, akhir, awal, akhir, akhir, awal
+    )
+}
+
 /// `a[0..2]`, yaitu Range yang sudah terlanjur jadi array biasa.
 pub fn range_dikira_potongan(wadah: &str) -> String {
     format!(

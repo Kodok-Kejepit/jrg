@@ -1,0 +1,104 @@
+package std_lru
+
+// Cache LRU berkapasitas tetap, amortized O(1): dict kunci → nilai, dict kunci → cap, plus antrean [kunci, cap]
+// yang entri basinya dibuang saat lewat atau dipadatkan berkala. Kunci wajib teks — kunci dict adalah bentuk
+// tampilnya, jadi `1` dan `"1"` akan diam-diam jadi satu entri. Bentuk yang cepat: `c = lru::taruh(c, k, v)`.
+
+pub struct Cache {
+    pub kapasitas: int,
+    pub isi: dict = dict::new(),
+    pub waktu: dict = dict::new(),
+    pub antre: array = [],
+    pub kepala: int = 0,
+    pub cap: int = 0,
+}
+
+/// Cache kosong berkapasitas `n` (bilangan bulat 1 ke atas).
+pub fn baru(n) {
+    if typeof(n) != "int" || n < 1 { panik(«lru::baru: kapasitas harus bilangan bulat 1 ke atas, dapat ${n}») }
+    return Cache { kapasitas: n }
+}
+
+fn _kunci(k) {
+    if typeof(k) != "string" { panik(«lru: kunci harus teks, dapat `${typeof(k)}` — 1 dan "1" akan jadi kunci yang sama») }
+}
+
+// Entri antrean `[kunci, cap]` masih mewakili kuncinya: belum dibuang dan belum disentuh lagi.
+fn _hidup(c, a) { return dict::has(c.waktu, a[0]) && c.waktu[a[0]] == a[1] }
+
+// Parameter ditulis langsung (tanpa `var d = c`) dan pemanggil menulis `c = f(c, ..)`, jadi nilainya pindah.
+fn _hapus(c, k) {
+    c.isi = dict::remove(c.isi, k)
+    c.waktu = dict::remove(c.waktu, k)
+    return c
+}
+
+fn _sentuh(c, k) {
+    c.cap = c.cap + 1
+    c.antre = c.antre + [[k, c.cap]]
+    c.waktu[k] = c.cap
+    // Dipadatkan menurut panjang SELURUH antrean: `kepala` ikut maju tiap pembuangan, jadi dulu syarat
+    // `len - kepala` tidak pernah terpenuhi dan antreannya tumbuh tanpa batas.
+    if len(c.antre) > 2 * c.kapasitas + 16 {
+        var baru = []
+        for _, a in c.antre[c.kepala:] {
+            if _hidup(c, a) { baru = baru + [a] }
+        }
+        c.antre = baru
+        c.kepala = 0
+    }
+    return c
+}
+
+/// Taruh `k → v` (jadi yang paling baru dipakai); kalau penuh, yang paling lama tidak dipakai dibuang.
+pub fn taruh(c, k, v) {
+    _kunci(k)
+    if !dict::has(c.isi, k) && dict::len(c.isi) >= c.kapasitas {
+        while true {
+            let a = c.antre[c.kepala]
+            c.kepala = c.kepala + 1
+            if _hidup(c, a) {
+                c = _hapus(c, a[0])
+                break
+            }
+        }
+    }
+    c.isi[k] = v
+    c = _sentuh(c, k)
+    return c
+}
+
+/// `(cache, Some(nilai))` dan kuncinya jadi yang paling baru dipakai, atau `(cache, None)` kalau tidak ada.
+pub fn ambil(c, k) {
+    _kunci(k)
+    if !dict::has(c.isi, k) { return (c, None) }
+    let v = c.isi[k]
+    c = _sentuh(c, k)
+    return (c, Some(v))
+}
+
+/// Lihat nilai tanpa mengubah urutan pemakaian.
+pub fn intip(c, k) {
+    _kunci(k)
+    if !dict::has(c.isi, k) { return None }
+    return Some(c.isi[k])
+}
+
+/// Buang satu kunci (tidak apa-apa kalau tidak ada).
+pub fn buang(c, k) {
+    _kunci(k)
+    if dict::has(c.isi, k) { c = _hapus(c, k) }
+    return c
+}
+
+/// Jumlah entri sekarang.
+pub fn ukuran(c) { return dict::len(c.isi) }
+
+/// Kunci dari yang paling lama ke yang paling baru dipakai.
+pub fn urutan(c) {
+    var o = []
+    for _, a in c.antre[c.kepala:] {
+        if _hidup(c, a) { o = arr::push(o, a[0]) }
+    }
+    return o
+}

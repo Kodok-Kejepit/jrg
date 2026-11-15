@@ -104,10 +104,9 @@ impl Compiler {
             self.chunk.emit_arg(OpCode::Const, di);
             self.chunk.emit_arg(OpCode::Call, 3);
         }
-        // Prototipe membawa label struct-nya; yang di atasnya cuma pasangan field.
-        let proto = self.chunk.add_constant(VmValue::struktur(type_name, Default::default()));
-        self.chunk.emit_arg(OpCode::Const, proto);
-
+        // Prototipe (argumen `BuildStruct`) membawa label dan nama field berurutan; stack cuma nilainya.
+        // `dict { a: 1 }` membangun dict sungguhan, bukan struct berlabel "dict".
+        let mut kunci: Vec<crate::vm::value::Kunci> = Vec::new();
         for (i, field) in fields.iter().enumerate() {
             // Field liar gagal saat JALAN, di gilirannya, seperti di interpreter.
             if !declared_fields.is_empty() && !declared_fields.iter().any(|d| d.name == field.name) {
@@ -119,11 +118,10 @@ impl Compiler {
                 self.chunk.emit_arg(OpCode::Const, pesan);
                 self.chunk.emit(OpCode::Panic);
             }
-            let field_key = self.chunk.add_constant(VmValue::str(&field.name));
-            self.chunk.emit_arg(OpCode::Const, field_key);
+            kunci.push(field.name.as_str().into());
             // Nilai field juga penyerahan nilai: `P { isi: a }` tidak boleh membuat
             // struct yang field-nya beralias ke `a`.
-            let tumpuk = spread.is_some() as usize + 1 + i * 2 + 1;
+            let tumpuk = spread.is_some() as usize + i;
             self.dgn_temp(tumpuk, |c| c.compile_value_expr(&field.value))?;
         }
         // Default sesudah field yang ditulis, sama dengan dua mesin lain.
@@ -134,19 +132,21 @@ impl Compiler {
                     continue;
                 }
                 if let Some(default) = &declared.default {
-                    let field_key = self.chunk.add_constant(VmValue::str(&declared.name));
-                    self.chunk.emit_arg(OpCode::Const, field_key);
-                    let tumpuk = 1 + (fields.len() + default_count) * 2 + 1;
+                    kunci.push(declared.name.as_str().into());
+                    let tumpuk = fields.len() + default_count;
                     self.dgn_temp(tumpuk, |c| c.compile_expr(default))?;
                     default_count += 1;
                 }
             }
         }
 
-        self.chunk.emit_arg(
-            OpCode::BuildStruct,
-            (default_count + fields.len()) as u32,
-        );
+        let label = if type_name == "dict" && varian.is_none() {
+            crate::vm::value::Label::Dict
+        } else {
+            crate::vm::value::Label::Struct(VmValue::intern_nama_struct(type_name))
+        };
+        let proto = self.chunk.add_constant(VmValue::Map(std::sync::Arc::new(crate::vm::value::Peta::prototipe(label, kunci))));
+        self.chunk.emit_arg(OpCode::BuildStruct, proto);
         if spread.is_some() {
             self.chunk.emit(OpCode::MergeMap);
             // Default untuk field yang tidak dibawa basis maupun literalnya.
@@ -432,12 +432,14 @@ impl Compiler {
                     self.chunk.emit_arg(OpCode::HofMethod, ni | ((args.len() as u32) << 24));
                 } else {
                     // Load fungsi method via GetMethod (dengan global fallback).
+                    let ni = self.chunk.add_name(method);
+                    if ni >= crate::vm::opcode::TANDA_TUNDA || args.len() >= crate::vm::opcode::ARGC_NANTI as usize {
+                        return Err(CompileError::new(format!(
+                            "method `{}`: nama atau argumennya terlalu banyak untuk satu instruksi", method)));
+                    }
                     self.compile_expr(obj)?;
                     self.chunk.emit(OpCode::Dup);
-                    let ni = self.chunk.add_name(method);
-                    // Argc ikut di 8 bit atas, seperti `HofMethod`: tanpa itu pintu method tidak
-                    // tahu berapa yang DITULIS pemakai, jadi ia cuma bisa memakai kalimat bentuk …
-                    self.chunk.emit_arg(OpCode::GetMethod, ni | ((args.len() as u32) << 24));
+                    self.chunk.emit_arg(OpCode::GetMethod, ni | (crate::vm::opcode::ARGC_NANTI << 24));
                     // `[penerima, fungsi]` → `[fungsi, penerima]`
                     self.chunk.emit(OpCode::Swap);
 
@@ -447,6 +449,7 @@ impl Compiler {
                         self.dgn_temp(2 + i, |c| c.compile_value_expr(a))?;
                         argc += 1;
                     }
+                    self.chunk.emit_arg(OpCode::PeriksaArgMetode, ni | ((args.len() as u32) << 24));
                     self.chunk.emit_arg(OpCode::Call, argc);
                 }
             }
@@ -482,7 +485,8 @@ impl Compiler {
                 } else {
                     self.chunk.emit(OpCode::Nil);
                 }
-                self.chunk.emit(OpCode::Slice);
+                let ditulis = lo.is_some() as u32 | (hi.is_some() as u32) << 1;
+                self.chunk.emit_arg(OpCode::Slice, ditulis);
             }
 
             // Array { elems, span }
@@ -862,6 +866,17 @@ impl Compiler {
         self.chunk.patch_jump(selesai);
     }
 
+    /// `arr::push` yang memang builtin: bukan lokal/upvalue bernama sama, dan jalur cepat arr diizinkan (`BOLEH_JALUR_ARR`).
+    fn arr_push_bawaan(&self, func: &Expr) -> bool {
+        let nama_fn = match func {
+            Expr::Ident(n, _) => n.clone(),
+            Expr::PathExpr { segments, .. } => segments.join("::"),
+            _ => return false,
+        };
+        nama_fn == "arr::push" && BOLEH_JALUR_ARR.with(|f| f.get())
+            && self.resolve_local(&nama_fn).is_none() && self.resolve_upval(&nama_fn).is_none()
+    }
+
     /// `jalur = jalur + x` dan `jalur = jalur.push(x)` atas field/elemen: kalau tempat itu
     /// masih memegang nilai yang tadi dibaca (`SamaTempat`), dikerjakan sebagai `jalur += x`.
     pub(crate) fn coba_tumbuh_jalur(&mut self, s: &crate::parser::AssignStmt) -> CR<bool> {
@@ -869,9 +884,11 @@ impl Compiler {
         if s.targets.len() != 1 || s.values.len() != 1 || !matches!(s.op, AssignOp::Eq) { return Ok(false); }
         let tgt = &s.targets[0];
         if matches!(tgt, Expr::Ident(..)) { return Ok(false); }
-        let (lhs, rhs, dorong) = match &s.values[0] {
-            Expr::Binary { op: crate::parser::BinaryOp::Add, lhs, rhs, .. } => (&**lhs, &**rhs, false),
-            Expr::Method { obj, method, args, .. } if method == "push" && args.len() == 1 => (&**obj, &args[0], true),
+        // `fungsi`: `jalur = arr::push(jalur, x)` — jalan lambatnya memanggil builtin itu, bukan method `.push`.
+        let (lhs, rhs, dorong, fungsi) = match &s.values[0] {
+            Expr::Binary { op: crate::parser::BinaryOp::Add, lhs, rhs, .. } => (&**lhs, &**rhs, false, None),
+            Expr::Method { obj, method, args, .. } if method == "push" && args.len() == 1 => (&**obj, &args[0], true, None),
+            Expr::Call { func, args, .. } if args.len() == 2 && self.arr_push_bawaan(func) => (&args[0], &args[1], true, Some(&**func)),
             _ => return Ok(false),
         };
         if !jalur_murni(tgt, &mut Vec::new()) || !jalur_sama(tgt, lhs) { return Ok(false); }
@@ -926,8 +943,13 @@ impl Compiler {
         // Tempatnya sudah ditulis, atau ini bukan penyambungan array: nilai yang tadi dibaca
         // dipakai apa adanya, dengan aturan `+` (atau pemanggilan `push`) yang biasa.
         let lama = self.chunk.masuk_span(sp);
-        self.chunk.emit_arg(OpCode::LoadLocal, kini as u32);
-        if dorong {
+        if let Some(f) = fungsi {
+            self.compile_expr(f)?;
+            self.chunk.emit_arg(OpCode::LoadLocal, kini as u32);
+            self.chunk.emit_arg(OpCode::LoadLocal, kanan as u32);
+            self.chunk.emit_arg(OpCode::Call, 2);
+        } else if dorong {
+            self.chunk.emit_arg(OpCode::LoadLocal, kini as u32);
             let ni = self.chunk.add_name("push");
             self.chunk.emit(OpCode::Dup);
             self.chunk.emit_arg(OpCode::GetMethod, ni | (1 << 24));
@@ -935,6 +957,7 @@ impl Compiler {
             self.chunk.emit_arg(OpCode::LoadLocal, kanan as u32);
             self.chunk.emit_arg(OpCode::Call, 2);
         } else {
+            self.chunk.emit_arg(OpCode::LoadLocal, kini as u32);
             self.chunk.emit_arg(OpCode::LoadLocal, kanan as u32);
             self.chunk.emit(OpCode::Add);
         }
@@ -946,6 +969,80 @@ impl Compiler {
         self.chunk.patch_jump(selesai);
         self.end_scope();
         Ok(true)
+    }
+
+    /// `jalur = dict::set(jalur, ..)` / `dict::remove(jalur, ..)` atas jalur berakar lokal: isinya
+    /// DIPINDAHKAN ke builtin. Fungsi, jalur, lalu argumen lain dibaca dulu; sesudah itu jalurnya
+    /// dikosongkan, jadi pemegangnya tinggal satu. Akar yang ditangkap closure lewat jalan biasa.
+    pub(crate) fn coba_konsumsi_jalur(&mut self, s: &crate::parser::AssignStmt) -> CR<bool> {
+        use crate::interpreter::eval_stmt::{jalur_murni, jalur_sama};
+        if s.targets.len() != 1 || s.values.len() != 1 || !matches!(s.op, AssignOp::Eq) { return Ok(false); }
+        let tgt = &s.targets[0];
+        if matches!(tgt, Expr::Ident(..)) { return Ok(false); }
+        let Expr::Call { func, args, span: sp_call, .. } = &s.values[0] else { return Ok(false) };
+        if args.is_empty() || !self.dict_ubah_bawaan(func) { return Ok(false); }
+        let mut nama: Vec<&str> = Vec::new();
+        if !jalur_murni(tgt, &mut nama) || !jalur_sama(tgt, &args[0]) || nama.is_empty() { return Ok(false); }
+        let menyebut = |e: &Expr| {
+            let d = crate::interpreter::capture::names_mentioned(e);
+            nama.iter().any(|n| d.contains(*n))
+        };
+        if args[1..].iter().any(menyebut) { return Ok(false); }
+        let Some(akar) = self.resolve_local(nama[0]) else { return Ok(false) };
+
+        self.chunk.emit_arg(OpCode::LokalPolos, akar as u32);
+        let lambat = self.chunk.emit_jump(OpCode::JumpFalse);
+        self.begin_scope();
+        self.compile_expr(func)?;
+        let f = self.slot_berikutnya();
+        self.define_local("__konsumsi_fn__");
+        self.compile_expr(&args[0])?;
+        let kini = self.slot_berikutnya();
+        self.define_local("__konsumsi_kini__");
+        let mut slot_arg = Vec::with_capacity(args.len() - 1);
+        for a in &args[1..] {
+            self.compile_value_expr(a)?;
+            slot_arg.push(self.slot_berikutnya());
+            self.define_local("__konsumsi_arg__");
+        }
+        self.chunk.emit(OpCode::Nil);
+        let kosong = self.slot_berikutnya();
+        self.define_local("__konsumsi_nil__");
+        self.begin_scope();
+        self.compile_assign_target(tgt, &AssignOp::Eq, kosong)?;
+        self.end_scope();
+        let lama = self.chunk.masuk_span(*sp_call);
+        self.chunk.emit_arg(OpCode::LoadLocal, f as u32);
+        self.chunk.emit_arg(OpCode::AmbilLokal, kini as u32);
+        for &a in &slot_arg { self.chunk.emit_arg(OpCode::AmbilLokal, a as u32); }
+        self.chunk.emit_arg(OpCode::Call, args.len() as u32);
+        self.chunk.pulih_span(lama);
+        self.chunk.emit_arg(OpCode::SimpanBuang, kini as u32);
+        self.begin_scope();
+        self.compile_assign_target(tgt, &AssignOp::Eq, kini)?;
+        self.end_scope();
+        self.end_scope();
+        let selesai = self.chunk.emit_jump(OpCode::Jump);
+
+        self.chunk.patch_jump(lambat);
+        self.begin_scope();
+        self.compile_value_expr(&s.values[0])?;
+        let hasil = self.slot_berikutnya();
+        self.define_local("__konsumsi_hasil__");
+        self.begin_scope();
+        self.compile_assign_target(tgt, &AssignOp::Eq, hasil)?;
+        self.end_scope();
+        self.end_scope();
+        self.chunk.patch_jump(selesai);
+        Ok(true)
+    }
+
+    /// `dict::set`/`dict::remove` yang memang builtin: bukan lokal/upvalue bernama sama, dan unit ini tidak mengimpor `dict`.
+    fn dict_ubah_bawaan(&self, func: &Expr) -> bool {
+        let Expr::PathExpr { segments, .. } = func else { return false };
+        let nama_fn = segments.join("::");
+        (nama_fn == "dict::set" || nama_fn == "dict::remove") && BOLEH_JALUR_DICT.with(|f| f.get())
+            && self.resolve_local(&nama_fn).is_none() && self.resolve_upval(&nama_fn).is_none()
     }
 
     /// `x = x.m(..)` dan rantainya: nilai `x` DIPINDAHKAN ke method sebagai penerima. Selama
@@ -1149,6 +1246,7 @@ impl Compiler {
         if self.coba_tumbuh_di_tempat(assignment)? { return Ok(()); }
         if self.coba_ubah_di_tempat(assignment)?   { return Ok(()); }
         if self.coba_tumbuh_jalur(assignment)?     { return Ok(()); }
+        if self.coba_konsumsi_jalur(assignment)?   { return Ok(()); }
         if self.coba_konsumsi_penerima(assignment)? { return Ok(()); }
         if assignment.targets.len() > 1 && assignment.values.len() == 1 && matches!(assignment.op, AssignOp::Eq) {
             return self.compile_bongkar(assignment);

@@ -51,6 +51,10 @@ pub struct Chunk {
     indeks_span: HashMap<crate::lexer::Span, u32>,
     indeks_nama: HashMap<String, u32>,
     indeks_konstanta: HashMap<KunciKonstanta, u32>,
+    /// Profil T0 (`--jit` saja); diisi `rampungkan`.
+    pub(crate) profil: Option<Arc<crate::jit::profil::ProfilFungsi>>,
+    /// Kode native per titik masuk (panggilan dan OSR).
+    pub(crate) kode_jit: crate::jit::PintuJit,
 }
 
 impl Chunk {
@@ -66,6 +70,8 @@ impl Chunk {
             indeks_span: HashMap::from([(crate::lexer::Span::dummy(), 0)]),
             indeks_nama: HashMap::new(),
             indeks_konstanta: HashMap::new(),
+            profil:      None,
+            kode_jit:    crate::jit::PintuJit::default(),
             span_kini:   0,
             name:        name.into(),
             arity,
@@ -182,6 +188,15 @@ impl Chunk {
     /// Buang indeks kolam: cuma dipakai selama chunk ini DIBANGUN, dan chunk fungsi
     /// bersarang disalin `LoadFn` tiap kali jalan.
     pub(crate) fn rampungkan(mut self) -> Self {
+        // Fusi ditandai sekali di sini, bukan diintip tiap `LoadLocal` dijalankan.
+        for i in 0..self.code.len().saturating_sub(2) {
+            let (a, b, c) = (self.code[i].op, self.code[i + 1].op, self.code[i + 2].op);
+            if a == OpCode::LoadLocal && matches!(b, OpCode::IntImm | OpCode::LoadLocal)
+                && matches!(c, OpCode::Add | OpCode::Sub | OpCode::Mul | OpCode::Mod) {
+                self.code[i].op = OpCode::LokalHitung;
+            }
+        }
+        self.profil = crate::jit::profil::baru(&self.name, self.code.len());
         self.indeks_span = HashMap::new();
         self.indeks_nama = HashMap::new();
         self.indeks_konstanta = HashMap::new();
@@ -274,8 +289,8 @@ fn kunci_konstanta(v: &VmValue) -> Option<KunciKonstanta> {
         VmValue::NativeFn(f) => KunciKonstanta::Native(*f as usize),
         VmValue::Map(m) if m.lock().map_or(false, |g| g.is_empty()) => match &m.label {
             Label::Struct(n) => KunciKonstanta::Struct(Arc::clone(n)),
-            Label::Enum { tipe, varian, payload: None } => {
-                KunciKonstanta::Varian(Arc::clone(tipe), Arc::clone(varian))
+            Label::Enum { nama, payload: None } => {
+                KunciKonstanta::Varian(Arc::clone(&nama.tipe), Arc::clone(&nama.varian))
             }
             _ => return None,
         },

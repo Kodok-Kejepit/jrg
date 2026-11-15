@@ -1052,7 +1052,10 @@ mod php {
                 "handle lama harus ditolak dengan kalimat sesi:\n{}", k.stdout);
         assert!(k.stdout.contains("PULIH1: 2") && k.stdout.contains("PULIH2: 4"), "{}", k.stdout);
         assert!(k.stdout.contains("MEMORI: fatal error PHP: Allowed memory size"), "{}", k.stdout);
-        assert!(k.stdout.contains("REKURSI: worker php berhenti tanpa menjawab (kode keluar 255)"),
+        // Tergantung versi/ini PHP: worker mati (kode 255, PHP 8.4 lokal) atau batas memori lebih dulu kena dan
+        // dilaporkan rapi (PHP runner GitHub). Dua-duanya DILAPORKAN — yang dilarang cuma `DIAM:`.
+        assert!(k.stdout.contains("REKURSI: worker php berhenti tanpa menjawab (kode keluar 255)")
+                || k.stdout.contains("REKURSI: fatal error PHP: Allowed memory size"),
                 "{}", k.stdout);
         assert!(!k.stdout.contains("BAHAYA:") && !k.stdout.contains("DIAM:"), "{}", k.stdout);
     }

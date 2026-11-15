@@ -3,7 +3,7 @@
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 // ─── FNV-1a hash ─────────────────────────────────────────────────────────
 
@@ -16,15 +16,12 @@ fn fnv1a(data: &[u8]) -> u64 {
 // ─── FileState ────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-struct FileState { mtime: u64, checksum: u64 }
+struct FileState { checksum: u64 }
 
 impl FileState {
     fn read(path: &Path) -> Option<Self> {
-        let meta = std::fs::metadata(path).ok()?;
-        let mtime = meta.modified().ok()?
-            .duration_since(UNIX_EPOCH).ok()?.as_secs();
         let content = std::fs::read(path).ok()?;
-        Some(FileState { mtime, checksum: fnv1a(&content) })
+        Some(FileState { checksum: fnv1a(&content) })
     }
     fn changed(&self, other: &FileState) -> bool {
         self.checksum != other.checksum
@@ -299,7 +296,7 @@ mod tes {
     fn ruang(nama: &str) -> PathBuf {
         let d = std::env::temp_dir().join(format!(
             "jrg-hr-{}-{}-{}", nama, std::process::id(),
-            std::time::SystemTime::now().duration_since(UNIX_EPOCH)
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)
                 .map(|x| x.as_nanos()).unwrap_or(0)));
         std::fs::create_dir_all(&d).expect("bikin dir");
         d

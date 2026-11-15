@@ -95,7 +95,8 @@ pub(crate) struct CallFrame {
     pub(crate) ip:     usize,
     pub(crate) slot:   usize,
     /// Defer stack (LIFO) — dieksekusi saat Return/ReturnNil.
-    pub(crate) defers: Vec<(VmValue, Vec<VmValue>)>,
+    /// Galat ketiga ada saat jumlah argumen method-nya salah: dilaporkan saat ia jalan.
+    pub(crate) defers: Vec<(VmValue, Vec<VmValue>, Option<VmError>)>,
     /// Jumlah argumen yang benar-benar diberikan pemanggil (sebelum
     /// parameter bernilai default diisi).
     pub(crate) argc: u8,
@@ -142,11 +143,22 @@ pub struct Vm {
     pub stack:    Vec<VmValue>,
     pub globals:  crate::hash_cepat::PetaCepat<String, VmValue>,
     pub(crate) frames:   Vec<CallFrame>,
+    /// Slot lokal pertama bingkai teratas (`slot + 1`); disegarkan HANYA lewat `dorong_bingkai`/`ambil_bingkai`.
+    pub(crate) basis: usize,
+    /// Mode `--jit`: rekam profil T0 (`crate::jit::profil`).
+    pub(crate) profil_jit: bool,
+    /// Umpan tipe per situs: belum dipakai JIT (J6), jadi cuma direkam untuk `JRG_JIT_LOG`.
+    pub(crate) umpan_jit: bool,
     pub(crate) profiling: bool,
     /// Berapa hook tampilan sedang bersarang. Lihat `tampil::MAX_SARANG_HOOK`.
     pub(crate) sarang_hook: usize,
     /// Nama namespace tiap modul yang dimuat lewat `import`.
     pub(crate) namespace_modul: std::collections::HashSet<String>,
+    /// Dari `PeriksaArgMetode` bertanda tunda ke `DeferPush` tepat sesudahnya.
+    pub(crate) galat_tunda_metode: Option<VmError>,
+    /// Galat `GetMethod` yang dilaporkan sesudah argumennya (seperti acuan): posisi slot fungsinya dan
+    /// galatnya, diambil `PeriksaArgMetode` situs yang sama.
+    pub(crate) galat_metode: Vec<(usize, VmError)>,
 }
 
 impl Vm {
@@ -157,9 +169,14 @@ impl Vm {
             stack: Vec::with_capacity(256),
             globals: Default::default(),
             frames: Vec::with_capacity(64),
+            basis: 0,
+            profil_jit: crate::jit::aktif(),
+            umpan_jit: crate::jit::aktif() && std::env::var_os("JRG_JIT_LOG").is_some(),
             profiling: false,
             sarang_hook: 0,
             namespace_modul: std::collections::HashSet::new(),
+            galat_tunda_metode: None,
+            galat_metode: Vec::new(),
         }
     }
 
@@ -170,24 +187,42 @@ impl Vm {
     pub fn run(&mut self, chunk: Chunk) -> VmResult<()> {
         self.stack.clear();
         self.frames.clear();
+        self.basis = 0;
         let script_fn = Arc::new(VmFunction::new("<script>", 0, chunk));
-        self.frames.push(CallFrame { func: script_fn, ip: 0, slot: 0, defers: Vec::new(), argc: 0, closure: None });
+        // `stack[slot]` milik yang dipanggil, lokal mulai sesudahnya — skrip juga, atau lokal di
+        // initializer modul (`let K = a ?? b`) bergeser satu dan jatuh di luar stack.
+        self.stack.push(VmValue::Nil);
+        self.dorong_bingkai(CallFrame { func: script_fn, ip: 0, slot: 0, defers: Vec::new(), argc: 0, closure: None });
         self.run_until(0)
     }
 
     /// Used by channel.rs to call a function value from a spawned goroutine.
     pub fn call_value_immediate(&mut self, fn_val: VmValue, args: Vec<VmValue>) -> VmResult<VmValue> {
+        let (dasar, tinggi) = (self.frames.len(), self.stack.len());
         let argc = args.len();
-        let dasar = self.frames.len();
-        let tinggi = self.stack.len();
         self.push(fn_val);
         for a in args { self.push(a); }
+        self.selesaikan_panggilan(argc, dasar, tinggi)
+    }
+
+    /// `call_value_immediate` dengan argumen tetap, tanpa `Vec` per panggilan (pemanggilan balik HOF).
+    pub(crate) fn call_value_immediate_n<const N: usize>(&mut self, fn_val: &VmValue, args: [VmValue; N]) -> VmResult<VmValue> {
+        let (dasar, tinggi) = (self.frames.len(), self.stack.len());
+        self.push(fn_val.clone());
+        for a in args { self.push(a); }
+        self.selesaikan_panggilan(N, dasar, tinggi)
+    }
+
+    /// Fungsi dan `argc` argumennya sudah di stack di atas `tinggi`: jalankan sampai kembali ke `dasar`.
+    #[inline]
+    fn selesaikan_panggilan(&mut self, argc: usize, dasar: usize, tinggi: usize) -> VmResult<VmValue> {
         // Native dan `extern "C"` selesai di dalam `call_value_at` tanpa bingkai baru. Menjalankan
         // `run_until` untuk mereka melanjutkan bingkai PEMANGGIL dari tengah instruksinya.
         let hasil = self.call_value_at(argc, None, false)
             .and_then(|_| if self.frames.len() > dasar { self.run_until(dasar) } else { Ok(()) });
         if let Err(e) = hasil {
-            // Bingkainya sudah dilepas `run_until`; fungsi dan argumennya dibuang di sini.
+            // Bingkainya sudah dilepas `run_until`, kecuali galat dari kode JIT yang dimasuki `call_value_at`.
+            let e = if self.frames.len() > dasar { self.galat_keluar(dasar, e) } else { e };
             self.stack.truncate(tinggi);
             return Err(e);
         }
@@ -250,11 +285,11 @@ impl Vm {
         let mut kelompok: std::collections::HashMap<String, Vec<VmValue>> =
             std::collections::HashMap::new();
         for item in items {
-            let kunci = format!("{}", self.call_value_immediate(f.clone(), vec![item.clone()])?);
+            let kunci = format!("{}", self.call_value_immediate_n(&f, [item.clone()])?);
             kelompok.entry(kunci).or_default().push(item);
         }
         Ok(VmValue::map(
-            kelompok.into_iter().map(|(k, isi)| (k, VmValue::array(isi))).collect(),
+            kelompok.into_iter().map(|(k, isi)| (k, VmValue::array(isi))),
         ))
     }
 
@@ -266,7 +301,7 @@ impl Vm {
         sp: Option<crate::lexer::Span>,
     ) -> VmResult<Vec<VmValue>> {
         crate::interpreter::urut_sisip_biner(items, |item, pembanding| {
-            match self.call_value_immediate(f.clone(), vec![item.clone(), pembanding.clone()])? {
+            match self.call_value_immediate_n(&f, [item.clone(), pembanding.clone()])? {
                 VmValue::Int(n) => Ok(n),
                 VmValue::Float(x) => Ok(if x < 0.0 { -1 } else if x > 0.0 { 1 } else { 0 }),
                 // Bool DITOLAK: `true`/`false` tidak membedakan "lebih kecil" dari "sama".
@@ -286,7 +321,7 @@ impl Vm {
     ) -> VmResult<Vec<VmValue>> {
         let mut pasangan: Vec<(VmValue, VmValue)> = Vec::with_capacity(items.len());
         for item in items {
-            let k = self.call_value_immediate(f.clone(), vec![item.clone()])?;
+            let k = self.call_value_immediate_n(&f, [item.clone()])?;
             pasangan.push((k, item));
         }
         let urut = crate::interpreter::urut_stabil(pasangan, |(ka, _), (kb, _)| {
@@ -312,9 +347,9 @@ impl Vm {
             return Err(VmError::at(crate::interpreter::pesan_koleksi_kosong(
                 konteks, if cari_min { "nilai terkecil" } else { "nilai terbesar" }), sp));
         };
-        let mut kunci = self.call_value_immediate(f.clone(), vec![terbaik.clone()])?;
+        let mut kunci = self.call_value_immediate_n(&f, [terbaik.clone()])?;
         for v in it {
-            let k = self.call_value_immediate(f.clone(), vec![v.clone()])?;
+            let k = self.call_value_immediate_n(&f, [v.clone()])?;
             let o = crate::stdlib::koleksi::cmp_vm(&k, &kunci).ok_or_else(|| VmError::at(
                 crate::interpreter::pesan_kunci_tak_sebanding(
                     konteks, &k.type_name_penuh(), &kunci.type_name_penuh()), sp))?;
@@ -391,14 +426,14 @@ impl Vm {
                 "map" => {
                     let mut out = Vec::with_capacity(items.len());
                     for item in items {
-                        out.push(self.call_value_immediate(a0.clone(), vec![item])?);
+                        out.push(self.call_value_immediate_n(&a0, [item])?);
                     }
                     self.push(VmValue::array(out));
                 }
                 "filter" => {
                     let mut out = Vec::new();
                     for item in items {
-                        if self.call_value_immediate(a0.clone(), vec![item.clone()])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item.clone()])?.is_truthy() {
                             out.push(item);
                         }
                     }
@@ -407,7 +442,7 @@ impl Vm {
                 "any" => {
                     let mut found = false;
                     for item in items {
-                        if self.call_value_immediate(a0.clone(), vec![item])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item])?.is_truthy() {
                             found = true;
                             break;
                         }
@@ -417,7 +452,7 @@ impl Vm {
                 "all" => {
                     let mut all = true;
                     for item in items {
-                        if !self.call_value_immediate(a0.clone(), vec![item])?.is_truthy() {
+                        if !self.call_value_immediate_n(&a0, [item])?.is_truthy() {
                             all = false;
                             break;
                         }
@@ -428,7 +463,7 @@ impl Vm {
                 "find" => {
                     let mut found = opsi_none();
                     for item in items {
-                        if self.call_value_immediate(a0.clone(), vec![item.clone()])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item.clone()])?.is_truthy() {
                             found = opsi_some(item);
                             break;
                         }
@@ -439,7 +474,7 @@ impl Vm {
                     let mut yes = Vec::new();
                     let mut no = Vec::new();
                     for item in items {
-                        if self.call_value_immediate(a0.clone(), vec![item.clone()])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item.clone()])?.is_truthy() {
                             yes.push(item);
                         } else {
                             no.push(item);
@@ -452,14 +487,14 @@ impl Vm {
                 // dirangkai", dan yang dirangkai justru hasil yang dibuang.
                 "each" => {
                     for item in items {
-                        self.call_value_immediate(a0.clone(), vec![item])?;
+                        self.call_value_immediate_n(&a0, [item])?;
                     }
                     self.push(VmValue::Unit);
                 }
                 "count_if" => {
                     let mut n: i128 = 0;
                     for item in items {
-                        if self.call_value_immediate(a0.clone(), vec![item])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item])?.is_truthy() {
                             n += 1;
                         }
                     }
@@ -469,7 +504,7 @@ impl Vm {
                 "find_idx" => {
                     let mut ketemu = opsi_none();
                     for (i, item) in items.into_iter().enumerate() {
-                        if self.call_value_immediate(a0.clone(), vec![item])?.is_truthy() {
+                        if self.call_value_immediate_n(&a0, [item])?.is_truthy() {
                             ketemu = opsi_some(VmValue::Int(i as i128));
                             break;
                         }
@@ -479,7 +514,7 @@ impl Vm {
                 "flat_map" => {
                     let mut out = Vec::new();
                     for item in items {
-                        match self.call_value_immediate(a0.clone(), vec![item])? {
+                        match self.call_value_immediate_n(&a0, [item])? {
                             VmValue::Array(inner) => out.extend(inner.lock().unwrap().iter().cloned()),
                             lain => out.push(lain),
                         }
@@ -512,7 +547,7 @@ impl Vm {
                 "reduce" => {
                     let mut acc = a1;
                     for item in items {
-                        acc = self.call_value_immediate(a0.clone(), vec![acc, item])?;
+                        acc = self.call_value_immediate_n(&a0, [acc, item])?;
                     }
                     self.push(acc);
                 }
@@ -520,7 +555,7 @@ impl Vm {
                 "fold" => {
                     let mut acc = a0;
                     for item in items {
-                        acc = self.call_value_immediate(a1.clone(), vec![acc, item])?;
+                        acc = self.call_value_immediate_n(&a1, [acc, item])?;
                     }
                     self.push(acc);
                 }
@@ -528,7 +563,7 @@ impl Vm {
                     let right = self.expect_array(&a0, "zip_with", sp)?;
                     let mut out = Vec::with_capacity(items.len().min(right.len()));
                     for (x, y) in items.into_iter().zip(right) {
-                        out.push(self.call_value_immediate(a1.clone(), vec![x, y])?);
+                        out.push(self.call_value_immediate_n(&a1, [x, y])?);
                     }
                     self.push(VmValue::array(out));
                 }
@@ -574,7 +609,17 @@ impl Vm {
         Ok(&self.stack[idx])
     }
     #[inline] pub(crate) fn frame_slot(&self) -> usize {
-        self.frames.last().map(|f| f.slot + 1).unwrap_or(0)
+        debug_assert_eq!(self.basis, self.frames.last().map(|f| f.slot + 1).unwrap_or(0));
+        self.basis
+    }
+    #[inline] pub(crate) fn dorong_bingkai(&mut self, f: CallFrame) {
+        self.basis = f.slot + 1;
+        self.frames.push(f);
+    }
+    #[inline] pub(crate) fn ambil_bingkai(&mut self) -> Option<CallFrame> {
+        let f = self.frames.pop();
+        self.basis = self.frames.last().map(|f| f.slot + 1).unwrap_or(0);
+        f
     }
 
     /// Sel tangkapan ke-`idx` milik closure yang sedang berjalan.
@@ -613,11 +658,6 @@ impl Vm {
         crate::vm::visibilitas::periksa(&tipe_objek, field, tipe_self.as_deref())
             .map_err(|e| VmError::at(e, sp))
     }
-}
-
-pub(crate) fn jelaskan_global_hilang(name: &str) -> String {
-    // Kalimatnya TIDAK ditulis di sini.
-    crate::interpreter::pesan_nama_tak_dikenal(name, None)
 }
 
 /// Nama seperti yang DITULIS: awalan modul (`alat#1::`) dibuang. `#` tidak bisa
@@ -723,19 +763,6 @@ pub(crate) fn opsi_some(v: VmValue) -> VmValue { VmValue::some(v) }
 
 pub(crate) fn opsi_none() -> VmValue { VmValue::none() }
 
-pub(crate) fn optional_index(v: &VmValue, sp: Option<crate::lexer::Span>) -> VmResult<Option<i128>> {
-    match v {
-        VmValue::Nil => Ok(None),
-        // Nilai MENTAH, termasuk yang negatif. Batas negatif dihitung dari
-        // belakang (`a[-2:]` = dua elemen terakhir) — itu semantik JRG, dan
-        // penyelesaiannya butuh panjang, jadi dikerjakan di `slice_value`.
-        VmValue::Int(i) => Ok(Some(*i)),
-        other => Err(VmError::at(
-            format!("index slice harus integer, dapat `{}`", other.type_name_penuh()),
-            sp,
-        )),
-    }
-}
 
 /// Cast ke integer, dengan aturan yang SAMA persis dengan interpreter.
 pub(crate) fn cast_int(a: &[VmValue]) -> Result<VmValue, String> {

@@ -21,7 +21,9 @@ pub enum OpCode {
     CopyVal,
 
     // Locals
-    LoadLocal, StoreLocal,
+    LoadLocal,
+    /// `LoadLocal` yang diikuti `IntImm|LoadLocal; Add|Sub|Mul|Mod` (ditandai `Chunk::rampungkan`).
+    LokalHitung, StoreLocal,
 
     // ── Jalur penulisan (copy-on-write) ──────────────────────────────────
     PinjamLokal,
@@ -84,13 +86,16 @@ pub enum OpCode {
 
     // Collections
     BuildArray, BuildTuple, BuildMap, MergeMap,
-    /// Instance struct: `arg` pasangan field di atas prototipe struct-nya.
+    /// Instance struct dari nilai field di stack; prototipe (label + nama field berurutan) di konstanta ke-`arg`.
     BuildStruct,
     /// Varian enum ber-payload; `tipe::varian` dari prototipe di konstanta ke-`arg`.
     BuildEnum,
 
     // Field/Index
     GetField, GetMethod, SetField, HasField, GetIndex, SetIndex, Slice,
+    /// Jumlah argumen method bawaan, diperiksa SESUDAH argumennya dievaluasi (seperti acuan);
+    /// `GetMethod` situs itu membawa `ARGC_NANTI`. Bit `TANDA_TUNDA`: galatnya ikut `defer`.
+    PeriksaArgMetode,
 
     // Pola — membaca LABEL, tidak pernah kunci peta
     /// Uji varian enum; `arg` = konstanta `(tipe|nil, varian, wajib_payload)`.
@@ -133,6 +138,8 @@ pub enum OpCode {
     SamaTempat,
     /// `StoreLocal` lalu `Pop` dalam satu langkah: nilai di puncak PINDAH ke lokal `arg`.
     SimpanBuang,
+    /// Dorong `true` kalau lokal `arg` bukan sel yang ditangkap closure (tidak ada pihak lain yang bisa membacanya).
+    LokalPolos,
     /// `[idx]` → `lokal[idx]`: membaca elemen tanpa mengangkat wadahnya ke stack.
     IndeksLokal,
     /// `[nilai, idx]` → `lokal[idx] = nilai`, keduanya dibuang.
@@ -205,7 +212,7 @@ impl Instruction {
 impl std::fmt::Display for Instruction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self.op {
-            OpCode::Const | OpCode::LoadLocal | OpCode::StoreLocal
+            OpCode::Const | OpCode::LoadLocal | OpCode::LokalHitung | OpCode::StoreLocal
             | OpCode::MakeClosure | OpCode::LoadUpval | OpCode::StoreUpval
             | OpCode::LoadGlobal | OpCode::StoreGlobal | OpCode::DefGlobal | OpCode::DefVar
             | OpCode::Jump | OpCode::JumpFalse | OpCode::JumpTrue
@@ -215,7 +222,7 @@ impl std::fmt::Display for Instruction {
             | OpCode::Call | OpCode::LoadFn | OpCode::IterNext
             | OpCode::MakeIterRentang | OpCode::IterAda | OpCode::CobaTambahField
             | OpCode::CobaTumbuhLokal | OpCode::CobaTumbuhUpval | OpCode::CobaTumbuhGlobal | OpCode::SamaTempat
-            | OpCode::SimpanBuang | OpCode::IndeksLokal | OpCode::TulisIndexLokal
+            | OpCode::SimpanBuang | OpCode::LokalPolos | OpCode::IndeksLokal | OpCode::TulisIndexLokal
             | OpCode::TumbuhIndexLokal | OpCode::IterMaju
             | OpCode::GetField
             | OpCode::SetField | OpCode::HasField | OpCode::HofCall
@@ -225,10 +232,15 @@ impl std::fmt::Display for Instruction {
                 write!(f, "{:<16} {}", self.op, self.arg)
             }
             // Nama method di 24 bit bawah, jumlah argumen di 8 bit atas.
-            OpCode::HofMethod | OpCode::GetMethod =>
+            OpCode::HofMethod | OpCode::GetMethod | OpCode::PeriksaArgMetode =>
                 write!(f, "{:<16} {} argc={}", self.op, self.arg & 0x00FF_FFFF, self.arg >> 24),
             OpCode::IntImm => write!(f, "{:<16} {}", self.op, self.arg as i32),
             _ => write!(f, "{}", self.op),
         }
     }
 }
+
+/// `argc` di `GetMethod` yang berarti "jangan periksa di sini, `PeriksaArgMetode` menyusul".
+pub const ARGC_NANTI: u32 = 0xFF;
+/// Bit di `PeriksaArgMetode`: jumlah yang salah dilaporkan saat panggilan tundanya jalan.
+pub const TANDA_TUNDA: u32 = 1 << 23;

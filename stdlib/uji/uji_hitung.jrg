@@ -1,0 +1,43 @@
+package main
+import "std/hitung"
+
+fn h(s) { return hitung::hitung(s, {"harga": 10, "pajak": 0.11, "n": 3}) }
+
+fn test_aritmetika() {
+    assert_eq(h("1 + 2 * 3").unwrap(), 7.0)
+    assert_eq(h("(1 + 2) * 3").unwrap(), 9.0)
+    assert_eq(h("2 ** 3 ** 2").unwrap(), 512.0)
+    assert_eq(h("-2 ** 2").unwrap(), -4.0)
+    assert_eq(h("- -3").unwrap(), 3.0)
+    assert_eq(h("7 % 3").unwrap(), 1.0)
+    assert_eq(h("-7 % 3").unwrap(), 2.0)
+    assert_eq(h("harga * (1 + pajak)").unwrap(), 11.100000000000001)
+    assert_eq(h("max(1, n, 2) + min(5, harga)").unwrap(), 8.0)
+    assert_eq(h("sqrt(16) + abs(-2) + round(2.5) + floor(2.9) + ceil(2.1)").unwrap(), 14.0)
+    assert_eq(h("  10/4 ").unwrap(), 2.5)
+}
+
+fn test_bukan_eval() {
+    for _, s in ["__import__('os').system('id')", "fs::delete(\"/\")", "harga.x", "a; b", "1 + `id`", "harga()", "\"teks\"", "[1]"] {
+        assert(h(s).is_err(), s)
+    }
+    assert_eq(h("system(1)").unwrap_err(), "fungsi `system` di posisi 0 tidak ada — yang ada: abs, min, max, sqrt, round, floor, ceil, ln, log10")
+    assert_eq(h("x + 1").unwrap_err(), "nama `x` di posisi 0 tidak dikenal")
+}
+
+fn test_salah_dan_batas() {
+    assert_eq(h("1 / 0").unwrap_err(), "bagi nol di posisi 2")
+    assert_eq(h("1 % 0").unwrap_err(), "sisa bagi nol di posisi 2")
+    assert_eq(h("(1 + 2").unwrap_err(), "kurung yang dibuka di posisi 0 tidak ditutup")
+    assert_eq(h("1 +").unwrap_err(), "rumus berakhir di tengah — kurang angka atau nama")
+    assert_eq(h("1 2").unwrap_err(), "`2` di posisi 2 tidak diharapkan di sini")
+    assert_eq(h("1.2.3").unwrap_err(), "angka `1.2.3` di posisi 0 tidak sah")
+    assert_eq(h("2 ** 5000").unwrap_err(), "pangkat 5000.0 di posisi 2 terlalu besar")
+    assert_eq(h("10 ** 300 * 10 ** 300").unwrap_err(), "hasil di posisi 10 bukan bilangan terhingga")
+    assert_eq(h("sqrt(-1)").unwrap_err(), "akar dari bilangan negatif di posisi 0")
+    assert_eq(h("").unwrap_err(), "rumus kosong")
+    assert_eq(h(str::repeat("(", 100) + "1" + str::repeat(")", 100)).unwrap_err(), "kurung atau tanda bertumpuk lebih dari 64 tingkat")
+    assert_eq(h(str::repeat("1+", 3000) + "1").unwrap_err(), "rumus 6001 karakter, di atas batas 4096")
+    assert_eq(hitung::hitung("a", {"a": "teks"}).unwrap_err(), "nama `a` bernilai `string`, bukan bilangan")
+    assert_eq(h("1 + \u0007").unwrap_err(), "karakter kode 7 di posisi 4 bukan bagian rumus")
+}

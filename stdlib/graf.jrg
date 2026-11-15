@@ -1,0 +1,172 @@
+package std_graf
+
+import "std/heap"
+
+// Graf berarah berbobot: simpul bernama teks, sisi berbobot bilangan tak negatif — Dijkstra menjawab SALAH
+// tanpa suara kalau ada bobot negatif, jadi bobot negatif ditolak saat sisinya ditambahkan. Urutan tetangga
+// mengikuti urutan penambahan, jadi BFS dan urutan topologi deterministik.
+
+pub struct Graf {
+    pub sisi: dict = dict::new(),
+    pub urutan: array = [],
+}
+
+/// Graf kosong.
+pub fn baru() { return Graf {} }
+
+fn _nama(v, apa) {
+    if typeof(v) != "string" || v == "" {
+        panik(«graf: ${apa} harus teks tak kosong, dapat `${typeof(v)}` — kunci dict adalah bentuk tampilnya, jadi 1 dan "1" akan jadi simpul yang sama»)
+    }
+}
+
+/// Tambah simpul (tanpa sisi); simpul yang sudah ada dibiarkan.
+pub fn simpul(g, n) {
+    _nama(n, "nama simpul")
+    if dict::has(g.sisi, n) { return g }
+    // `g` ditulis langsung: pemanggil yang menulis `g = graf::simpul(g, ..)` memindahkannya, sedangkan
+    // `var h = g` dulu membuat dua pemilik, jadi tiap sisi menyalin seluruh graf (kuadrat).
+    g.sisi[n] = []
+    g.urutan = arr::push(g.urutan, n)
+    return g
+}
+
+/// Sisi berarah `a → b` berbobot `w` (bilangan, tidak negatif, bukan NaN).
+pub fn sisi(g, a, b, w) {
+    let t = typeof(w)
+    if t != "int" && t != "float" { panik(«graf: bobot sisi ${a} → ${b} harus bilangan, dapat `${t}`») }
+    if !(w >= 0) { panik(«graf: bobot sisi ${a} → ${b} adalah ${w} — bobot negatif (atau NaN) membuat jalur terpendek salah») }
+    g = simpul(g, a)
+    g = simpul(g, b)
+    g.sisi[a] = arr::push(g.sisi[a], [b, w])
+    return g
+}
+
+/// Sisi dua arah `a ↔ b` berbobot `w`.
+pub fn sisi_dua(g, a, b, w) { return sisi(sisi(g, a, b, w), b, a, w) }
+
+/// Semua simpul, urut penambahan.
+pub fn simpul_semua(g) { return g.urutan }
+
+/// Tetangga `n` (nama saja), urut penambahan.
+pub fn tetangga(g, n) {
+    if !dict::has(g.sisi, n) { return [] }
+    return arr::map(g.sisi[n], |s| s[0])
+}
+
+/// Simpul yang terjangkau dari `awal`, urut BFS (awal lebih dulu); `Err` kalau `awal` bukan simpul.
+pub fn bfs(g, awal) {
+    if !dict::has(g.sisi, awal) { return Err(«simpul `${awal}` tidak ada di graf») }
+    var lihat = dict::new()
+    lihat[awal] = true
+    var antre = [awal]
+    var i = 0
+    while i < len(antre) {
+        for _, s in g.sisi[antre[i]] {
+            if !dict::has(lihat, s[0]) {
+                lihat[s[0]] = true
+                antre = arr::push(antre, s[0])
+            }
+        }
+        i += 1
+    }
+    return Ok(antre)
+}
+
+/// Jalur terpendek `a` ke `b` (Dijkstra): `Ok(Some((jarak, [a, .., b])))`, `Ok(None)` kalau tak terjangkau.
+pub fn jalur_terpendek(g, a, b) {
+    if !dict::has(g.sisi, a) { return Err(«simpul `${a}` tidak ada di graf») }
+    if !dict::has(g.sisi, b) { return Err(«simpul `${b}` tidak ada di graf») }
+    var jarak = dict::new()
+    var asal = dict::new()
+    var selesai = dict::new()
+    jarak[a] = 0
+    var h = heap::new()
+    h = h.push([0, a])
+    while !h.is_empty() {
+        let top = h.peek().unwrap()
+        h = h.rest()
+        let d = top[0]
+        let u = top[1]
+        if dict::has(selesai, u) { continue }
+        selesai[u] = true
+        if u == b { break }
+        for _, s in g.sisi[u] {
+            let v = s[0]
+            let nd = d + s[1]
+            if !dict::has(jarak, v) || nd < jarak[v] {
+                jarak[v] = nd
+                asal[v] = u
+                h = h.push([nd, v])
+            }
+        }
+    }
+    if !dict::has(jarak, b) { return Ok(None) }
+    var jalur = [b]
+    var k = b
+    while k != a {
+        k = asal[k]
+        jalur = arr::push(jalur, k)
+    }
+    return Ok(Some((jarak[b], arr::reverse(jalur))))
+}
+
+/// Urutan topologi (tiap sisi `a → b`: `a` lebih dulu); `Err` yang menyebut siklusnya kalau ada.
+pub fn urut_topologi(g) {
+    // 0 belum, 1 sedang di tumpukan, 2 selesai; DFS iteratif supaya graf panjang tidak menghabiskan stack.
+    var warna = dict::new()
+    for _, n in g.urutan { warna[n] = 0 }
+    var hasil = []
+    for _, mulai in g.urutan {
+        if warna[mulai] != 0 { continue }
+        var tumpuk = [[mulai, 0]]
+        warna[mulai] = 1
+        while len(tumpuk) > 0 {
+            let atas = tumpuk[len(tumpuk) - 1]
+            let u = atas[0]
+            let i = atas[1]
+            let ts = g.sisi[u]
+            if i < len(ts) {
+                tumpuk[len(tumpuk) - 1] = [u, i + 1]
+                let v = ts[i][0]
+                if warna[v] == 1 {
+                    var siklus = []
+                    var j = len(tumpuk) - 1
+                    while tumpuk[j][0] != v {
+                        siklus = arr::push(siklus, tumpuk[j][0])
+                        j -= 1
+                    }
+                    siklus = arr::push(arr::reverse(arr::push(siklus, v)), v)
+                    return Err(«ada siklus: ${str::join(siklus, " → ")}»)
+                }
+                if warna[v] == 0 {
+                    warna[v] = 1
+                    tumpuk = arr::push(tumpuk, [v, 0])
+                }
+            } else {
+                warna[u] = 2
+                hasil = arr::push(hasil, u)
+                tumpuk = arr::pop(tumpuk)[0]
+            }
+        }
+    }
+    return Ok(arr::reverse(hasil))
+}
+
+/// Komponen terhubung (sisi dibaca dua arah), tiap komponen urut BFS, komponen urut simpul pertamanya.
+pub fn komponen(g) {
+    var dua = baru()
+    for _, n in g.urutan {
+        dua = simpul(dua, n)
+        for _, s in g.sisi[n] { dua = sisi_dua(dua, n, s[0], 0) }
+    }
+    var lihat = dict::new()
+    var semua = []
+    for _, n in dua.urutan {
+        if dict::has(lihat, n) { continue }
+        let k = bfs(dua, n).unwrap()
+        for _, x in k { lihat[x] = true }
+        semua = arr::push(semua, k)
+    }
+    return semua
+}

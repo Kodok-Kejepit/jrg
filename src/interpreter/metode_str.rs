@@ -39,12 +39,12 @@ impl Interpreter {
             (s, "len")          => Ok(Value::Int(s.chars().count() as i128)),
             (s, "byte_len")     => Ok(Value::Int(s.len() as i128)),
             (s, "is_empty")     => Ok(Value::Bool(s.is_empty())),
-            (s, "to_uppercase") => Ok(Value::Str(s.to_uppercase())),
-            (s, "to_lowercase") => Ok(Value::Str(s.to_lowercase())),
+            (s, "to_uppercase") => Ok(Value::Str(std::sync::Arc::new(s.to_uppercase()))),
+            (s, "to_lowercase") => Ok(Value::Str(std::sync::Arc::new(s.to_lowercase()))),
             // `upper`/`lower` adalah ejaan pendek yang SUDAH ada sebagai
             // `str::upper`/`str::lower`, dan sudah ada sebagai method di VM — yang tidak …
-            (s, "upper")        => Ok(Value::Str(s.to_uppercase())),
-            (s, "lower")        => Ok(Value::Str(s.to_lowercase())),
+            (s, "upper")        => Ok(Value::Str(std::sync::Arc::new(s.to_uppercase()))),
+            (s, "lower")        => Ok(Value::Str(std::sync::Arc::new(s.to_lowercase()))),
             // Enam nama yang punya bentuk namespace di KEDUA backend dan bentuk method
             // HANYA di VM — jadi `"x".capitalize()` jalan lewat `--vm` dan ditolak …
             (s, "capitalize") | (s, "swap_case") | (s, "is_upper")
@@ -70,19 +70,19 @@ impl Interpreter {
                     "substr"       => K::StrSubstr,
                     _            => K::StrFormat,
                 };
-                let mut v = vec![Value::Str(s.clone())];
+                let mut v = vec![Value::Str(std::sync::Arc::new(s.clone()))];
                 v.extend(args.iter().cloned());
                 Self::dispatch_str_inner(&kind, &v)
             }
-            (s, "trim")         => Ok(Value::Str(s.trim().to_string())),
-            (s, "trim_start")   => Ok(Value::Str(s.trim_start().to_string())),
-            (s, "trim_end")     => Ok(Value::Str(s.trim_end().to_string())),
-            (s, "to_string")    => Ok(Value::Str(s.clone())),
+            (s, "trim")         => Ok(Value::Str(std::sync::Arc::new(s.trim().to_string()))),
+            (s, "trim_start")   => Ok(Value::Str(std::sync::Arc::new(s.trim_start().to_string()))),
+            (s, "trim_end")     => Ok(Value::Str(std::sync::Arc::new(s.trim_end().to_string()))),
+            (s, "to_string")    => Ok(Value::Str(std::sync::Arc::new(s.clone()))),
             (s, "chars")        => Ok(Value::Array(s.chars().map(Value::Rune).collect())),
             (s, "bytes")        => Ok(Value::Array(s.bytes().map(|b| Value::Int(b as i128)).collect())),
-            (s, "words")        => Ok(Value::Array(s.split_whitespace().map(|w| Value::Str(w.to_string())).collect())),
-            (s, "lines")        => Ok(Value::Array(s.lines().map(|l| Value::Str(l.to_string())).collect())),
-            (s, "reverse")      => Ok(Value::Str(s.chars().rev().collect())),
+            (s, "words")        => Ok(Value::Array(s.split_whitespace().map(|w| Value::Str(std::sync::Arc::new(w.to_string()))).collect())),
+            (s, "lines")        => Ok(Value::Array(s.lines().map(|l| Value::Str(std::sync::Arc::new(l.to_string()))).collect())),
+            (s, "reverse")      => Ok(Value::teks(s.chars().rev().collect::<String>())),
             // Tujuh method ini SATU implementasi dengan bentuk `str::`-nya, yang
             // juga dipakai VM. Salinan di sini dulu men-Display POLA-nya, jadi
             // `"x1.5y".contains(1.5)` menjawab `true` — kelas #313 di pintu method.
@@ -95,7 +95,7 @@ impl Interpreter {
                     "replace" => StrReplace, "count" => StrCount, _ => StrFind,
                 };
                 let mut semua = Vec::with_capacity(args.len() + 1);
-                semua.push(Value::Str(s.clone()));
+                semua.push(Value::Str(std::sync::Arc::new(s.clone())));
                 semua.extend(args.iter().cloned());
                 Self::dispatch_str_inner(&kind, &semua)
             }
@@ -108,7 +108,7 @@ impl Interpreter {
                 // Batas alokasi yang sama dengan operator `"ab" * n` —
                 // dulu `s.repeat(n)` di sini dipanggil langsung tanpa
                 // batas, jadi `n` yang kebesaran bisa OOM-kill proses.
-                let n = bawa!(args.first().map(|v| nilai_ke_i128(v)).transpose()).unwrap_or(1);
+                let n = bawa!(args.first().map(|v| crate::interpreter::eval_expr::bulat_untuk("str::repeat", v)).transpose()).unwrap_or(1);
                 Self::v_repeat_str(&s, n)
             }
             (s, "char_at") => {
@@ -124,9 +124,9 @@ impl Interpreter {
             // salinan kedua: dua kalimat untuk satu kegagalan parse adalah
             // persis yang dulu terjadi di sini.
             (s, "to_int") | (s, "parse_int") =>
-                Self::parse_int_lepas(&Value::Str(s.clone())),
+                Self::parse_int_lepas(&Value::Str(std::sync::Arc::new(s.clone()))),
             (s, "to_float") | (s, "parse_float") =>
-                Self::parse_float_lepas(&Value::Str(s.clone())),
+                Self::parse_float_lepas(&Value::Str(std::sync::Arc::new(s.clone()))),
             (s, "pad_left") => {
                 // Argumen yang hilang DITOLAK, tidak diberi nilai bawaan.
                 if args.is_empty() {
@@ -135,7 +135,7 @@ impl Interpreter {
                 }
                 // Satu definisi dengan bentuk namespace: salinan kedua di sini dulu tanpa
                 // batas lebar, jadi `"a".pad_left(99999999999)` mematikan prosesnya.
-                let mut semua = vec![Value::Str(s.clone())];
+                let mut semua = vec![Value::Str(std::sync::Arc::new(s.clone()))];
                 semua.extend(args.iter().cloned());
                 Self::dispatch_str_inner(&crate::interpreter::builtin::NativeFnKind::StrPadLeft, &semua)
             }
@@ -147,7 +147,7 @@ impl Interpreter {
                 }
                 // Satu definisi dengan bentuk namespace: salinan kedua di sini dulu tanpa
                 // batas lebar, jadi `"a".pad_right(99999999999)` mematikan prosesnya.
-                let mut semua = vec![Value::Str(s.clone())];
+                let mut semua = vec![Value::Str(std::sync::Arc::new(s.clone()))];
                 semua.extend(args.iter().cloned());
                 Self::dispatch_str_inner(&crate::interpreter::builtin::NativeFnKind::StrPadRight, &semua)
             }
@@ -159,7 +159,7 @@ impl Interpreter {
                 }
                 // Satu definisi dengan bentuk namespace: salinan kedua di sini dulu tanpa
                 // batas lebar, jadi `"a".center(99999999999)` mematikan prosesnya.
-                let mut semua = vec![Value::Str(s.clone())];
+                let mut semua = vec![Value::Str(std::sync::Arc::new(s.clone()))];
                 semua.extend(args.iter().cloned());
                 Self::dispatch_str_inner(&crate::interpreter::builtin::NativeFnKind::StrCenter, &semua)
             }
@@ -171,7 +171,7 @@ impl Interpreter {
                         Some(c) => c.to_uppercase().to_string() + ch.as_str(),
                     }
                 }).collect::<Vec<_>>().join(" ");
-                Ok(Value::Str(r))
+                Ok(Value::Str(std::sync::Arc::new(r)))
             }
             // Sama seperti `str::slice`: dilempar ke `eval_slice` yang sama dengan
             // `s[awal:akhir]`, bukan diimplementasikan ulang dengan …
@@ -192,7 +192,7 @@ impl Interpreter {
                     if c.is_uppercase() && i > 0 { r.push('_'); }
                     r.push(c.to_lowercase().next().unwrap_or(c));
                 }
-                Ok(Value::Str(r.replace(' ', "_")))
+                Ok(Value::Str(std::sync::Arc::new(r.replace(' ', "_"))))
             }
             (s, "camel_case") => {
                 let words: Vec<&str> = s.split(|c: char| c == '_' || c == ' ').collect();
@@ -205,7 +205,7 @@ impl Interpreter {
                         }
                     }
                 }).collect();
-                Ok(Value::Str(r))
+                Ok(Value::Str(std::sync::Arc::new(r)))
             }
             _ => return None,
         })
@@ -215,12 +215,12 @@ impl Interpreter {
     /// sementara `eval_slice` secara keseluruhan tidak (cabang struct
     /// memanggil method pengguna).
     pub fn potong_str(s: &str, lo: Option<Value>, hi: Option<Value>) -> EvalResult {
-        let ch: Vec<char> = s.chars().collect();
-        let n = ch.len();
+        // Tanpa `Vec<char>` seluruh teks: panjang dihitung sekali, lalu indeks karakter jadi offset bita.
+        let n = s.chars().count();
         let si = lo.as_ref().map(|v| Self::slice_bound(v, n, "awal")).transpose()?.unwrap_or(0);
         let ei = hi.as_ref().map(|v| Self::slice_bound(v, n, "akhir")).transpose()?.unwrap_or(n);
         let (si, ei) = Self::slice_bounds(si, ei)?;
-        Ok(Value::Str(ch[si..ei].iter().collect()))
+        Ok(Value::teks(crate::interpreter::potong_karakter(s, n, si, ei)))
     }
 
     /// `"x" + p` adalah jalur tampilan, jadi ia harus memakai hook juga.
@@ -236,11 +236,11 @@ impl Interpreter {
         match (&a, &b) {
             (Value::Str(_), _) if Self::perlu_tampil(&b) => {
                 let s = self.tampil(&b)?;
-                Ok((a, Value::Str(s)))
+                Ok((a, Value::Str(std::sync::Arc::new(s))))
             }
             (_, Value::Str(_)) if Self::perlu_tampil(&a) => {
                 let s = self.tampil(&a)?;
-                Ok((Value::Str(s), b))
+                Ok((Value::Str(std::sync::Arc::new(s)), b))
             }
             _ => Ok((a, b)),
         }

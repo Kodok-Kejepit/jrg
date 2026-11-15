@@ -8,22 +8,58 @@ use super::codegen::{Codegen, Val};
 use super::types::*;
 
 impl Codegen {
-    /// Argumen yang harus bilangan bulat; yang lain ditolak dengan kalimat `sinkron::pesan_bukan_int`.
-    fn sinkron_bulat(&mut self, e: &Expr, siapa: &str, span: Span) -> Result<Val, String> {
-        let v = self.codegen_expr(e, Some(&JrgType::I64))?;
+    /// Gagal SAAT JALAN dengan kalimat yang sudah jadi saat kompilasi, seperti acuan.
+    pub(crate) fn panik_statis(&mut self, pesan: &str) {
+        self.panik(pesan);
+        let lanjut = self.fresh_label("sesudah_panik.");
+        self.start_block(lanjut);
+    }
+
+    /// Argumen yang harus bilangan bulat; yang lain gagal saat jalan dengan `sinkron::pesan_bukan_int`.
+    fn sinkron_bulat(&mut self, v: Val, siapa: &str, span: Span) -> Result<Val, String> {
+        if v.ty == JrgType::Any {
+            let tag = super::codegen_any::tag_untuk(&JrgType::I64).unwrap_or(0);
+            let t = self.tag_any(&v);
+            let c = self.fresh("atom.");
+            self.emit(format!("{} = icmp ne i32 {}, {}", c, t.text, tag));
+            let kotak = v.clone();
+            self.gagal_bila(&c, |cg| cg.panik_tipe_any(&kotak, |t| crate::sinkron::pesan_bukan_int(siapa, t)));
+            return self.buka_any(&v, &JrgType::I64, span);
+        }
         if !v.ty.is_int() {
-            return Err(super::galat::tandai(span, crate::sinkron::pesan_bukan_int(siapa, &v.ty.nama_typeof())));
+            self.panik_statis(&crate::sinkron::pesan_bukan_int(siapa, &v.ty.nama_typeof()));
+            return Ok(Val { text: "0".into(), ty: JrgType::I64 });
         }
         Ok(self.coerce_longgar(&v, &JrgType::I64))
     }
 
-    fn sinkron_pegangan(&mut self, e: &Expr, kunci: bool, siapa: &str, span: Span) -> Result<Val, String> {
-        let v = self.codegen_expr(e, None)?;
+    fn sinkron_pegangan(&mut self, v: Val, kunci: bool, siapa: &str, span: Span) -> Result<Val, String> {
+        let apa = if kunci { "Mutex" } else { "Atomic" };
+        if v.ty == JrgType::Any {
+            // Kata-tag buram harus persis milik pegangan ini; yang lain gagal dengan tipe aslinya.
+            let kata = self.kata_buram(&JrgType::Sinkron(kunci));
+            let slot = self.alloca_typed("atomp.", &JrgType::Any);
+            self.emit(format!("store %JrgAny {}, ptr {}", v.text, slot));
+            let (w, c) = (self.fresh("atom."), self.fresh("atom."));
+            self.emit(format!("{} = load i32, ptr {}", w, slot));
+            self.emit(format!("{} = icmp ne i32 {}, {}", c, w, kata));
+            let kotak = v.clone();
+            self.gagal_bila(&c, |cg| cg.panik_tipe_any(&kotak, |t| crate::sinkron::pesan_bukan(siapa, apa, t)));
+            return self.buka_any(&v, &JrgType::Sinkron(kunci), span);
+        }
         if v.ty != JrgType::Sinkron(kunci) {
-            let apa = if kunci { "Mutex" } else { "Atomic" };
-            return Err(super::galat::tandai(span, crate::sinkron::pesan_bukan(siapa, apa, &v.ty.nama_typeof())));
+            self.panik_statis(&crate::sinkron::pesan_bukan(siapa, apa, &v.ty.nama_typeof()));
+            return Ok(Val { text: "null".into(), ty: JrgType::Sinkron(kunci) });
         }
         Ok(v)
+    }
+
+    /// Semua argumen dievaluasi urut tulis sebelum ada yang diperiksa, seperti di acuan.
+    fn sinkron_nilai(&mut self, args: &[Expr], bulat: &[usize]) -> Result<Vec<Val>, String> {
+        args.iter().enumerate().map(|(i, e)| {
+            let harap = bulat.contains(&i).then_some(JrgType::I64);
+            self.codegen_expr(e, harap.as_ref())
+        }).collect()
     }
 
     fn sinkron_aritas(nama: &str, dapat: usize, min: usize, maks: usize, span: Span) -> Result<(), String> {
@@ -38,7 +74,8 @@ impl Codegen {
         match nama {
             "Atomic::new" => {
                 Self::sinkron_aritas(nama, args.len(), 0, 1, span)?;
-                let awal = match args.first() {
+                let mut v = self.sinkron_nilai(args, &[0])?;
+                let awal = match v.pop() {
                     Some(e) => self.sinkron_bulat(e, nama, span)?,
                     None => i64v("0".into()),
                 };
@@ -56,15 +93,17 @@ impl Codegen {
             }
             "atomic::get" => {
                 Self::sinkron_aritas(nama, args.len(), 1, 1, span)?;
-                let a = self.sinkron_pegangan(&args[0], false, nama, span)?;
+                let v = self.sinkron_nilai(args, &[])?.remove(0);
+                let a = self.sinkron_pegangan(v, false, nama, span)?;
                 let r = self.fresh("atom.");
                 self.emit(format!("{} = load i64, ptr {}", r, a.text));
                 Ok(i64v(r))
             }
             "atomic::set" | "atomic::add" | "atomic::sub" => {
                 Self::sinkron_aritas(nama, args.len(), 2, 2, span)?;
-                let a = self.sinkron_pegangan(&args[0], false, nama, span)?;
-                let n = self.sinkron_bulat(&args[1], nama, span)?;
+                let mut v = self.sinkron_nilai(args, &[1])?.into_iter();
+                let a = self.sinkron_pegangan(v.next().unwrap(), false, nama, span)?;
+                let n = self.sinkron_bulat(v.next().unwrap(), nama, span)?;
                 if nama == "atomic::set" {
                     self.emit(format!("store i64 {}, ptr {}", n.text, a.text));
                     return Ok(Val::unit());
@@ -72,15 +111,16 @@ impl Codegen {
                 let kini = self.fresh("atom.");
                 self.emit(format!("{} = load i64, ptr {}", kini, a.text));
                 let op = if nama == "atomic::add" { BinaryOp::Add } else { BinaryOp::Sub };
-                let baru = self.hitung_terperiksa(&op, &i64v(kini), &n);
+                let baru = self.hitung_terperiksa_awal(&op, &i64v(kini), &n, &format!("{}: ", nama));
                 self.emit(format!("store i64 {}, ptr {}", baru.text, a.text));
                 Ok(baru)
             }
             "atomic::cas" => {
                 Self::sinkron_aritas(nama, args.len(), 3, 3, span)?;
-                let a = self.sinkron_pegangan(&args[0], false, nama, span)?;
-                let harap = self.sinkron_bulat(&args[1], nama, span)?;
-                let baru = self.sinkron_bulat(&args[2], nama, span)?;
+                let mut v = self.sinkron_nilai(args, &[1, 2])?.into_iter();
+                let a = self.sinkron_pegangan(v.next().unwrap(), false, nama, span)?;
+                let harap = self.sinkron_bulat(v.next().unwrap(), nama, span)?;
+                let baru = self.sinkron_bulat(v.next().unwrap(), nama, span)?;
                 let (kini, sama, isi, r) = (self.fresh("atom."), self.fresh("atom."), self.fresh("atom."), self.fresh("atom."));
                 self.emit(format!("{} = load i64, ptr {}", kini, a.text));
                 self.emit(format!("{} = icmp eq i64 {}, {}", sama, kini, harap.text));
@@ -91,18 +131,25 @@ impl Codegen {
             }
             "mutex::lock" | "mutex::unlock" => {
                 Self::sinkron_aritas(nama, args.len(), 1, 1, span)?;
-                let m = self.sinkron_pegangan(&args[0], true, nama, span)?;
+                let v = self.sinkron_nilai(args, &[])?.remove(0);
+                let m = self.sinkron_pegangan(v, true, nama, span)?;
                 self.kunci_atau_lepas(&m, nama, nama == "mutex::lock", false);
                 Ok(Val::unit())
             }
             _ => {
                 Self::sinkron_aritas(nama, args.len(), 2, 2, span)?;
-                let m = self.sinkron_pegangan(&args[0], true, nama, span)?;
-                let f = self.codegen_expr(&args[1], None)?;
+                let mut v = self.sinkron_nilai(args, &[])?.into_iter();
+                let m = self.sinkron_pegangan(v.next().unwrap(), true, nama, span)?;
+                let f = v.next().unwrap();
                 if !matches!(f.ty, JrgType::Fn(..)) {
-                    return Err(super::galat::tandai(span, format!(
+                    if f.ty == JrgType::Any {
+                        return Err(super::galat::tandai(span, format!(
+                            "`{}` atas nilai bertag belum didukung backend LLVM", nama)));
+                    }
+                    self.panik_statis(&format!(
                         "nilai bertipe `{}` bukan fungsi, jadi tidak bisa dipanggil — pastikan yang dipanggil \
-                         atau diserahkan memang fungsi atau closure", f.ty.nama_typeof())));
+                         atau diserahkan memang fungsi atau closure", f.ty.nama_typeof()));
+                    return Ok(Val::unit());
                 }
                 self.kunci_atau_lepas(&m, nama, true, true);
                 let r = self.panggil_val(&f, &[]).map_err(|e| super::galat::tandai(span, e))?;

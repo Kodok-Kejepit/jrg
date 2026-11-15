@@ -189,7 +189,9 @@ impl Codegen {
             self.define_local(n, slot, ty.clone());
         }
         // Nilainya dibuang: `defer` tidak punya tempat untuk hasil.
+        let situs_lama = std::mem::replace(&mut self.tanpa_situs, true);
         let hasil = self.codegen_expr(panggilan, None);
+        self.tanpa_situs = situs_lama;
         if hasil.is_ok() && !self.is_terminated() { self.terminate("ret void".to_string()); }
 
         let badan = self.take_function_body();

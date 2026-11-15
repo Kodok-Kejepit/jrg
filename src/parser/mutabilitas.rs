@@ -40,6 +40,8 @@ pub struct Pemeriksa {
     pub periksa_arity: bool,
     /// Fungsi tingkat atas berkas ini: (paling sedikit, paling banyak, nama parameter).
     pub fungsi_atas: HashMap<String, (usize, Option<usize>, Vec<String>)>,
+    /// `T::m` milik tipe berkas ini dan `alias::f` milik modul yang diimpor, dengan nama di kalimatnya.
+    pub jalur_atas: HashMap<String, (usize, Option<usize>, Vec<String>, String)>,
     /// Panggilan langsung ke fungsi itu dengan jumlah argumen di luar batas — cuma untuk
     /// `--periksa`: saat jalan kalimatnya sama, dan baru muncul di baris itu.
     pub aritas_pemakai: Vec<(String, Span)>,
@@ -49,21 +51,30 @@ pub struct Pemeriksa {
     pub varian_unit: std::collections::HashSet<String>,
     /// Nama varian yang dimiliki lebih dari satu enum berkas ini, dengan pemiliknya.
     pub varian_ganda: HashMap<String, Vec<String>>,
+    /// Tiap varian enum berkas ini dengan enum pertama yang memilikinya (aturan tingkat atas yang sama).
+    pub varian_berkas: HashMap<String, String>,
 }
 
 impl Pemeriksa {
     pub fn baru() -> Self {
         Pemeriksa {
             lingkup: vec![HashMap::new()], tak_dibaca: Vec::new(), pola_lokal: false, galat: Vec::new(), belum_ada: Vec::new(),
-            arity: Vec::new(), periksa_arity: false, fungsi_atas: HashMap::new(), aritas_pemakai: Vec::new(),
+            arity: Vec::new(), periksa_arity: false, fungsi_atas: HashMap::new(), jalur_atas: HashMap::new(), aritas_pemakai: Vec::new(),
             tipe_sendiri: std::collections::HashSet::new(),
             varian_unit: ["None".to_string()].into_iter().collect(),
-            varian_ganda: HashMap::new(),
+            varian_ganda: HashMap::new(), varian_berkas: HashMap::new(),
         }
     }
 
     /// Varian yang ditulis telanjang padahal dua enum memilikinya: dulu dua mesin memilih satu
     /// diam-diam (nilai `K` enum terakhir, pola `K` dan `V { .. }` enum pertama).
+    /// Lokal (`let`/`const`/`var`/`:=`) bernama varian telanjang: pola dan ekspresi membaca dua hal — ditolak.
+    fn tabrak_varian(&mut self, nama: &str, kw: &str, span: Span) {
+        if let Some(tipe) = self.varian_berkas.get(nama) {
+            self.galat.push((super::pesan_nama_varian(nama, tipe, kw), span));
+        }
+    }
+
     fn cek_ganda(&mut self, nama: &str, span: Span) {
         if let Some(pemilik) = self.varian_ganda.get(nama) {
             self.galat.push((format!(
@@ -164,7 +175,6 @@ impl Pemeriksa {
                 self.ikat_pola(inner, bawaan);
             }
             Pattern::Literal { .. } | Pattern::Range { .. } | Pattern::Wildcard { .. } => {}
-            _ => {}
         }
     }
 
@@ -295,6 +305,7 @@ impl Pemeriksa {
         match s {
             Stmt::Let(l) => {
                 self.ekspr(&l.init);
+                if let Pattern::Ident { name, span, .. } = &l.pattern { self.tabrak_varian(name, "let", *span) }
                 let k = if l.is_mut { Ikat::BisaUbah } else { Ikat::Mengikat("let") };
                 self.pola_lokal = true;
                 self.ikat_pola(&l.pattern, k);
@@ -302,15 +313,17 @@ impl Pemeriksa {
             }
             Stmt::Var(v) => {
                 if let Some(i) = &v.init { self.ekspr(i) }
+                self.tabrak_varian(&v.name, "var", v.span);
                 self.ikat_di(&v.name, Ikat::BisaUbah, Some(v.span));
             }
             Stmt::Const(c) => {
                 self.ekspr(&c.value);
+                self.tabrak_varian(&c.name, "const", c.span);
                 self.ikat_di(&c.name, Ikat::Mengikat("const"), Some(c.span));
             }
             Stmt::ShortDecl(sd) => {
                 for v in &sd.values { self.ekspr(v) }
-                for n in &sd.names { self.ikat_di(n, Ikat::BisaUbah, Some(sd.span)) }
+                for n in &sd.names { self.tabrak_varian(n, ":=", sd.span); self.ikat_di(n, Ikat::BisaUbah, Some(sd.span)) }
             }
             Stmt::Assign(a) => self.penugasan(a),
             Stmt::Expr(e) => self.ekspr(e),
@@ -495,13 +508,17 @@ impl Pemeriksa {
     /// `f(..)` atas fungsi tingkat atas yang tidak dibayangi nama lokal, parameter, atau `fn` bersarang.
     fn cek_aritas_pemakai(&mut self, e: &Expr) {
         let Expr::Call { func, args, span } = e else { return };
-        let Expr::Ident(nama, _) = func.as_ref() else { return };
-        if self.cari(nama).is_some() { return }
-        let Some((min, maks, params)) = self.fungsi_atas.get(nama) else { return };
+        let (nama, min, maks, params) = match func.as_ref() {
+            Expr::Ident(nama, _) if self.cari(nama).is_none() => match self.fungsi_atas.get(nama) {
+                Some((a, b, c)) => (nama, *a, *b, c), None => return },
+            Expr::PathExpr { segments, .. } => match self.jalur_atas.get(&segments.join("::")) {
+                Some((a, b, c, nama)) => (nama, *a, *b, c), None => return },
+            _ => return,
+        };
         let n = args.len();
         if let Some(m) = maks.filter(|m| n > *m) {
             self.aritas_pemakai.push((crate::interpreter::pesan_fungsi_kebanyakan(nama, m, n, params), *span));
-        } else if n < *min {
+        } else if n < min {
             self.aritas_pemakai.push((crate::interpreter::pesan_parameter_wajib(nama, &params[n], n + 1), *span));
         }
     }

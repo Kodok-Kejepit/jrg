@@ -394,6 +394,10 @@ impl Interpreter {
             Expr::Index { obj, idx, .. } => {
                 let ov = self.eval_expr(obj, env)?;
                 let iv = self.eval_expr(idx, env)?;
+                // `p["x"]` atas struct milik program dijaga privasinya seperti `p.x`.
+                if matches!(&ov, Value::Struct { name, .. } if name != crate::interpreter::builtin::dict::DICT_TYPE_NAME) {
+                    self.check_field_access(&ov, &format!("{}", iv), env)?;
+                }
                 self.eval_index(ov, iv)
             }
 
@@ -569,7 +573,7 @@ impl Interpreter {
                         }
                     }
                 }
-                Ok(Value::Str(out))
+                Ok(Value::Str(std::sync::Arc::new(out)))
             }
 
             // `match scrutinee { ... }` used as an expression (see
@@ -673,7 +677,11 @@ pub fn indeks_untuk(nama: &str, v: &Value, panjang: usize, sisip: bool) -> Resul
 
 /// Index karakter `str::char_at`: aturan `a[i]` atas karakter (bukan byte).
 pub fn indeks_karakter(v: &Value, s: &str) -> Result<usize, Signal> {
-    let Value::Int(i) = v else { return nilai_ke_usize(v) };
+    let Value::Int(i) = v else { return runtime_err!("{}", bukan_bulat("str::char_at", v)) };
+    // Indeks tak negatif yang ada: cukup berjalan sampai ke sana, tanpa menghitung seluruh teks.
+    if let Ok(j) = usize::try_from(*i) {
+        if s.chars().nth(j).is_some() { return Ok(j); }
+    }
     let n = s.chars().count();
     match crate::interpreter::value::normal_indeks(*i, n, false) {
         Some(j) => Ok(j),

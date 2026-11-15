@@ -102,6 +102,10 @@ mod imp {
         Ok(teks.len())
     }
     pub fn sejak_epoch() -> Option<Duration> { SystemTime::now().duration_since(UNIX_EPOCH).ok() }
+    pub fn monoton() -> Duration {
+        static AWAL: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+        AWAL.get_or_init(std::time::Instant::now).elapsed()
+    }
     pub fn acak(_: usize) -> Option<Vec<u8>> { None }
     pub fn tidur(d: Duration) { std::thread::sleep(d) }
     pub fn keluar(kode: i32) -> ! {
@@ -159,6 +163,8 @@ mod imp {
     pub fn sejak_epoch() -> Option<Duration> {
         Some(Duration::from_secs_f64(unsafe { js_sekarang_ms() } / 1000.0))
     }
+    // `performance.now()` tidak tersedia lewat impor ini; jam dinding cukup untuk selisih antarbingkai.
+    pub fn monoton() -> Duration { sejak_epoch().unwrap_or_default() }
     pub fn acak(n: usize) -> Option<Vec<u8>> {
         let mut buf = vec![0u8; n];
         // `crypto.getRandomValues` menolak lebih dari 65536 byte sekaligus.
@@ -177,6 +183,19 @@ mod imp {
 }
 
 /// Keluaran program, tanpa ganti baris — `print!`.
+/// Kalau `prog` skrip `#!` yang penafsirnya tidak ada di jalur itu: kalimat yang menyebutnya.
+/// `execve` menjawab "tidak ada" untuk kasus ini, padahal berkasnya ada (Termux tanpa `termux-exec`).
+pub fn skrip_tanpa_penafsir(prog: &std::path::Path) -> Option<String> {
+    let mut kepala = [0u8; 256];
+    let n = std::io::Read::read(&mut std::fs::File::open(prog).ok()?, &mut kepala).ok()?;
+    let baris = std::str::from_utf8(&kepala[..n]).ok()?.lines().next()?.strip_prefix("#!")?.trim();
+    let penafsir = baris.split_whitespace().next()?;
+    if std::path::Path::new(penafsir).exists() { return None; }
+    Some(format!("`{}` ada, tapi ia skrip `#!{}` dan `{}` tidak ada di mesin ini\n  bantuan: di Termux \
+                  skrip seperti ini cuma jalan lewat `termux-exec` (LD_PRELOAD); jalankan dari terminal Termux \
+                  biasa, atau pasang `termux-exec` lalu buka sesi baru", prog.display(), baris, penafsir))
+}
+
 /// Sebab sebuah galat I/O dalam kalimat JRG — tanpa ini kalimat OS (`No such file or
 /// directory (os error 2)`) bocor ke pesan. Tiap pintu yang melaporkan `io::Error` lewat sini.
 pub fn galat_io(e: &io::Error) -> String {
@@ -216,6 +235,11 @@ pub fn galat_io(e: &io::Error) -> String {
         _ => "",
     };
     if !teks.is_empty() { return teks.to_string(); }
+    // std menolak NUL di jalur dan argumen proses sebelum sampai ke OS; kalimatnya sama dengan lapis LLVM.
+    let asli = e.to_string();
+    if e.kind() == K::InvalidInput && (asli.contains("NUL") || asli.contains("nul byte")) {
+        return "teksnya memuat karakter NUL, yang tidak bisa diserahkan ke sistem operasi".to_string();
+    }
     match (e.raw_os_error(), e.get_ref()) {
         (Some(n), _) => format!("ditolak sistem operasi (galat nomor {})", n),
         (None, Some(d)) => d.to_string(),
@@ -241,6 +265,8 @@ pub fn baca_masukan(buf: &mut [u8]) -> io::Result<usize> { imp::baca_masukan(buf
 pub fn ada_masukan() -> bool { imp::ada_masukan() }
 /// Waktu sejak epoch Unix; `None` kalau jam mesinnya sebelum 1970.
 pub fn sejak_epoch() -> Option<Duration> { imp::sejak_epoch() }
+/// Jam yang cuma maju, untuk mengukur selisih; `std::time::Instant` panik di peramban.
+pub fn monoton() -> Duration { imp::monoton() }
 /// `n` byte dari sumber acak lingkungan; `None` kalau lingkungan ini tidak
 /// menyediakannya sendiri (di mesin biasa: pakai `/dev/urandom`).
 pub fn acak(n: usize) -> Option<Vec<u8>> { imp::acak(n) }
@@ -279,6 +305,34 @@ pub fn kode_keluar(n: i128) -> Result<i32, String> {
 pub fn pesan_kode_keluar_luar(nilai: &str) -> String {
     format!("`exit`: kode keluar harus 0 sampai 255, dapat {} — cuma 8 bit terbawahnya yang \
              sampai ke pemanggil, jadi 256 pun akan terbaca 0 (sukses)", nilai)
+}
+
+/// Kode keluar dari nilai balik `main` (bilangan bulat 0–255), dipasang mesin dan dipakai `jrgc`/`jrgm`.
+static KODE_MAIN: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// Nilai bulat yang dikembalikan `main`: aturan `exit` yang sama (0–255), kalimatnya menyebut `main`.
+pub fn pasang_kode_main(n: i128) -> Result<(), String> {
+    if !(0..=255).contains(&n) { return Err(pesan_main_kode_luar(&n.to_string())); }
+    KODE_MAIN.store(n as i32, std::sync::atomic::Ordering::Relaxed);
+    Ok(())
+}
+
+/// `nilai` ditulis apa adanya (LLVM mengisinya dengan penanda dan menyisipkan angkanya saat jalan).
+pub fn pesan_main_kode_luar(nilai: &str) -> String {
+    format!("`main` mengembalikan {} — kode keluar harus 0 sampai 255; cuma 8 bit terbawahnya yang \
+             sampai ke pemanggil, jadi 256 pun akan terbaca 0 (sukses)", nilai)
+}
+
+/// `main` yang mengembalikan selain bulat, unit, `Option` atau `Result` — satu kalimat untuk tiga mesin.
+pub fn pesan_main_bukan_kode(tipe: &str) -> String {
+    format!("`main` cuma boleh mengembalikan bilangan bulat 0 sampai 255 (kode keluar), unit, `Option` atau \
+             `Result` — bukan `{}`\n  bantuan: buang nilainya (`let _ = ...`), atau keluar dengan kode lewat `exit(n)`", tipe)
+}
+
+/// Program selesai tanpa galat: keluar dengan kode dari `main`, kalau ada.
+pub fn keluar_kode_main() {
+    let k = KODE_MAIN.load(std::sync::atomic::Ordering::Relaxed);
+    if k != 0 { keluar(k); }
 }
 
 /// Kalimat untuk `exit(x)` dengan `x` bukan bilangan bulat — dulu diam-diam keluar 0.
@@ -341,5 +395,21 @@ mod tes {
         assert!(super::tanpa_thread("goroutine", &e).unwrap().contains("butuh thread"));
         let e = std::io::Error::new(std::io::ErrorKind::OutOfMemory, "x");
         assert!(super::tanpa_thread("goroutine", &e).is_none());
+    }
+
+    #[test]
+    fn skrip_yang_penafsirnya_hilang_disebut() {
+        let d = std::env::temp_dir().join(format!("jrg-shebang-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let (hilang, ada, biner) = (d.join("hilang"), d.join("ada"), d.join("biner"));
+        std::fs::write(&hilang, "#!/tidak/ada/bash -e\necho x\n").unwrap();
+        std::fs::write(&ada, "#!/bin/sh\necho x\n").unwrap();
+        std::fs::write(&biner, [0x7f, b'E', b'L', b'F', 0, 1]).unwrap();
+        let k = super::skrip_tanpa_penafsir(&hilang).unwrap();
+        assert!(k.contains("`#!/tidak/ada/bash -e`") && k.contains("termux-exec"), "{k}");
+        assert!(super::skrip_tanpa_penafsir(&ada).is_none());
+        assert!(super::skrip_tanpa_penafsir(&biner).is_none());
+        assert!(super::skrip_tanpa_penafsir(&d.join("tidak-ada")).is_none());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }

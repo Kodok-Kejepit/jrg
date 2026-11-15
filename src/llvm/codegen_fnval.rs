@@ -13,12 +13,20 @@ impl Codegen {
             KerjaFn::Bungkus { pembungkus, asli, params, ret } =>
                 self.pancarkan_pembungkus(&pembungkus, &asli, &params, &ret),
             KerjaFn::TampilKotak => self.pancarkan_tampil_kotak(),
+            KerjaFn::SamaDaun => self.pancarkan_sama_daun(),
             KerjaFn::Adaptor { nama, dari, ke } => self.pancarkan_adaptor(&nama, &dari, &ke),
+            KerjaFn::Jembatan { nama, ty } => self.pancarkan_adaptor_jembatan(&nama, &ty),
+            KerjaFn::Uji { badan, tes, span } => self.pancarkan_badan_uji(&badan, &tes, span),
             KerjaFn::Banding { nama, ty } => self.pancarkan_banding(&nama, &ty),
+            KerjaFn::BantuTipe { jenis, ty } => self.pancarkan_bantu_tipe(jenis, &ty),
             KerjaFn::Tunda { nama, panggilan, beku, generik } =>
                 self.pancarkan_situs_tunda(&nama, &panggilan, &beku, generik),
-            KerjaFn::Closure { nama, params, ret, body, tangkap, rantai_hasil } =>
-                self.pancarkan_closure(&nama, &params, &ret, &body, &tangkap, &rantai_hasil),
+            KerjaFn::Closure { nama, params, ret, body, tangkap, rantai_hasil } => {
+                let lama = std::mem::replace(&mut self.badan_spawn, self.closure_spawn.contains(&nama));
+                let r = self.pancarkan_closure(&nama, &params, &ret, &body, &tangkap, &rantai_hasil);
+                self.badan_spawn = lama;
+                r
+            }
         }
     }
 
@@ -129,12 +137,80 @@ impl Codegen {
         r
     }
 
-    /// Varian ber-payload enum NON-generik sebagai nilai (`let f = E::A`): closure bernama
-    /// `<ctor E::A>` yang memanggil konstruktornya, seperti `nilai_metode`. Generik masih celah.
+    /// Builtin beraritas tetap sebagai nilai (`xs.map(math::sqrt)`, `let f = str::upper`): closure
+    /// `<native fn>` yang memanggilnya, parameternya disimpulkan dari pemakaian; dulu ditolak.
+    /// `paksa`: jumlah parameter yang diminta pemakainya (callback HOF), sah kalau masuk batas aritasnya.
+    pub(crate) fn closure_bawaan(&self, nama: &str, span: Span, paksa: Option<usize>) -> Option<Expr> {
+        use crate::parser::{BorrowKind, FnParam, Pattern};
+        use crate::interpreter::arity;
+        if !crate::vm::ada_builtin(nama) { return None; }
+        let (min, maks) = (arity::minimal(nama).unwrap_or(0), arity::maks(nama));
+        let n = match paksa {
+            Some(k) if k >= min && maks.map_or(true, |m| k <= m) => k,
+            _ => { let n = maks?; if n == 0 || min != n { return None; } n }
+        };
+        let (mut params, mut args) = (Vec::new(), Vec::new());
+        for i in 0..n {
+            let p = format!("p{}", i);
+            params.push(FnParam { is_variadic: false, is_mut: false, borrow: BorrowKind::None,
+                pattern: Pattern::Ident { name: p.clone(), is_mut: false, span }, ty: TypeExpr::Inferred,
+                default: None, lifetime: None, span });
+            args.push(Expr::Ident(p, span));
+        }
+        let func = if nama.contains("::") {
+            let mut segments = vec![String::new()];
+            segments.extend(nama.split("::").map(str::to_string));
+            Expr::PathExpr { segments, span }
+        } else { Expr::Ident(nama.to_string(), span) };
+        let badan = Expr::Call { func: Box::new(func), args, span };
+        // Tipe hasil dari tanda tangan `--doc` kalau skalar (`str::is_numeric(..) -> bool`): penduga tidak
+        // membaca badan `::ns::f(..)`, jadi `xs.filter(str::is_numeric)` dulu "tidak bisa disimpulkan".
+        let ret = arity::tanda_tangan(nama).and_then(|t| t.rsplit("->").next()).map(str::trim)
+            .filter(|t| matches!(*t, "bool" | "int" | "float" | "string"))
+            .map(|t| TypeExpr::Named(crate::parser::NamedType { package: None, modul: None, name: t.into(), args: vec![], span }));
+        let closure = Expr::Closure { params, is_move: false, ret, body: std::sync::Arc::new(badan), span };
+        Some(closure)
+    }
+
+    pub(crate) fn nilai_bawaan(&mut self, nama: &str, harap: Option<&JrgType>, span: Span) -> Option<Result<Val, String>> {
+        let closure = self.closure_bawaan(nama, span, None)?;
+        self.closure_bernama = Some("<native fn>".to_string());
+        let r = self.codegen_expr(&closure, harap);
+        self.closure_bernama = None;
+        Some(r)
+    }
+
+    /// Tipe parameter yang menerima apa pun (nilai bertag): satu konstruktor generik sebagai nilai
+    /// dipanggil dengan isi berbeda (`f(3)`, `f("x")`), seperti di dua mesin lain.
+    fn tipe_campur(span: Span) -> TypeExpr {
+        TypeExpr::Named(crate::parser::NamedType { package: None, modul: None, name: "$campur".into(), args: vec![], span })
+    }
+
+    /// Varian ber-payload sebagai nilai (`let f = E::A`, `Some`, `Ok`, `Err`): closure bernama
+    /// `<ctor E::A>` yang memanggil konstruktornya, seperti `nilai_metode`. Parameter yang menyebut
+    /// tipe generik tak beranotasi, jadi instansnya dipilih konstruktor dari argumen saat dipanggil.
     pub(crate) fn nilai_konstruktor(&mut self, jalur: &str, harap: Option<&JrgType>,
                                     span: Span) -> Option<Result<Val, String>> {
         use crate::parser::{BorrowKind, EnumVariantKind, FnParam, Pattern};
         let segs: Vec<&str> = jalur.split("::").collect();
+        let bawaan = match segs.as_slice() {
+            ["Some"] | ["Option", "Some"] => Some(("Option", "Some")),
+            ["Ok"] | ["Result", "Ok"] => Some(("Result", "Ok")),
+            ["Err"] | ["Result", "Err"] => Some(("Result", "Err")),
+            _ => None,
+        };
+        if let Some((t, v)) = bawaan {
+            let p = FnParam { is_variadic: false, is_mut: false, borrow: BorrowKind::None,
+                pattern: Pattern::Ident { name: "p0".into(), is_mut: false, span }, ty: Self::tipe_campur(span),
+                default: None, lifetime: None, span };
+            let badan = Expr::Call { func: Box::new(Expr::Ident(v.to_string(), span)),
+                args: vec![Expr::Ident("p0".into(), span)], span };
+            let closure = Expr::Closure { params: vec![p], is_move: false, ret: None, body: std::sync::Arc::new(badan), span };
+            self.closure_bernama = Some(format!("<ctor {}::{}>", t, v));
+            let r = self.codegen_expr(&closure, harap);
+            self.closure_bernama = None;
+            return Some(r);
+        }
         let (en, var) = match segs.as_slice() {
             [e, v] => (self.tables.enums.get(*e)?.clone(), v.to_string()),
             [v] => {
@@ -146,14 +222,15 @@ impl Codegen {
             }
             _ => return None,
         };
-        if !en.generics.params.is_empty() { return None; }
+        let generik: Vec<String> = en.generics.params.iter().map(|p| p.name.clone()).collect();
         let EnumVariantKind::Tuple(tipe) = &en.variants.iter().find(|x| x.name == var)?.kind else { return None };
         if tipe.is_empty() { return None; }
         let (mut params, mut args) = (Vec::new(), Vec::new());
         for (i, ty) in tipe.iter().enumerate() {
             let nama = format!("p{}", i);
             params.push(FnParam { is_variadic: false, is_mut: false, borrow: BorrowKind::None,
-                pattern: Pattern::Ident { name: nama.clone(), is_mut: false, span }, ty: ty.clone(),
+                pattern: Pattern::Ident { name: nama.clone(), is_mut: false, span },
+                ty: if Self::menyebut_param(ty, &generik) { Self::tipe_campur(span) } else { ty.clone() },
                 default: None, lifetime: None, span });
             args.push(Expr::Ident(nama, span));
         }
@@ -215,6 +292,7 @@ impl Codegen {
         let mut konst = String::new();
         let mut badan = String::from("define internal %JrgStr @jrg_jenis_fn(ptr %k) cold {\nentry:\n  br label %c0\n");
         let ktor: Vec<(&String, String)> = self.nama_fnval.iter().filter_map(|(p, n)| {
+            if n == "<native fn>" { return Some((p, "native_fn".to_string())); }
             let isi = n.strip_prefix("<ctor ")?.strip_suffix('>')?;
             Some((p, format!("enum_ctor:{}", isi)))
         }).collect();

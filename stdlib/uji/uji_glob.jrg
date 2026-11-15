@@ -1,0 +1,89 @@
+package main
+import "std/glob"
+
+fn c(p, s) { return glob::cocok(p, s).unwrap() }
+fn galat(p) { return glob::cocok(p, "x").unwrap_err() }
+
+fn test_dasar() {
+    assert(c("*.jrg", "a.jrg"))
+    assert(!c("*.jrg", "a.jrg.bak"))
+    assert(!c("*.jrg", "d/a.jrg"))
+    assert(c("?.jrg", "a.jrg"))
+    assert(!c("?.jrg", "ab.jrg"))
+    assert(c("a*b*c", "aXbYc"))
+    assert(c("a*b*c", "abc"))
+    assert(!c("a*b*c", "acb"))
+    assert(c("*", "x"))
+    assert(!c("*", ""))
+    assert(c("src/*.rs", "src/main.rs"))
+    assert(!c("src/*.rs", "src/a/main.rs"))
+    assert(c("tést/*", "tést/é"))
+}
+
+fn test_dua_bintang() {
+    assert(c("**/*.jrg", "a.jrg"))
+    assert(c("**/*.jrg", "a/b/c.jrg"))
+    assert(c("src/**", "src/a/b"))
+    assert(c("src/**/x", "src/x"))
+    assert(c("src/**/x", "src/a/b/x"))
+    assert(!c("src/**/x", "lain/x"))
+    assert(c("**", "a/b"))
+}
+
+fn test_kelas_dan_pelolos() {
+    assert(c("[abc].txt", "b.txt"))
+    assert(!c("[abc].txt", "d.txt"))
+    assert(c("[a-c][0-9]", "b7"))
+    assert(c("[!a-c]", "d"))
+    assert(!c("[^a-c]", "b"))
+    assert(c("[]]", "]"))
+    assert(c("[a-]", "-"))
+    assert(c("\\*", "*"))
+    assert(!c("\\*", "a"))
+    assert(c("\\[x]", "[x]"))
+}
+
+fn test_tersembunyi() {
+    assert(!c("*", ".bashrc"))
+    assert(!c("?bashrc", ".bashrc"))
+    assert(!c("[.]bashrc", ".bashrc"))
+    assert(c(".*", ".bashrc"))
+    assert(!c("**/*.jrg", ".git/a.jrg"))
+    assert(c(".git/*.jrg", ".git/a.jrg"))
+}
+
+fn test_pola_cacat_ditolak() {
+    assert_eq(galat("[abc"), "pola `[abc`: `[` tidak ditutup — tulis `\\[` untuk huruf `[`")
+    assert_eq(galat("[z-a]"), "pola `[z-a]`: rentang `z-a` terbalik")
+    assert_eq(galat("a**b"), "pola `a**b`: `**` harus berdiri sendiri di antara `/`")
+    assert_eq(galat("a\\"), "pola `a\\`: `\\` di ujung tanpa karakter yang diloloskan")
+    assert_eq(galat("/etc/*"), "pola `/etc/*`: harus relatif, tidak diawali `/`")
+    assert_eq(galat("../*"), "pola `../*`: `..` tidak boleh — pola tidak keluar dari foldernya")
+    assert_eq(galat("a//b"), "pola `a//b`: ada bagian kosong (`//` atau `/` di ujung)")
+    assert_eq(galat(""), "pola kosong")
+    assert_eq(galat("a[/]b"), "pola `a[/]b`: `/` tidak bisa ada di dalam `[...]`")
+    assert(c("\\[a/b]", "[a/b]"))
+}
+
+fn test_tidak_mundur_eksponensial() {
+    let p = str::repeat("*a", 30) + "b"
+    let s = str::repeat("a", 200)
+    let t0 = time::now_ms()
+    assert(!c(p, s))
+    assert(time::now_ms() - t0 < 20000)
+}
+
+fn test_saring_dan_cari() {
+    assert_eq(glob::saring("*.jrg", ["a.jrg", "b.rs", "c.jrg"]).unwrap(), ["a.jrg", "c.jrg"])
+    let d = fs::temp_dir() + "/jrg-uji-glob-" + str(time::now_ms())
+    fs::mkdir(d + "/a/.h")
+    fs::mkdir(d + "/b")
+    fs::write(d + "/a/x.jrg", "")
+    fs::write(d + "/a/.h/y.jrg", "")
+    fs::write(d + "/b/z.txt", "")
+    fs::write(d + "/top.jrg", "")
+    assert_eq(glob::cari(d, "**/*.jrg").unwrap(), [d + "/a/x.jrg", d + "/top.jrg"])
+    assert_eq(glob::cari(d + "/", "*/*").unwrap(), [d + "/a/x.jrg", d + "/b/z.txt"])
+    assert(glob::cari(d + "/tidak-ada", "*").is_err())
+    fs::delete(d)
+}

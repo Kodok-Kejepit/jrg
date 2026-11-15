@@ -11,7 +11,6 @@ use super::simbol;
 struct Document {
     uri:     String,
     content: String,
-    version: i64,
 }
 
 impl Document {
@@ -113,8 +112,7 @@ impl LspState {
             if let Some(td) = params.get("textDocument") {
                 let uri     = td.get("uri")  .and_then(|v| v.as_str()).unwrap_or("").to_string();
                 let text    = td.get("text") .and_then(|v| v.as_str()).unwrap_or("").to_string();
-                let version = td.get("version").and_then(|v| v.as_i64()).unwrap_or(0);
-                let doc = Document { uri: uri.clone(), content: text, version };
+                let doc = Document { uri: uri.clone(), content: text };
                 let diags = self.lint(&doc);
                 self.documents.insert(uri.clone(), doc);
                 return vec![publish_diagnostics(&uri, &diags)];
@@ -130,10 +128,6 @@ impl LspState {
             let uri = params.get("textDocument")
                 .and_then(|v| v.get("uri"))
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let version = params.get("textDocument")
-                .and_then(|v| v.get("version"))
-                .and_then(|v| v.as_i64()).unwrap_or(0);
-
             // Full sync: take last change content
             let text = params.get("contentChanges")
                 .and_then(|v| v.as_arr())
@@ -141,7 +135,7 @@ impl LspState {
                 .and_then(|c| c.get("text"))
                 .and_then(|v| v.as_str()).unwrap_or("").to_string();
 
-            let doc = Document { uri: uri.clone(), content: text, version };
+            let doc = Document { uri: uri.clone(), content: text };
             let diags = self.lint(&doc);
             self.documents.insert(uri.clone(), doc);
             return vec![publish_diagnostics(&uri, &diags)];
@@ -174,7 +168,7 @@ impl LspState {
             }
             if let Some(doc) = self.documents.get(&uri) {
                 let content = doc.content.clone();
-                let doc2 = Document { uri: uri.clone(), content, version: 0 };
+                let doc2 = Document { uri: uri.clone(), content };
                 let diags = self.lint(&doc2);
                 return vec![publish_diagnostics(&uri, &diags)];
             }

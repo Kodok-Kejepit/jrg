@@ -2,44 +2,25 @@
 // Entry point: jrgc <source.jrg> [flags]
 
 extern crate alloc;
-mod antrean;
-mod sinkron;
-mod ruang_tipe;
-mod hash_cepat;
-mod json_inti;
-mod lexer;
-mod diag;
-mod host;
-mod pipa;
-mod parser;
-mod interpreter;
-#[allow(dead_code, unused_imports)]
-mod ffi;
-mod canvas;
-mod profiler;
-mod module;
-mod editor_src;
-mod vm;
-mod hotreload;
-mod uji;
-// `bantu` dipakai `src/lsp/` untuk MENURUNKAN daftar pelengkapan dan
-// hover dari registry yang sedang berjalan — jadi ia harus ada di pohon
-// modul biner ini juga, bukan cuma di lib.
-mod argumen;
-mod lebar;
-mod term;
-mod fmt;
-mod putar;
-#[path = "jrgm/main.rs"]
-mod jrgm;
-mod baris;
-mod bantu;
-mod lsp;
-mod stdlib;
-mod wokwok;
-mod suara;
-mod llvm;
-mod dok;
+// Satu salinan tiap modul: biner ini memakai crate lib, jadi `static` (terminal, antrean
+// masukan, hitungan ulangan diag) tidak terbelah dua dan kompilatornya dibangun sekali.
+use jrgc::lexer;
+use jrgc::diag;
+use jrgc::host;
+use jrgc::pipa;
+use jrgc::parser;
+use jrgc::interpreter;
+use jrgc::profiler;
+use jrgc::module;
+use jrgc::editor_src;
+use jrgc::vm;
+use jrgc::hotreload;
+use jrgc::argumen;
+use jrgc::term;
+use jrgc::fmt;
+use jrgc::jrgm;
+use jrgc::lsp;
+use jrgc::llvm;
 
 use std::path::PathBuf;
 use std::process;
@@ -97,6 +78,10 @@ struct Cli {
     /// Jalankan lewat bytecode VM
     #[arg(long = "vm")]
     use_vm: bool,
+
+    /// Mesin keempat (JRGJIT); fase J1: VM yang merekam profil (`JRG_JIT_LOG=ringkas`)
+    #[arg(long = "jit", conflicts_with = "emit_llvm")]
+    jit: bool,
 
     /// Kompilasi jadi biner native lewat clang
     #[arg(long = "emit-llvm")]
@@ -359,15 +344,22 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
     if cli.periksa {
         let mut jalur = vec![dir.clone()];
         jalur.extend(cli.include_dirs.iter().cloned());
-        let mut galat = vm::periksa_dengan_paths(&ast, jalur).err().unwrap_or_default();
-        galat.extend(parser::aritas_fungsi_pemakai(&ast).into_iter()
-            .map(|(pesan, span)| vm::VmError::at(pesan, Some(span))));
+        let galat = vm::periksa_dengan_paths(&ast, jalur).err().unwrap_or_default();
         if galat.is_empty() { return Ok(()); }
         for e in &galat { diag::laporkan_vm(&mut source_map, e); }
         return Err(Vec::new());
     }
 
     if cli.emit_llvm || cli.apk.is_some() {
+        // `--uji`: `main` buatan yang menjalankan tiap tes (`llvm::uji`); tanpa tes, kalimat yang sama dengan acuan.
+        let uji_ast;
+        let ast = if cli.uji {
+            uji_ast = llvm::uji::siapkan(&ast, cli.uji_filter.as_deref()).map_err(|m| {
+                diag::laporkan_runtime(&mut source_map, &interpreter::RuntimeError::new(m));
+                Vec::new()
+            })?;
+            &uji_ast
+        } else { &ast };
         let effective_fast_math = cli.fast_math || cli.full_power;
         let effective_full_buffered_stdout = cli.full_buffered_stdout || cli.full_power;
         let effective_opt_level = if cli.full_power { 3 } else { cli.opt_level };
@@ -392,6 +384,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
             diag::laporkan_llvm(&mut source_map, &galat);
             Vec::new()
         })?;
+        let ir = llvm::isi_situs(ir, &mut source_map);
 
         if let Some(apk) = &cli.apk {
             let opsi = llvm::apk::OpsiApk {
@@ -467,9 +460,11 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
         } else {
             std::env::current_dir().map(|d| d.join(&binary)).unwrap_or(binary.clone())
         };
-        let status = process::Command::new(&run_path).status();
+        let mut perintah = process::Command::new(&run_path);
+        let batas = batas_memori_anak(&mut perintah).map_err(|e| vec![e])?;
+        let status = perintah.status();
         match status {
-            Ok(s) => keluar(s.code().unwrap_or(1)),
+            Ok(s) => keluar(kode_anak_native(s, batas)),
             Err(e) => return Err(vec![format!("jrgc: gagal menjalankan {}: {}", run_path.display(), crate::host::galat_io(&e))]),
         }
     }
@@ -506,11 +501,13 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
                     keluar(1)
                 });
         }
-        return vm::run_file_with_paths(&ast, jalur, cli.emit_bc, cli.profile)
+        let hasil = vm::run_file_with_paths(&ast, jalur, cli.emit_bc, cli.profile)
             .map_err(|e| {
                 diag::laporkan_vm(&mut source_map, &e);
                 Vec::new()
             });
+        jrgc::jit::laporan::cetak_bila_diminta();
+        return hasil;
     }
 
     // 4b. Tree-Walking Interpreter (default)
@@ -553,9 +550,64 @@ fn sebagai_jrgm(a: Vec<String>) -> Option<Vec<String>> {
     None
 }
 
+/// `JRGC_BATAS_MEMORI=<MiB>`: ruang alamat paling besar untuk biner yang dijalankan `--emit-llvm` (`RLIMIT_AS`,
+/// cuma anaknya). Nilai yang bukan bilangan MiB positif DITOLAK, tidak diabaikan.
+fn batas_memori_anak(perintah: &mut process::Command) -> Result<Option<u64>, String> {
+    let teks = std::env::var("JRGC_BATAS_MEMORI").unwrap_or_default();
+    if teks.trim().is_empty() { return Ok(None); }
+    let mib = teks.trim().parse::<u64>().ok().filter(|n| (1..=1 << 30).contains(n)).ok_or_else(|| format!(
+        "jrgc: JRGC_BATAS_MEMORI harus bilangan MiB antara 1 dan {}, dapat {}", 1u64 << 30, jrgc::kutip_inti::kutip(&teks)))?;
+    #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos"))]
+    {
+        use std::os::unix::process::CommandExt;
+        #[cfg(target_os = "macos")] type Rlim = u64;
+        #[cfg(not(target_os = "macos"))] type Rlim = std::ffi::c_ulong;
+        #[repr(C)] struct Rlimit { cur: Rlim, max: Rlim }
+        extern "C" { fn setrlimit(sumber: i32, batas: *const Rlimit) -> i32; }
+        const RLIMIT_AS: i32 = if cfg!(target_os = "macos") { 5 } else { 9 };
+        let bait = (mib as u128 * 1024 * 1024).min(Rlim::MAX as u128) as Rlim;
+        // Cuma `setrlimit` di antara fork dan exec: aman dipanggil di sana (async-signal-safe).
+        unsafe {
+            perintah.pre_exec(move || {
+                let b = Rlimit { cur: bait, max: bait };
+                if setrlimit(RLIMIT_AS, &b) != 0 { return Err(std::io::Error::last_os_error()); }
+                Ok(())
+            });
+        }
+        Ok(Some(mib))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android", target_os = "macos")))]
+    {
+        let _ = perintah;
+        Err(format!("jrgc: JRGC_BATAS_MEMORI ({} MiB) belum didukung di sistem ini", mib))
+    }
+}
+
+/// Kode keluar biner `--emit-llvm`. Mati oleh sinyal dulu jadi 1 tanpa pesan; sekarang 128+N seperti shell,
+/// dan sinyal yang berarti cacat (bukan Ctrl-C, `kill`, pipa putus) disebut.
+fn kode_anak_native(s: process::ExitStatus, batas_mib: Option<u64>) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = s.signal() {
+            let nama = match sig { 4 => "SIGILL", 6 => "SIGABRT", 7 => "SIGBUS", 8 => "SIGFPE", 11 => "SIGSEGV", _ => "" };
+            if !nama.is_empty() {
+                let sebab = match batas_mib {
+                    Some(m) => format!("kemungkinan batas memori JRGC_BATAS_MEMORI ({} MiB) terlewati; selain itu, ", m),
+                    None => String::new(),
+                };
+                eprintln!("error: program native berhenti oleh sinyal {} ({}) tanpa sempat melapor\n  \
+                    = catatan: {}kalau tidak lewat kode C (`extern`), ini cacat di backend LLVM; coba jalankan dengan --vm",
+                    sig, nama, sebab);
+            }
+            return 128 + sig;
+        }
+    }
+    s.code().unwrap_or(1)
+}
+
 fn keluar(kode: i32) -> ! {
     crate::term::pulihkan();
-    jrgc::term::pulihkan();
     process::exit(kode)
 }
 
@@ -583,6 +635,10 @@ fn utama() {
         keluar(0);
     }
     let mut cli = Cli::parse();
+    if cli.jit {
+        cli.use_vm = true;
+        jrgc::jit::aktifkan();
+    }
     if let Some(p) = &cli.profile_json {
         cli.profile = true;
         profiler::tulis_json_ke(p.clone());
@@ -722,4 +778,5 @@ fn utama() {
     }
 
     if had_error { keluar(1); }
+    jrgc::host::keluar_kode_main();
 }

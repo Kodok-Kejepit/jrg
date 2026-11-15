@@ -8,7 +8,7 @@ use super::NativeFnKind;
 
 fn teks(args: &[Value], i: usize, fname: &str, peran: &str) -> Result<String, Signal> {
     match args.get(i) {
-        Some(Value::Str(s)) => Ok(s.clone()),
+        Some(Value::Str(s)) => Ok(String::clone(&s.clone())),
         lain => Err(Signal::RuntimeError(RuntimeError::new(pesan_arg_harus_teks(
             fname, &format!("argumen ke-{} ({})", i + 1, peran),
             &lain.map(|v| v.type_name()).unwrap_or_else(|| "tidak ada".into()))))),

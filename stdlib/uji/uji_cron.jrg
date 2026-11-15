@@ -1,0 +1,48 @@
+package main
+import "std/cron"
+import "std/tanggal"
+
+fn w(s) { return tanggal::parse_iso(s).unwrap() }
+fn lanjut(e, s) { return tanggal::format_iso(cron::berikutnya(cron::urai(e).unwrap(), w(s)).unwrap()) }
+
+fn test_berikutnya() {
+    assert_eq(lanjut("*/15 * * * *", "2026-11-02T10:07:30Z"), "2026-11-02T10:15:00Z")
+    assert_eq(lanjut("0 9 * * mon-fri", "2026-11-06T10:00:00Z"), "2026-11-09T09:00:00Z")
+    assert_eq(lanjut("30 2 29 feb *", "2026-03-01T00:00:00+07:00"), "2028-02-29T02:30:00+07:00")
+    assert_eq(lanjut("0 0 1 * *", "2026-12-31T23:59:00Z"), "2027-01-01T00:00:00Z")
+    assert_eq(lanjut("0 12 * * 0", "2026-11-02T00:00:00Z"), "2026-11-08T12:00:00Z")
+    assert_eq(lanjut("0 12 * * 7", "2026-11-02T00:00:00Z"), "2026-11-08T12:00:00Z")
+    assert_eq(lanjut("0 0 13 * 5", "2026-11-02T00:00:00Z"), "2026-11-06T00:00:00Z")
+}
+
+fn test_sama_dengan_hitung_per_menit() {
+    let daftar = ["*/7 3-5 * * *", "0,30 * 1,15 * *", "5 4 * * sun", "0 0 13 * 5", "*/20 */6 */10 jan-mar *", "59 23 31 * *"]
+    for _, e in daftar {
+        let j = cron::urai(e).unwrap()
+        var t = w("2026-01-27T22:13:00Z")
+        for _, _x in range(4) {
+            let n = cron::berikutnya(j, t).unwrap()
+            var p = tanggal::tambah_detik(t, 60).unwrap()
+            var langkah = 0
+            while !cron::cocok(j, p) && langkah < 200000 {
+                p = tanggal::tambah_detik(p, 60).unwrap()
+                langkah += 1
+            }
+            assert_eq(tanggal::format_iso(n), tanggal::format_iso(p))
+            t = n
+        }
+    }
+}
+
+fn test_yang_salah_ditolak() {
+    assert_eq(cron::urai("*/0 * * * *").unwrap_err(), "kolom menit: langkah `/0` tidak pernah maju")
+    assert_eq(cron::urai("5-1 * * * *").unwrap_err(), "kolom menit: rentang `5-1` terbalik")
+    assert_eq(cron::urai("60 * * * *").unwrap_err(), "kolom menit: `60` di luar 0 sampai 59")
+    assert_eq(cron::urai("* * 0 * *").unwrap_err(), "kolom hari-bulan: `0` di luar 1 sampai 31")
+    assert_eq(cron::urai("* * * *").unwrap_err(), "cron butuh tepat 5 kolom (menit jam hari-bulan bulan hari-pekan), dapat 4")
+    assert_eq(cron::urai("* * * foo *").unwrap_err(), "kolom bulan: `foo` bukan angka")
+    assert_eq(cron::urai("1,,2 * * * *").unwrap_err(), "kolom menit: angka kosong")
+    assert(cron::urai("@daily").is_err())
+    let j = cron::urai("30 2 31 2 *").unwrap()
+    assert_eq(cron::berikutnya(j, w("2026-01-01T00:00:00Z")).unwrap_err(), "jadwal `30 2 31 2 *` tidak pernah cocok dalam lima tahun (mis. 31 Februari)")
+}

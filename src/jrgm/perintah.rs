@@ -1,7 +1,7 @@
 // src/jrgm/perintah.rs — tiap subperintah `jrgm`
 
-use jrgc::lexer::{lex, SourceFile};
-use jrgc::parser::parse;
+use crate::lexer::{lex, SourceFile};
+use crate::parser::parse;
 use super::rangka::cmd_new;
 use super::dependensi::kumpul_jrg;
 use std::path::{Path, PathBuf};
@@ -16,7 +16,7 @@ use super::rangka::rangka_web;
 pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip_python_deps: bool) -> Result<(), String> {
     if let Some((m, r, akar)) = super::bahasa::proyek_kini()? { return super::bahasa::bangun(&m, r, &akar); }
     let cwd = std::env::current_dir()
-        .map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let manifest = Manifest::load(&cwd)?;
     if verbose {
         eprintln!("[jrgm] build: {} v{} (profile: {}, target: {})",
@@ -59,21 +59,21 @@ pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip
 
     // ── `import` yang tidak menunjuk apa pun ─────────────────────────────
     if !ada_gagal {
-        let resolver = jrgc::module::ModuleResolver::new(jalur.clone());
+        let resolver = crate::module::ModuleResolver::new(jalur.clone());
         for f in &berkas {
             let Ok(src) = std::fs::read_to_string(f) else { continue };
             let sf = SourceFile { id: 0, name: f.display().to_string(), src };
             let Ok(tokens) = lex(&sf) else { continue };
             let (ast, _) = parse(tokens, true);
             for imp in &ast.imports {
-                if jrgc::module::ModuleResolver::is_stdlib(&imp.path) { continue; }
+                if crate::module::ModuleResolver::is_stdlib(&imp.path) { continue; }
                 if resolver.resolve(&imp.path).is_some() { continue; }
                 gagal.push(format!(
                     "{}: `import \"{}\"` tidak menunjuk modul mana pun\n  \
                      bantuan: dicari sebagai `{}.jrg` (atau `{}/mod.jrg`) di: {}",
                     f.display(), imp.path,
-                    jrgc::module::ModuleResolver::module_name(&imp.path),
-                    jrgc::module::ModuleResolver::module_name(&imp.path),
+                    crate::module::ModuleResolver::module_name(&imp.path),
+                    crate::module::ModuleResolver::module_name(&imp.path),
                     jalur.iter().map(|d| d.display().to_string())
                         .collect::<Vec<_>>().join(", ")));
             }
@@ -101,7 +101,7 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
         if kode != 0 { process::exit(kode); }
         return Ok(());
     }
-    let cwd = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+    let cwd = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let manifest = Manifest::load(&cwd)?;
 
     if verbose {
@@ -118,16 +118,16 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
         let watch_dir = manifest.entry.parent()
             .map(|p| p.to_path_buf())
             .unwrap_or(cwd.clone());
-        let mut config = jrgc::hotreload::ReloadConfig::new(manifest.entry);
+        let mut config = crate::hotreload::ReloadConfig::new(manifest.entry);
         config.use_vm       = use_vm;
         config.profiling    = prof;
         config.emit_bc      = emit_bc;
         config.clear_screen = clear;
         config.watch_dir    = watch_dir.clone();
         config.search_paths = vec![watch_dir, cwd.clone()];
-        tambah_path_dependensi(&cwd, &mut config.search_paths);
+        tambah_path_dependensi(&cwd, &mut config.search_paths)?;
         config.search_paths.dedup();
-        jrgc::hotreload::watch(config);
+        crate::hotreload::watch(config);
         return Ok(());
     }
 
@@ -151,16 +151,16 @@ pub(crate) fn cmd_exec(file: &Path, args: &[String], verbose: bool, prof: bool,
             .map(|p| p.to_path_buf())
             .unwrap_or_else(|| std::path::PathBuf::from("."));
         let cwd = std::env::current_dir().unwrap_or_else(|_| watch_dir.clone());
-        let mut config = jrgc::hotreload::ReloadConfig::new(file.to_path_buf());
+        let mut config = crate::hotreload::ReloadConfig::new(file.to_path_buf());
         config.use_vm       = use_vm;
         config.profiling    = prof;
         config.emit_bc      = emit_bc;
         config.clear_screen = clear;
         config.watch_dir    = watch_dir.clone();
         config.search_paths = vec![watch_dir, cwd.clone()];
-        tambah_path_dependensi(&cwd, &mut config.search_paths);
+        tambah_path_dependensi(&cwd, &mut config.search_paths)?;
         config.search_paths.dedup();
-        jrgc::hotreload::watch(config);
+        crate::hotreload::watch(config);
         return Ok(());
     }
 
@@ -173,7 +173,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
         if use_vm { return Err(format!("`--vm` cuma untuk proyek JRG; ini proyek {}", r.nama)); }
         return super::bahasa::uji(&m, r, &akar, filter);
     }
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !akar.join("jrgm.toml").is_file() {
         return Err("jrgm test: tidak ada `jrgm.toml` di sini — jalankan dari akar proyek".into());
     }
@@ -188,7 +188,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
     }
 
     let mut berkas: Vec<std::path::PathBuf> = std::fs::read_dir(&dir_uji)
-        .map_err(|e| format!("jrgm test: tidak bisa baca `tests/`: {}", jrgc::host::galat_io(&e)))?
+        .map_err(|e| format!("jrgm test: tidak bisa baca `tests/`: {}", crate::host::galat_io(&e)))?
         .flatten().map(|e| e.path())
         .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("jrg"))
         .collect();
@@ -200,16 +200,16 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
     let mut total = 0usize;
     for f in &berkas {
         let src = std::fs::read_to_string(f)
-            .map_err(|e| format!("jrgm test: tidak bisa baca `{}`: {}", f.display(), jrgc::host::galat_io(&e)))?;
+            .map_err(|e| format!("jrgm test: tidak bisa baca `{}`: {}", f.display(), crate::host::galat_io(&e)))?;
         let sf = SourceFile { id: 0, name: f.display().to_string(), src };
-        let peta = jrgc::diag::SourceMap::with_file(sf.clone());
-        let tokens = jrgc::pipa::lex_dilaporkan(&sf, &peta).ok_or_else(String::new)?;
+        let peta = crate::diag::SourceMap::with_file(sf.clone());
+        let tokens = crate::pipa::lex_dilaporkan(&sf, &peta).ok_or_else(String::new)?;
         let (ast, galat) = parse(tokens, true);
         if !galat.is_empty() {
-            jrgc::pipa::laporkan_galat_parse(&galat, false, &peta);
+            crate::pipa::laporkan_galat_parse(&galat, false, &peta);
             return Err(String::new());
         }
-        let mut uji = jrgc::uji::daftar_uji(&ast);
+        let mut uji = crate::uji::daftar_uji(&ast);
         if let Some(f) = filter { uji.retain(|n| n.contains(f)); }
         if uji.is_empty() { continue; }
         total += uji.len();
@@ -228,10 +228,10 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
     // `-I`: `src/` proyeknya sendiri plus tiap dependensi, jadi berkas uji
     // bisa `import "bantu"` sama persis seperti berkas di dalam `src/`.
     let mut inc = vec![akar.join("src")];
-    super::dependensi::tambah_path_dependensi_dev(&akar, &mut inc);
+    super::dependensi::tambah_path_dependensi_dev(&akar, &mut inc)?;
     inc.dedup();
 
-    let jrgc = jrgc::hotreload::biner_jrgc();
+    let jrgc = crate::hotreload::biner_jrgc();
     eprintln!("[jrgm] {} test di {} berkas{}", total, rencana.len(),
         if use_vm { " (VM)" } else { "" });
 
@@ -270,7 +270,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
                     }
                     std::thread::sleep(std::time::Duration::from_millis(20));
                 }
-                Err(e) => return Err(format!("jrgm test: {}", jrgc::host::galat_io(&e))),
+                Err(e) => return Err(format!("jrgm test: {}", crate::host::galat_io(&e))),
             }
         };
 
@@ -306,15 +306,15 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
 pub(crate) fn cmd_check() -> Result<(), String> {
     if let Some((m, r, akar)) = super::bahasa::proyek_kini()? { return super::bahasa::bangun(&m, r, &akar); }
     let cwd = std::env::current_dir()
-        .map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let manifest = Manifest::load(&cwd)?;
     check_jrg_file(&manifest.entry, true)
 }
 
 /// Menolak sebuah subperintah yang BELUM ADA isinya.
 pub(crate) fn belum_ada(perintah: &str, alasan: &str, bantuan: &str) -> Result<(), String> {
-    let map = jrgc::diag::SourceMap::new();
-    jrgc::diag::laporkan_pesan(
+    let map = crate::diag::SourceMap::new();
+    crate::diag::laporkan_pesan(
         &map,
         &format!("`jrgm {}` belum ada isinya — {}\nbantuan: {}", perintah, alasan, bantuan),
         false,
@@ -342,8 +342,17 @@ pub(crate) fn cmd_add(name: &str, version: Option<&str>, git: Option<&str>, rev:
     if version.is_some() && rev.is_some() {
         return Err("jrgm add: pilih salah satu, `--version` (tag `v<versi>`) atau `--rev`".into());
     }
+    super::manifes::periksa_nama_dependensi(name).map_err(|e| format!("jrgm add: {}", e))?;
+    if let Some(url) = git {
+        let r = match (rev, version) {
+            (Some(r), _) => r.to_string(),
+            (None, Some(v)) => super::git::rev_versi(v).map_err(|e| format!("jrgm add: {}", e))?,
+            (None, None) => String::new(),
+        };
+        super::manifes::periksa_git(name, url, &r).map_err(|e| format!("jrgm add: {}", e))?;
+    }
     let bagian = if dev { "[dev-dependencies]" } else { "[dependencies]" };
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     let manifes = akar.join("jrgm.toml");
     if !manifes.is_file() {
         return Err("jrgm add: tidak ada `jrgm.toml` di sini — jalankan dari akar proyek".into());
@@ -361,22 +370,21 @@ pub(crate) fn cmd_add(name: &str, version: Option<&str>, git: Option<&str>, rev:
     }
 
     let isi = std::fs::read_to_string(&manifes)
-        .map_err(|e| format!("jrgm add: tidak bisa baca `jrgm.toml`: {}", jrgc::host::galat_io(&e)))?;
-    if isi.lines().any(|l| {
-        let l = l.trim();
-        l.starts_with(name) && l[name.len()..].trim_start().starts_with('=')
-    }) {
+        .map_err(|e| format!("jrgm add: tidak bisa baca `jrgm.toml`: {}", crate::host::galat_io(&e)))?;
+    let lama = super::manifes::Manifest::parse_from_str(&isi, &akar).map_err(|e| format!("jrgm add: {}", e))?;
+    if lama.dependencies.iter().chain(&lama.dev_dependencies).any(|d| d.nama == name) {
         return Err(format!(
             "jrgm add: `{}` sudah ada di `jrgm.toml`\n  bantuan: ubah barisnya, atau \
              `jrgm remove {}` dulu", name, name));
     }
 
+    let t = crate::stdlib::toml::tulis_teks;
     let baris = match (path, git) {
-        (Some(p), _) => format!("{} = {{ path = \"{}\" }}\n", name, p.display()),
+        (Some(p), _) => format!("{} = {{ path = {} }}\n", name, t(&p.to_string_lossy())),
         (None, Some(url)) => match (version, rev) {
-            (Some(v), _) => format!("{} = {{ git = \"{}\", version = \"{}\" }}\n", name, url, v),
-            (_, Some(r)) => format!("{} = {{ git = \"{}\", rev = \"{}\" }}\n", name, url, r),
-            _ => format!("{} = {{ git = \"{}\" }}\n", name, url),
+            (Some(v), _) => format!("{} = {{ git = {}, version = {} }}\n", name, t(url), t(v)),
+            (_, Some(r)) => format!("{} = {{ git = {}, rev = {} }}\n", name, t(url), t(r)),
+            _ => format!("{} = {{ git = {} }}\n", name, t(url)),
         },
         _ => unreachable!(),
     };
@@ -387,7 +395,7 @@ pub(crate) fn cmd_add(name: &str, version: Option<&str>, git: Option<&str>, rev:
         format!("{}\n{}\n{}", isi.trim_end(), bagian, baris)
     };
     std::fs::write(&manifes, baru)
-        .map_err(|e| format!("jrgm add: tidak bisa tulis `jrgm.toml`: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("jrgm add: tidak bisa tulis `jrgm.toml`: {}", crate::host::galat_io(&e)))?;
 
     // Graf diperiksa SESUDAH menulis, dan kegagalannya dilaporkan — sebuah
     // `add` yang membuat siklus harus ketahuan di sini, bukan nanti.
@@ -405,22 +413,31 @@ pub(crate) fn cmd_add(name: &str, version: Option<&str>, git: Option<&str>, rev:
 
 /// Buang sebuah dependensi dari `jrgm.toml`.
 pub(crate) fn cmd_remove(name: &str) -> Result<(), String> {
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     let manifes = akar.join("jrgm.toml");
     let isi = std::fs::read_to_string(&manifes)
         .map_err(|_| "jrgm remove: tidak ada `jrgm.toml` di sini".to_string())?;
-    let mut ketemu = false;
-    let baru: String = isi.lines().filter(|l| {
-        let t = l.trim();
-        let cocok = t.starts_with(name) && t[name.len()..].trim_start().starts_with('=');
-        if cocok { ketemu = true; }
-        !cocok
-    }).map(|l| format!("{}\n", l)).collect();
-    if !ketemu {
+    // Cuma baris di `[dependencies]`/`[dev-dependencies]`: dulu `jrgm remove name` membuang `name` milik `[package]`.
+    let ada = |m: &super::manifes::Manifest| m.dependencies.iter().chain(&m.dev_dependencies).any(|d| d.nama == name);
+    let lama = super::manifes::Manifest::parse_from_str(&isi, &akar).map_err(|e| format!("jrgm remove: {}", e))?;
+    if !ada(&lama) {
         return Err(format!("jrgm remove: `{}` tidak ada di `jrgm.toml`", name));
     }
+    let mut bagian = String::new();
+    let baru: String = isi.lines().filter(|l| {
+        let t = l.trim();
+        if t.starts_with('[') { bagian = t.trim_start_matches('[').split(']').next().unwrap_or("").trim().to_string(); }
+        let cocok = (bagian == "dependencies" || bagian == "dev-dependencies")
+            && t.starts_with(name) && t[name.len()..].trim_start().starts_with('=');
+        !cocok
+    }).map(|l| format!("{}\n", l)).collect();
+    let sisa = super::manifes::Manifest::parse_from_str(&baru, &akar).map_err(|e| format!("jrgm remove: {}", e))?;
+    if ada(&sisa) {
+        return Err(format!("jrgm remove: `{}` tidak ditulis sebagai satu baris `{} = {{ .. }}` di \
+            `[dependencies]` — buang bagiannya sendiri; `jrgm.toml` tidak diubah", name, name));
+    }
     std::fs::write(&manifes, baru)
-        .map_err(|e| format!("jrgm remove: tidak bisa tulis `jrgm.toml`: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("jrgm remove: tidak bisa tulis `jrgm.toml`: {}", crate::host::galat_io(&e)))?;
     println!("membuang `{}`", name);
     Ok(())
 }
@@ -428,7 +445,7 @@ pub(crate) fn cmd_remove(name: &str) -> Result<(), String> {
 
 /// Gambar graf dependensi yang SEBENARNYA.
 pub(crate) fn cmd_tree() -> Result<(), String> {
-    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", jrgc::host::galat_io(&e)))?;
+    let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
     if !akar.join("jrgm.toml").is_file() {
         return Err("jrgm tree: tidak ada `jrgm.toml` di sini — jalankan dari akar proyek".into());
     }
@@ -471,7 +488,7 @@ pub(crate) fn cmd_tree() -> Result<(), String> {
 pub(crate) fn cmd_clean()  -> Result<(), String> {
     if std::path::Path::new("target").exists() {
         std::fs::remove_dir_all("target")
-            .map_err(|e| format!("tidak bisa hapus target dir: {}", jrgc::host::galat_io(&e)))?;
+            .map_err(|e| format!("tidak bisa hapus target dir: {}", crate::host::galat_io(&e)))?;
     }
     eprintln!("[jrgm] target directory dibersihkan");
     Ok(())
@@ -482,7 +499,7 @@ pub(crate) fn cmd_fmt(paths: &[std::path::PathBuf], check: bool) -> Result<(), S
         if let Some((m, r, akar)) = super::bahasa::proyek_kini()? { return super::bahasa::rapikan(&m, r, &akar, check); }
     }
     let cwd = std::env::current_dir()
-        .map_err(|e| format!("tidak bisa get cwd: {}", jrgc::host::galat_io(&e)))?;
+        .map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
 
     // Tanpa argumen: `src/` kalau ada, kalau tidak seluruh direktori kerja.
     // Sengaja tidak memerlukan `jrgm.toml`, supaya `jrgm fmt` juga berguna di
@@ -518,10 +535,10 @@ pub(crate) fn cmd_fmt(paths: &[std::path::PathBuf], check: bool) -> Result<(), S
     for p in &berkas {
         let src = match std::fs::read_to_string(p) {
             Ok(s) => s,
-            Err(e) => { rusak.push((p.clone(), format!("tidak bisa dibaca: {}", jrgc::host::galat_io(&e)))); continue; }
+            Err(e) => { rusak.push((p.clone(), format!("tidak bisa dibaca: {}", crate::host::galat_io(&e)))); continue; }
         };
         let sf = SourceFile { id: 0, name: p.display().to_string(), src: src.clone() };
-        match jrgc::fmt::format_sumber(&sf) {
+        match crate::fmt::format_sumber(&sf) {
             Err(e) => rusak.push((p.clone(), e)),
             Ok(hasil) => {
                 if hasil == src { continue; }

@@ -107,10 +107,8 @@ pub fn group_by(daftar, kunci_fn) {
     for i in daftar {
         let isi = daftar[i]
         let k = str(kunci_fn(isi))
-        match keluar.get(k) {
-            Some(sudah) => { keluar[k] = arr::push(sudah, isi) }
-            None        => { keluar[k] = [isi] }
-        }
+        // Ditulis di jalurnya: salinan dari `keluar.get(k)` membuat `push` menyalin seluruh kelompok (kuadrat).
+        if dict::has(keluar, k) { keluar[k] += [isi] } else { keluar[k] = [isi] }
     }
     return keluar
 }

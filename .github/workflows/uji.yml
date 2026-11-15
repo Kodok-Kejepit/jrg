@@ -9,6 +9,7 @@ on:
   push:
     branches: ["**"]
   pull_request:
+  workflow_dispatch:
 
 jobs:
   suite:
@@ -21,17 +22,63 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      # `JRG_SOPAN` sengaja tidak diset: `tests/nada.rs` menguji sapaan yang
-      # variabel itu matikan.
-      - name: Suite
-        run: cargo test --release -j 2 --no-fail-fast
-
-      # Uji asap memeriksa `--emit-llvm` lewat pustaka jadi, seperti di arsip rilis.
+      # Jembatan LLVM dibangun SEBELUM suite: kalau basi, tes `--emit-llvm` pertama membangunnya di tengah jalan.
       - name: Pustaka --emit-llvm
         run: |
+          cargo build --release -j 2
           (cd runtime && cargo build --release)
           (cd jembatan && cargo build --release)
-          cp runtime/target/release/libjrgrt.a jembatan/target/release/libjrgjembatan.so target/release/
+
+      # `JRG_SOPAN` sengaja tidak diset: `tests/nada.rs` menguji sapaan yang
+      # variabel itu matikan.
+      - name: Bangun tes
+        run: cargo test --release -j 1 --no-run
+
+      # Di dalam PID namespace, seperti di mesin pengembang: beberapa tes mengirim sinyal ke proses. Tiap biner tes
+      # jalan sendiri dengan keluaran langsung ke log, dan memori dicatat tiap 20 detik — job yang dibunuh di
+      # tengah jalan (3 kali, menit ke-23 sampai 27) tetap meninggalkan jejak tes mana dan memori berapa.
+      - name: Suite
+        env:
+          RUST_TEST_THREADS: "2"
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ( while true; do echo "[mem $(date +%T)] $(free -m | awk '/Mem/ {print "pakai", $3, "sedia", $7}') | $(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"; sleep 20; done ) &
+          pantau=$!
+          set +e
+          rc=0
+          for t in lib bins $(ls tests/*.rs | xargs -n1 basename | sed 's/\.rs$//'); do
+            case $t in lib) a="--lib" ;; bins) a="--bins" ;; *) a="--test $t" ;; esac
+            # Tes LLVM berbatas 5 GB per proses: biner uji yang rakus gagal "memori habis" dan disebut namanya oleh
+            # tesnya, alih-alih menghabiskan runner 8 GB (terukur: `uji.bin` 7 GB, job mati tanpa pesan).
+            batas=unlimited; case $t in llvm_*) batas=5000000 ;; esac
+            echo "::group::cargo test $a (ulimit -v $batas)"
+            setsid --wait unshare -U --map-current-user -m -p -f --mount-proc sh -c "ulimit -v $batas; exec env -u JRG_SOPAN cargo test --release -j 1 --no-fail-fast $a" 2>&1 | tee -a suite.log
+            r=${PIPESTATUS[0]}
+            echo "::endgroup::"
+            echo "== $t selesai, kode $r"
+            [ $r -eq 0 ] || rc=1
+          done
+          kill $pantau
+          exit $rc
+        shell: bash
+
+      - name: Ringkasan suite
+        if: always()
+        run: |
+          grep '^test result' suite.log | awk '{l+=$4; g+=$6} END {print "lulus", l, "gagal", g}'
+          grep -E '^test .* FAILED' suite.log || true
+          grep -A30 '^---- ' suite.log | head -300 || true
+          free -m; sudo dmesg | tail -20 || true
+
+      - name: Simpan log suite
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: suite-log
+          path: suite.log
+
+      - name: Salin pustaka jadi
+        run: cp runtime/target/release/libjrgrt.a jembatan/target/release/libjrgjembatan.so target/release/
 
       - name: Uji asap
         run: sh rilis/uji_asap.sh target/release "$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"

@@ -706,7 +706,7 @@ impl Parser {
         let lo = self.span_lo();
         self.advance(); // <
         let mut params = Vec::new();
-        while !self.at_exact(&TokenKind::Gt) {
+        while !self.di_penutup_sudut() {
             let plo = self.span_lo();
             if self.at_exact(&TokenKind::KwConst) {
                 return Err(self.error(concat!(
@@ -722,7 +722,7 @@ impl Parser {
             params.push(GenericParam { name, bounds, span: self.merge_span(plo) });
             if !self.eat(&TokenKind::Comma) { break; }
         }
-        self.expect(&TokenKind::Gt)?;
+        self.tutup_sudut()?;
         Ok(GenericParams { params, span: Some(self.merge_span(lo)) })
     }
 

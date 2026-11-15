@@ -108,9 +108,18 @@ pub fn arr_flatten<T>(a: [][]T) -> []T {
     return keluar
 }
 
-pub fn arr_flat_map<T, K>(a: []T, f: fn(T) -> []K) -> []K {
-    var keluar: []K = []
-    for _, x in a { for _, y in f(x) { keluar += [y] } }
+// Pilihan `kunci_lapis_menurut`: elemen yang bukan array disimpan apa adanya.
+fn arr_flatten__datar<T>(a: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a { keluar += [x] }
+    return keluar
+}
+
+fn arr_flatten__campur<T>(a: []T) -> []T {
+    var keluar: []T = []
+    for _, x in a {
+        if typeof(x) == "array" { for _, y in x { keluar += [y] } } else { keluar += [x] }
+    }
     return keluar
 }
 
@@ -134,8 +143,17 @@ pub fn arr_remove<T>(a: []T, i0: int) -> ([]T, T) {
     return (keluar, a[i])
 }
 
+// Batas `interpreter::cek_batas_elemen` (MAKS_ELEMEN), kalimatnya sama.
+fn _batas_elemen(nama: string, n: int) {
+    if n > 16777216 {
+        panik(nama + ": minta " + str(n) + " elemen sekaligus, batasnya 16777216 — permintaan sebesar itu mematikan prosesnya sebelum sempat menjawab. Cek lagi angkanya")
+    }
+}
+
 pub fn arr_repeat<T>(a: []T, n: int) -> []T {
     if n < 0 { panik("arr::repeat: jumlah tidak boleh negatif, dapat " + str(n)) }
+    _batas_elemen("arr::repeat", n)
+    _batas_elemen("arr::repeat", len(a) * n)
     var keluar: []T = []
     for _ in 0..n { for _, x in a { keluar += [x] } }
     return keluar
@@ -143,6 +161,7 @@ pub fn arr_repeat<T>(a: []T, n: int) -> []T {
 
 pub fn arr_fill<T>(v: T, n: int) -> []T {
     if n < 0 { panik("arr::fill: jumlah tidak boleh negatif, dapat " + str(n)) }
+    _batas_elemen("arr::fill", n)
     var keluar: []T = []
     for _ in 0..n { keluar += [v] }
     return keluar
@@ -263,7 +282,9 @@ pub fn arr_sort_desc<T>(a: []T) -> []T {
             }
         }
     }
-    return arr::reverse(arr::sort(a))
+    // Menurun dan STABIL (yang setara tetap urutan aslinya, `[2, 2.0]`), seperti acuan yang membalik
+    // pembandingnya: masukan dibalik dulu. Dulu `reverse(sort(a))` menukar yang setara diam-diam.
+    return arr::reverse(arr::sort(arr::reverse(a)))
 }
 
 pub fn arr_binary_search<T>(a: []T, v: T) -> Option<int> {
@@ -581,6 +602,8 @@ pub fn time_format(ms: int = time_now_ms(), pola: string = "%Y-%m-%d %H:%M:%S") 
 // Padanan `host::galat_io` untuk nomor errno Linux; kalimatnya harus sama persis.
 fn _galat_os(kode: int) -> string {
     let n = 0 - kode
+    if n == 100000 { return "isinya bukan teks UTF-8 yang sah" }
+    if n == 100001 { return "teksnya memuat karakter NUL, yang tidak bisa diserahkan ke sistem operasi" }
     if n == 2 { return "berkas atau direktorinya tidak ada" }
     if n == 13 || n == 1 { return "tidak diizinkan (izin aksesnya kurang)" }
     if n == 17 { return "sudah ada" }
@@ -632,10 +655,49 @@ pub fn env_get_or<V>(nama: string, cadangan: V) -> string {
     return str(cadangan)
 }
 
-pub fn env_set<V>(nama: string, nilai: V) { let _ = lapis::os(13, nama, str(nilai), 0) }
+pub fn env_os() -> string {
+    let r = lapis::os(26, "", "", 0)
+    if r.0 < 0 { panik("env::os: tidak bisa dibaca: " + _galat_os(r.0)) }
+    return r.1
+}
+
+pub fn env_arch() -> string {
+    let r = lapis::os(27, "", "", 0)
+    if r.0 < 0 { panik("env::arch: tidak bisa dibaca: " + _galat_os(r.0)) }
+    return r.1
+}
+
+pub fn env_exe() -> string {
+    let r = lapis::os(25, "", "", 0)
+    if r.0 < 0 { panik("env::exe: tidak bisa dibaca: " + _galat_os(r.0)) }
+    return r.1
+}
+
+pub fn env_set<V>(nama: string, nilai: V) {
+    let z = str(rune(0))
+    if nama == "" || str::contains(nama, "=") || str::contains(nama, z) {
+        panik("env::set: nama variabel " + _kutip_debug(nama) + " tidak sah — tidak boleh kosong, dan tidak boleh berisi `=` atau karakter NUL")
+    }
+    let isi = str(nilai)
+    if str::contains(isi, z) { panik("env::set: nilai untuk `" + nama + "` berisi karakter NUL, dan variabel lingkungan tidak bisa menyimpannya") }
+    let r = lapis::os(13, nama, isi, 0)
+    if r.0 < 0 { panik("env::set `" + nama + "`: " + _galat_os(r.0)) }
+}
+
+// Bentuk `{:?}` Rust untuk teks: dikutip, `\`, `"`, NUL dan tiga pemisah baris diloloskan.
+fn _kutip_debug(s: string) -> string {
+    var k = "\""
+    for _, c in str::chars(s) {
+        let n = c as int
+        if n == 0 { k += "\\0" } else if n == 10 { k += "\\n" } else if n == 13 { k += "\\r" }
+        else if n == 9 { k += "\\t" } else if n == 34 { k += "\\\"" } else if n == 92 { k += "\\\\" }
+        else { k += str(c) }
+    }
+    return k + "\""
+}
 
 pub fn fs_read(path: string) -> string {
-    let r = lapis::os(1, path, "", 0)
+    let r = lapis::os(1, path, "", 1)
     if r.0 < 0 { panik("fs::read '" + path + "': " + _galat_os(r.0)) }
     return r.1
 }
@@ -701,7 +763,7 @@ pub fn fs_ls(path: string) -> []string {
 }
 
 pub fn fs_read_lines(path: string) -> []string {
-    let r = lapis::os(1, path, "", 0)
+    let r = lapis::os(1, path, "", 1)
     if r.0 < 0 { panik("fs::read_lines '" + path + "': " + _galat_os(r.0)) }
     return str_lines(r.1)
 }
@@ -739,13 +801,13 @@ pub fn fs_join(a: string, b: string) -> string {
 }
 
 pub fn file_read(path: string) -> Result<string, string> {
-    let r = lapis::os(1, path, "", 0)
+    let r = lapis::os(1, path, "", 1)
     if r.0 < 0 { return Err("file::read: gagal baca `" + path + "` — " + _galat_os(r.0)) }
     return Ok(r.1)
 }
 
 pub fn file_read_lines(path: string) -> Result<[]string, string> {
-    let r = lapis::os(1, path, "", 0)
+    let r = lapis::os(1, path, "", 1)
     if r.0 < 0 { return Err("file::read_lines: gagal baca `" + path + "` — " + _galat_os(r.0)) }
     return Ok(str_lines(r.1))
 }
@@ -776,13 +838,26 @@ pub fn file_list_dir(path: string) -> Result<[]string, string> {
     return Ok(_nama_isi(r.1, r.0))
 }
 
-pub fn json_get(objek, kunci: string) { return dict::get(objek, kunci) }
+// Struct dibaca lewat field-nya seperti acuan: `dict { ...objek }`; cabang `typeof` dilipat saat kompilasi.
+pub fn json_get(objek, kunci: string) {
+    if typeof(objek) == "dict" { return dict::get(objek, kunci) }
+    return dict::get(dict { ...objek }, kunci)
+}
 
-pub fn json_has(objek, kunci: string) -> bool { return dict::has(objek, kunci) }
+pub fn json_has(objek, kunci: string) -> bool {
+    if typeof(objek) == "dict" { return dict::has(objek, kunci) }
+    return dict::has(dict { ...objek }, kunci)
+}
 
-pub fn json_keys(objek) -> []string { return dict::keys(objek) }
+pub fn json_keys(objek) -> []string {
+    if typeof(objek) == "dict" { return dict::keys(objek) }
+    return dict::keys(dict { ...objek })
+}
 
-pub fn json_values(objek) { return dict::values(objek) }
+pub fn json_values(objek) {
+    if typeof(objek) == "dict" { return dict::values(objek) }
+    return dict::values(dict { ...objek })
+}
 
 pub fn json_set(objek, kunci: string, nilai) { return dict::set(objek, kunci, nilai) }
 

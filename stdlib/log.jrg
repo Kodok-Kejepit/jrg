@@ -1,0 +1,152 @@
+package std_log
+
+import "std/tanggal"
+
+// Log terstruktur, satu panggilan = tepat satu baris: `\n`, kendali dan pengubah arah di pesan maupun nilai field
+// di-escape (pemalsuan baris log, CWE-117). Pesan tidak pernah ditafsirkan — tidak ada `%s` atau `${..}` yang
+// diganti, jadi teks dari luar tidak bisa menjalankan apa pun (kelas format string, Log4Shell).
+
+pub const TINGKAT = ["debug", "info", "warn", "error"]
+
+pub struct Pencatat {
+    pub nama: string,
+    pub tingkat: string = "info",
+    pub format: string = "teks",
+    pub waktu: bool = true,
+    pub ke: string = "stderr",
+}
+
+fn _nomor(t) {
+    for i, n in TINGKAT { if n == t { return i } }
+    panik(«log: tingkat `${t}` tidak dikenal — yang ada: debug, info, warn, error»)
+}
+
+/// Pencatat bernama, mencatat `info` ke atas, format `teks`, ke stderr.
+pub fn baru(nama) { return Pencatat { nama: nama } }
+
+/// Ganti tingkat paling rendah yang dicatat (`debug`, `info`, `warn`, `error`).
+pub fn dengan_tingkat(p, t) {
+    _nomor(t)
+    var q = p
+    q.tingkat = t
+    return q
+}
+
+/// Ganti format: `teks` (logfmt) atau `json` (satu objek JSON per baris).
+pub fn dengan_format(p, f) {
+    if f != "teks" && f != "json" { panik(«log: format `${f}` tidak dikenal — yang ada: teks, json») }
+    var q = p
+    q.format = f
+    return q
+}
+
+/// Tanpa cap waktu (berguna untuk tes dan keluaran yang dibandingkan).
+pub fn tanpa_waktu(p) {
+    var q = p
+    q.waktu = false
+    return q
+}
+
+/// Tulis ke stdout, bukan stderr.
+pub fn ke_stdout(p) {
+    var q = p
+    q.ke = "stdout"
+    return q
+}
+
+fn _kunci_sah(k) {
+    if k == "" { return false }
+    for i, r in str::chars(k) {
+        let c = str(r)
+        let huruf = (c >= "a" && c <= "z") || c == "_"
+        if !(huruf || (i > 0 && ((c >= "0" && c <= "9") || c == "."))) { return false }
+    }
+    return true
+}
+
+fn _lolos(s) {
+    var o = ""
+    for _, r in str::chars(s) {
+        let k = r as int
+        let c = str(r)
+        if c == "\\" { o = o + "\\\\" } else if c == "\"" { o = o + "\\\"" } else if c == "\n" { o = o + "\\n" } else if c == "\r" { o = o + "\\r" } else if c == "\t" { o = o + "\\t" } else if k < 32 || k == 127 || (k >= 0x200B && k <= 0x200F) || (k >= 0x202A && k <= 0x202E) || (k >= 0x2066 && k <= 0x2069) || k == 0xFEFF || k == 0x2028 || k == 0x2029 {
+            o = o + «\\u{${_heks(k)}}»
+        } else {
+            o = o + c
+        }
+    }
+    return o
+}
+
+// Cap waktu UTC berlebar tetap, selalu bermilidetik: `2026-11-02T16:10:00.123Z`.
+fn _cap() {
+    var w = tanggal::sekarang(0).unwrap()
+    let ms = w.nano / 1000000
+    w.nano = 0
+    return tanggal::format_iso(w)[0:19] + "." + str::pad_left(str(ms), 3, "0") + "Z"
+}
+
+fn _heks(n) {
+    let d = "0123456789abcdef"
+    if n == 0 { return "0" }
+    var s = ""
+    var x = n
+    while x > 0 {
+        s = d[x % 16:x % 16 + 1] + s
+        x = x / 16
+    }
+    return s
+}
+
+// Nilai logfmt: dikutip kalau kosong atau memuat spasi, `=` atau `"`; selalu di-escape.
+fn _nilai(v) {
+    let s = str(v)
+    let l = _lolos(s)
+    if s == "" || l != s || str::contains(s, " ") || str::contains(s, "=") { return "\"" + l + "\"" }
+    return s
+}
+
+/// Baris yang akan ditulis untuk satu catatan, atau `None` kalau tingkatnya di bawah batas pencatat.
+pub fn baris(p, t, pesan, field) {
+    if _nomor(t) < _nomor(p.tingkat) { return None }
+    for k, _ in field {
+        if !_kunci_sah(k) || k == "waktu" || k == "tingkat" || k == "nama" || k == "pesan" {
+            panik(«log: kunci field `${_lolos(k)}` tidak sah — huruf kecil, angka, `_`, `.`; bukan waktu/tingkat/nama/pesan»)
+        }
+    }
+    let w = p.waktu $ _cap() : ""
+    if p.format == "json" {
+        var d = dict::new()
+        if p.waktu { d["waktu"] = w }
+        d["tingkat"] = t
+        d["nama"] = p.nama
+        d["pesan"] = str(pesan)
+        for k, v in field { d[k] = v }
+        // `json::stringify` sudah meloloskan kendali; U+2028/U+2029 ikut diloloskan untuk pembaca JavaScript.
+        return Some(str::replace(str::replace(json::stringify(d), "\u2028", "\\u2028"), "\u2029", "\\u2029"))
+    }
+    var s = p.waktu $ w + " " : ""
+    s = s + str::upper(t) + " " + _lolos(p.nama) + " " + _nilai(pesan)
+    for k, v in field { s = s + " " + k + "=" + _nilai(v) }
+    return Some(s)
+}
+
+/// Catat pada tingkat `t` dengan field tambahan (`dict`, boleh kosong).
+pub fn catat(p, t, pesan, field) {
+    match baris(p, t, pesan, field) {
+        Some(b) => { if p.ke == "stdout" { wok(b) } else { eprint(b) } }
+        None => {}
+    }
+}
+
+/// Catatan tingkat `debug`.
+pub fn debug(p, pesan, field) { catat(p, "debug", pesan, field) }
+
+/// Catatan tingkat `info`.
+pub fn info(p, pesan, field) { catat(p, "info", pesan, field) }
+
+/// Catatan tingkat `warn`.
+pub fn warn(p, pesan, field) { catat(p, "warn", pesan, field) }
+
+/// Catatan tingkat `error`.
+pub fn error(p, pesan, field) { catat(p, "error", pesan, field) }

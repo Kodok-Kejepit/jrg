@@ -1,0 +1,30 @@
+package main
+import "std/shlex"
+
+fn test_split() {
+    assert_eq(shlex::split("ls -la  /tmp").unwrap(), ["ls", "-la", "/tmp"])
+    assert_eq(shlex::split("echo 'a b' \"c d\" e\\ f").unwrap(), ["echo", "a b", "c d", "e f"])
+    assert_eq(shlex::split("'it'\"'\"'s'").unwrap(), ["it's"])
+    assert_eq(shlex::split("\"\\$HOME \\\" \\\\ \\a\"").unwrap(), ["$HOME \" \\ \\a"])
+    assert_eq(shlex::split("a'' ''").unwrap(), ["a", ""])
+    assert_eq(shlex::split("  ").unwrap(), [])
+    assert_eq(shlex::split("$HOME *.jrg").unwrap(), ["$HOME", "*.jrg"])
+}
+
+fn test_yang_cacat_ditolak() {
+    assert_eq(shlex::split("echo 'a").unwrap_err(), "kutip tunggal di posisi 5 tidak ditutup")
+    assert_eq(shlex::split("echo \"a").unwrap_err(), "kutip ganda di posisi 5 tidak ditutup")
+    assert_eq(shlex::split("a\\").unwrap_err(), "`\\` di ujung tanpa karakter yang diloloskan")
+    assert_eq(shlex::split("a\u0000b").unwrap_err(), "karakter NUL di posisi 1 — tidak bisa jadi argumen program")
+}
+
+fn test_quote_dan_join() {
+    assert_eq(shlex::quote("aman/jalur-1.txt"), "aman/jalur-1.txt")
+    assert_eq(shlex::quote(""), "''")
+    assert_eq(shlex::quote("a b"), "'a b'")
+    assert_eq(shlex::quote("it's"), "'it'\"'\"'s'")
+    assert_eq(shlex::quote("$(rm -rf ~)"), "'$(rm -rf ~)'")
+    assert_eq(shlex::quote("é"), "'é'")
+    let a = ["rm", "--", "-rf", "a b", "", "it's", "$x", "`y`", "\\", "\n"]
+    assert_eq(shlex::split(shlex::join(a)).unwrap(), a)
+}

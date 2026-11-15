@@ -1,0 +1,163 @@
+package std_hitung
+
+// Kalkulator ekspresi untuk rumus dari luar — pengganti `eval()` yang di Python/JS/PHP adalah jalan ke eksekusi kode.
+// Cuma angka, `+ - * / % **`, kurung, variabel dari dict dan fungsi dari daftar tetap. Teks paling panjang `MAKS`,
+// kurung paling dalam 64; bagi nol, NaN/tak hingga dan nama asing jadi `Err` yang menyebut posisinya.
+
+pub const MAKS = 4096
+pub const FUNGSI = ["abs", "min", "max", "sqrt", "round", "floor", "ceil", "ln", "log10"]
+
+fn _token(teks) {
+    let cs = arr::map(str::chars(teks), |r| str(r))
+    var t = []
+    var i = 0
+    while i < len(cs) {
+        let c = cs[i]
+        if c == " " || c == "\t" {
+            i += 1
+        } else if (c >= "0" && c <= "9") || c == "." {
+            let a = i
+            while i < len(cs) && ((cs[i] >= "0" && cs[i] <= "9") || cs[i] == ".") { i += 1 }
+            let s = str::join(cs[a:i], "")
+            if len(arr::filter(str::chars(s), |r| str(r) == ".")) > 1 || s == "." { return Err(«angka `${s}` di posisi ${a} tidak sah») }
+            t = arr::push(t, ["angka", s, a])
+        } else if (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || c == "_" {
+            let a = i
+            while i < len(cs) && ((cs[i] >= "a" && cs[i] <= "z") || (cs[i] >= "A" && cs[i] <= "Z") || cs[i] == "_" || (cs[i] >= "0" && cs[i] <= "9")) { i += 1 }
+            t = arr::push(t, ["nama", str::join(cs[a:i], ""), a])
+        } else if c == "*" && i + 1 < len(cs) && cs[i + 1] == "*" {
+            t = arr::push(t, ["op", "**", i])
+            i += 2
+        } else if str::contains("+-*/%(),", c) {
+            t = arr::push(t, ["op", c, i])
+            i += 1
+        } else {
+            let k = (str::chars(c)[0] as int) < 32 $ «kode ${str::chars(c)[0] as int}» : «`${c}`»
+            return Err(«karakter ${k} di posisi ${i} bukan bagian rumus»)
+        }
+    }
+    return Ok(t)
+}
+
+pub struct _Urai {
+    pub t: array,
+    pub i: int = 0,
+    pub vars: dict,
+    pub dalam: int = 0,
+}
+
+fn _lihat(u) { return u.i < len(u.t) $ u.t[u.i] : ["akhir", "", -1] }
+
+fn _cek(v, pos) {
+    if math::is_nan(v) || math::is_inf(v) { return Err(«hasil di posisi ${pos} bukan bilangan terhingga») }
+    return Ok(v)
+}
+
+// Pratt: prioritas + - (1), * / % (2), ** (4, ke kanan), unary - (3). Tipe kembaliannya ditulis: `_ekspr` dan
+// `_atom` saling memanggil, jadi tanpa anotasi penyimpul statis tidak punya titik awal.
+fn _ekspr(u, min) -> Result<(_Urai, float), string> {
+    if u.dalam >= 64 { return Err("kurung atau tanda bertumpuk lebih dari 64 tingkat") }
+    u.dalam += 1
+    let tk = _lihat(u)
+    var kiri = 0.0
+    if tk[0] == "op" && (tk[1] == "-" || tk[1] == "+") {
+        u.i += 1
+        let (u2, v) = _ekspr(u, 3)?
+        u = u2
+        kiri = tk[1] == "-" $ -v : v
+    } else {
+        let (u2, v) = _atom(u)?
+        u = u2
+        kiri = v
+    }
+    while true {
+        let o = _lihat(u)
+        if o[0] != "op" { break }
+        let (pr, kanan_dulu) = match o[1] { "+" => (1, false), "-" => (1, false), "*" => (2, false), "/" => (2, false), "%" => (2, false), "**" => (4, true), _ => (0, false) }
+        if pr == 0 || pr < min { break }
+        u.i += 1
+        let (u2, b) = _ekspr(u, kanan_dulu $ pr : pr + 1)?
+        u = u2
+        let a = kiri
+        if o[1] == "+" { kiri = a + b } else if o[1] == "-" { kiri = a - b } else if o[1] == "*" { kiri = a * b } else if o[1] == "/" {
+            if b == 0.0 { return Err(«bagi nol di posisi ${o[2]}») }
+            kiri = a / b
+        } else if o[1] == "%" {
+            if b == 0.0 { return Err(«sisa bagi nol di posisi ${o[2]}») }
+            kiri = a - b * math::floor(a / b)
+        } else {
+            if math::abs(b) > 1000.0 { return Err(«pangkat ${b} di posisi ${o[2]} terlalu besar») }
+            kiri = math::pow(a, b)
+        }
+        kiri = _cek(kiri, o[2])?
+    }
+    u.dalam -= 1
+    return Ok((u, kiri))
+}
+
+fn _atom(u) -> Result<(_Urai, float), string> {
+    let tk = _lihat(u)
+    if tk[0] == "angka" {
+        u.i += 1
+        return Ok((u, str::to_float(tk[1])))
+    }
+    if tk[0] == "op" && tk[1] == "(" {
+        u.i += 1
+        let (u2, v) = _ekspr(u, 1)?
+        u = u2
+        if _lihat(u)[1] != ")" { return Err(«kurung yang dibuka di posisi ${tk[2]} tidak ditutup») }
+        u.i += 1
+        return Ok((u, v))
+    }
+    if tk[0] == "nama" {
+        u.i += 1
+        if _lihat(u)[1] == "(" {
+            if !arr::contains(FUNGSI, tk[1]) { return Err(«fungsi `${tk[1]}` di posisi ${tk[2]} tidak ada — yang ada: ${str::join(FUNGSI, ", ")}») }
+            u.i += 1
+            var argumen: []float = []
+            if _lihat(u)[1] != ")" {
+                while true {
+                    let (u2, v) = _ekspr(u, 1)?
+                    u = u2
+                    argumen = arr::push(argumen, v)
+                    if _lihat(u)[1] == "," { u.i += 1 } else { break }
+                }
+            }
+            if _lihat(u)[1] != ")" { return Err(«pemanggilan `${tk[1]}` di posisi ${tk[2]} tidak ditutup») }
+            u.i += 1
+            let v = _panggil(tk[1], argumen, tk[2])?
+            return Ok((u, v))
+        }
+        if !dict::has(u.vars, tk[1]) { return Err(«nama `${tk[1]}` di posisi ${tk[2]} tidak dikenal») }
+        let v = u.vars[tk[1]]
+        let t = typeof(v)
+        if t != "int" && t != "float" { return Err(«nama `${tk[1]}` bernilai `${t}`, bukan bilangan») }
+        return Ok((u, v as float))
+    }
+    if tk[0] == "akhir" { return Err("rumus berakhir di tengah — kurang angka atau nama") }
+    return Err(«`${tk[1]}` di posisi ${tk[2]} tidak diharapkan di sini»)
+}
+
+fn _panggil(f, a, pos) {
+    let satu = ["abs", "sqrt", "round", "floor", "ceil", "ln", "log10"]
+    if arr::contains(satu, f) && len(a) != 1 { return Err(«`${f}` di posisi ${pos} butuh 1 argumen, dapat ${len(a)}») }
+    if (f == "min" || f == "max") && len(a) == 0 { return Err(«`${f}` di posisi ${pos} butuh paling sedikit 1 argumen») }
+    if f == "sqrt" && a[0] < 0.0 { return Err(«akar dari bilangan negatif di posisi ${pos}») }
+    if (f == "ln" || f == "log10") && a[0] <= 0.0 { return Err(«logaritma dari bilangan tidak positif di posisi ${pos}») }
+    let v = match f {
+        "abs" => math::abs(a[0]), "sqrt" => math::sqrt(a[0]), "round" => math::round(a[0]),
+        "floor" => math::floor(a[0]), "ceil" => math::ceil(a[0]), "ln" => math::ln(a[0]), "log10" => math::log10(a[0]),
+        "min" => arr::min(a), _ => arr::max(a)
+    }
+    return _cek(v, pos)
+}
+
+/// Hitung `teks` dengan variabel dari `vars` (dict nama → bilangan); hasilnya `float`.
+pub fn hitung(teks, vars) {
+    if len(teks) > MAKS { return Err(«rumus ${len(teks)} karakter, di atas batas ${MAKS}») }
+    let t = _token(teks)?
+    if len(t) == 0 { return Err("rumus kosong") }
+    let (u, v) = _ekspr(_Urai { t: t, vars: vars }, 1)?
+    if u.i < len(u.t) { return Err(«`${u.t[u.i][1]}` di posisi ${u.t[u.i][2]} tidak diharapkan di sini») }
+    return Ok(v)
+}

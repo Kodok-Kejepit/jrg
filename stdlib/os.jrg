@@ -1,0 +1,105 @@
+package std_os
+
+// Tentang sistem tempat program berjalan. Nama OS dan arsitektur dari biner itu sendiri (`env::os`, `env::arch`),
+// tidak pernah ditebak dari berkas. Entri `PATH` yang kosong atau relatif berarti "folder kerja sekarang" — jalan
+// membajak program (CWE-427, kelas CVE-2022-30580 di `exec.LookPath` Go) — jadi `path()` membuangnya.
+
+/// `linux`, `android`, `macos`, `windows`, `freebsd`, atau `tak-dikenal`.
+pub fn nama() { return env::os() }
+
+/// `x86_64`, `aarch64`, `arm`, `x86`, `riscv64`, atau `tak-dikenal`.
+pub fn arsitektur() { return env::arch() }
+
+/// `true` di Windows.
+pub fn windows() { return env::os() == "windows" }
+
+/// `true` di Linux dan Android (Termux termasuk).
+pub fn mirip_linux() { return env::os() == "linux" || env::os() == "android" }
+
+/// `true` kalau berjalan di dalam Termux (Android).
+pub fn termux() {
+    match env::get("PREFIX") {
+        Some(p) => { return str::contains(p, "com.termux") }
+        None => { return false }
+    }
+}
+
+/// Pemisah folder di jalur: `\` di Windows, `/` di tempat lain.
+pub fn pemisah() { return windows() $ "\\" : "/" }
+
+/// Pemisah entri `PATH`: `;` di Windows, `:` di tempat lain.
+pub fn pemisah_path() { return windows() $ ";" : ":" }
+
+/// Folder rumah pemakai (`HOME`, atau `USERPROFILE` di Windows); `Err` kalau tidak diset.
+pub fn rumah() {
+    let nama_var = windows() $ "USERPROFILE" : "HOME"
+    match env::get(nama_var) {
+        Some(h) => {
+            if h == "" { return Err(«${nama_var} kosong») }
+            return Ok(h)
+        }
+        None => { return Err(«${nama_var} tidak diset») }
+    }
+}
+
+/// Folder sementara milik sistem.
+pub fn sementara() { return fs::temp_dir() }
+
+/// Jumlah inti prosesor yang terlihat.
+pub fn cpu() { return num_cpus() }
+
+/// Nama pemakai (`USER`, `LOGNAME`, atau `USERNAME`), `None` kalau tidak ada.
+pub fn pengguna() {
+    for _, n in ["USER", "LOGNAME", "USERNAME"] {
+        match env::get(n) {
+            Some(v) => { if v != "" { return Some(v) } }
+            None => {}
+        }
+    }
+    return None
+}
+
+fn _mutlak(d) {
+    if windows() {
+        return len(d) >= 3 && d[1:2] == ":" && (d[2:3] == "\\" || d[2:3] == "/") || str::starts_with(d, "\\\\")
+    }
+    return str::starts_with(d, "/")
+}
+
+fn _entri_path() {
+    match env::get("PATH") {
+        Some(p) => { return str::split(p, pemisah_path()) }
+        None => { return [] }
+    }
+}
+
+/// Folder di `PATH` yang aman dicari: mutlak dan tidak kosong, urutannya tetap, yang kembar dibuang.
+pub fn path() {
+    var lihat = dict::new()
+    var hasil = []
+    for _, d in _entri_path() {
+        if _mutlak(d) && !dict::has(lihat, d) {
+            lihat[d] = true
+            hasil = arr::push(hasil, d)
+        }
+    }
+    return hasil
+}
+
+/// Entri `PATH` yang berbahaya (kosong atau relatif) — artinya program dari folder kerja ikut dicari shell.
+pub fn path_berbahaya() {
+    return arr::filter(_entri_path(), |d| !_mutlak(d))
+}
+
+/// Ringkasan semuanya dalam satu dict (untuk dicetak atau dilaporkan).
+pub fn info() {
+    var d = dict::new()
+    d["os"] = nama()
+    d["arsitektur"] = arsitektur()
+    d["cpu"] = cpu()
+    d["termux"] = termux()
+    d["sementara"] = sementara()
+    d["rumah"] = rumah().unwrap_or("")
+    d["pengguna"] = pengguna().unwrap_or("")
+    return d
+}

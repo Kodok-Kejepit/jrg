@@ -1,6 +1,6 @@
 [package]
 name        = "jrgc"
-version     = "0.2.0"
+version     = "0.3.0"
 edition     = "2021"
 description = "JawaRustGo++ Compiler/Interpreter — jrgc & jrgm"
 authors     = ["JRG Team"]
@@ -21,20 +21,29 @@ path = "src/jrgm/main.rs"
 
 [dependencies]
 unicode-xid = "=0.2.4"
-clap        = { version = "=4.3.24", features = ["derive"] }
+clap        = { version = "=4.6.7", features = ["derive"] }
 indexmap    = "=2.0.2"
-smallvec    = "=1.11.2"
+smallvec    = "=1.15.1"
 bitflags    = "=2.4.2"
 
 # minifb tidak mendukung Android; di sana mode `"tab"` digambar lewat pengantar APK.
 [target.'cfg(not(target_os = "android"))'.dependencies]
 minifb      = { version = "0.27", optional = true }
 
+# Pembuat kode mesin JRGJIT (`dokumentasi/jit/`); mesin Praktik (wasm) tetap VM.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+cranelift-codegen  = { version = "=0.137.1", optional = true }
+cranelift-frontend = { version = "=0.137.1", optional = true }
+cranelift-jit      = { version = "=0.137.1", optional = true }
+cranelift-module   = { version = "=0.137.1", optional = true }
+cranelift-native   = { version = "=0.137.1", optional = true }
+
 [features]
 # Jendela ikut bawaan: minifb memuat X11/Wayland saat JALAN (`dlopen`), jadi build tetap tanpa
 # pustaka sistem; kanvas cuma membuka jendela kalau programnya minta mode `"tab"`.
-default = ["canvas"]
+default = ["canvas", "jit"]
 canvas  = ["minifb"]
+jit     = ["cranelift-codegen", "cranelift-frontend", "cranelift-jit", "cranelift-module", "cranelift-native"]
 
 [profile.release]
 opt-level     = 3

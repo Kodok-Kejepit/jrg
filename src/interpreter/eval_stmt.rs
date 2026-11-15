@@ -102,6 +102,35 @@ impl Interpreter {
 
     pub(crate) fn exec_let(&mut self, s: &LetStmt, env: &mut Env) -> EvalResult {
         let v = self.eval_expr(&s.init, env)?;
+        self.ikat_let(s, v, env)
+    }
+
+    /// `let r = arr::pop(a)` yang `a`-nya ditimpa pernyataan berikutnya (`capture::pindah_sebelum_ditimpa`).
+    pub(crate) fn exec_let_pindah(&mut self, s: &LetStmt, a: &str, env: &mut Env) -> EvalResult {
+        match self.pop_milik(a, &s.init, env)? {
+            Some(v) => self.ikat_let(s, v, env),
+            None => self.exec_let(s, env),
+        }
+    }
+
+    /// `arr::pop(a)`/`a.pop()` atas larik milik lokal polos `a`: larik DIPINDAHKAN lalu di-pop di tempat,
+    /// bukan disalin utuh. `None` (tanpa menyentuh apa pun) kalau bentuk atau isinya bukan itu.
+    pub(crate) fn pop_milik(&mut self, a: &str, ekspr: &Expr, env: &mut Env) -> Result<Option<Value>, Signal> {
+        if crate::interpreter::capture::nama_pop(ekspr).as_deref() != Some(a) || !env.lokal_polos(a) { return Ok(None); }
+        if matches!(ekspr, Expr::Call { .. })
+            && !matches!(env.get("arr::pop"), Some(Value::NativeFn(crate::interpreter::builtin::NativeFnKind::ArrPop))) {
+            return Ok(None);
+        }
+        let Some(v) = env.ambil_lokal_polos(a) else { return Ok(None) };
+        let Value::Array(mut isi) = v else { env.set(a, v); return Ok(None) };
+        let x = match isi.pop() {
+            Some(x) => crate::interpreter::some_value(x),
+            None => crate::interpreter::none_value(),
+        };
+        Ok(Some(Value::Tuple(vec![Value::Array(isi), x].into())))
+    }
+
+    fn ikat_let(&mut self, s: &LetStmt, v: Value, env: &mut Env) -> EvalResult {
         // Dulu bagian pola yang MENGUJI (literal, rentang, varian unit) dilewati,
         // jadi `let (a, 5) = (1, 6)` diterima diam-diam.
         let pasti = match &s.pattern {
@@ -238,9 +267,9 @@ impl Interpreter {
                 use std::fmt::Write;
                 if Self::perlu_tampil(&kanan) {
                     let t = self.tampil(&kanan)?;
-                    s.push_str(&t);
+                    std::sync::Arc::make_mut(s).push_str(&t);
                 } else {
-                    write!(s, "{}", kanan).expect("Display Value tidak boleh gagal");
+                    write!(std::sync::Arc::make_mut(s), "{}", kanan).expect("Display Value tidak boleh gagal");
                 }
                 Ok(())
             }
@@ -269,6 +298,8 @@ impl Interpreter {
         let (lhs, rhs, dorong) = match &s.values[0] {
             Expr::Binary { op: BinaryOp::Add, lhs, rhs, .. } => (&**lhs, &**rhs, false),
             Expr::Method { obj, method, args, .. } if method == "push" && args.len() == 1 => (&**obj, &args[0], true),
+            // `jalur = arr::push(jalur, x)`: sama dengan `.push(x)`, kalau namanya memang builtin itu (bukan dibayangi).
+            Expr::Call { func, args, .. } if args.len() == 2 && self.panggil_arr_push(func, env) => (&args[0], &args[1], true),
             _ => return Ok(None),
         };
         let mut nama: Vec<&str> = Vec::new();
@@ -312,6 +343,56 @@ impl Interpreter {
         Ok(Some(Value::Unit))
     }
 
+    /// `jalur = dict::set(jalur, ..)` / `dict::remove(jalur, ..)` atas jalur milik lokal polos: isinya
+    /// DIPINDAHKAN ke builtin (dulu disalin utuh tiap kali — kuadrat). Urutannya tetap: fungsi, jalur, argumen lain.
+    pub(crate) fn coba_konsumsi_jalur(
+        &mut self,
+        s: &crate::parser::AssignStmt,
+        env: &mut Env,
+    ) -> Result<Option<Value>, Signal> {
+        if s.targets.len() != 1 || s.values.len() != 1 || !matches!(s.op, AssignOp::Eq) { return Ok(None); }
+        let tgt = &s.targets[0];
+        if matches!(tgt, Expr::Ident(..)) { return Ok(None); }
+        let panggil = &s.values[0];
+        let Expr::Call { func, args, .. } = panggil else { return Ok(None) };
+        if args.is_empty() || !matches!(&**func, Expr::Ident(..) | Expr::PathExpr { .. }) { return Ok(None); }
+        let mut nama: Vec<&str> = Vec::new();
+        if !jalur_murni(tgt, &mut nama) || !jalur_sama(tgt, &args[0]) || nama.is_empty() { return Ok(None); }
+        if !nama.iter().all(|n| env.lokal_polos(n)) { return Ok(None); }
+        let menyebut = |e: &Expr| {
+            let d = crate::interpreter::capture::names_mentioned(e);
+            nama.iter().any(|n| d.contains(*n))
+        };
+        if menyebut(func) || args[1..].iter().any(menyebut) { return Ok(None); }
+        use crate::interpreter::builtin::NativeFnKind;
+        let fv = self.eval_expr(func, env)?;
+        if !matches!(fv, Value::NativeFn(NativeFnKind::DictSet | NativeFnKind::DictRemove)) { return Ok(None); }
+        // Dibaca dulu seperti biasa, supaya galat bacanya mendahului argumen lain.
+        drop(self.eval_expr(&args[0], env)?);
+        let mut av = Vec::with_capacity(args.len());
+        av.push(Value::Nil);
+        for a in &args[1..] { av.push(self.eval_expr(a, env)?); }
+        let (root, steps) = self.flatten_assign_path(tgt, env)?;
+        av[0] = self.ambil_jalur(&root, &steps, env)?;
+        let hasil = match self.call_fn_dari(fv, av, Some(func)) {
+            Ok(v) => v,
+            Err(Signal::RuntimeError(g)) => return Err(Signal::RuntimeError(
+                g.fill_span(panggil.span()).isi_span_bingkai(panggil.span()))),
+            Err(lain) => return Err(lain),
+        };
+        self.assign_target(tgt, AssignOp::Eq, hasil, env)?;
+        Ok(Some(Value::Unit))
+    }
+
+    fn panggil_arr_push(&self, func: &Expr, env: &Env) -> bool {
+        let nama_fn = match func {
+            Expr::Ident(n, _) => n.clone(),
+            Expr::PathExpr { segments, .. } => segments.join("::"),
+            _ => return false,
+        };
+        matches!(env.get(&nama_fn), Some(Value::NativeFn(crate::interpreter::builtin::NativeFnKind::ArrPush)))
+    }
+
     /// `x = x.m(..)` (dan rantainya) atas struct milik lokal polos: nilai `x` DIPINDAHKAN ke
     /// method sebagai `self`, jadi tulisan ke `self` di sana tidak menyalin seluruh isinya.
     pub(crate) fn coba_konsumsi_penerima(
@@ -330,6 +411,7 @@ impl Interpreter {
     /// Nilai `ekspr` dengan lokal `name` DIPINDAHKAN ke dalamnya (penerima rantai method, atau
     /// argumen pertama sebuah panggilan). `None`: bentuknya bukan itu, dan tidak ada yang disentuh.
     pub(crate) fn nilai_konsumsi(&mut self, name: &str, ekspr: &Expr, env: &mut Env) -> Result<Option<Value>, Signal> {
+        if let Some(v) = self.pop_milik(name, ekspr, env)? { return Ok(Some(v)); }
         if let Expr::Call { .. } = ekspr { return self.coba_konsumsi_argumen(name, ekspr, env); }
         let mut rantai: Vec<&Expr> = Vec::new();
         let mut kini = ekspr;
@@ -650,7 +732,7 @@ pub(crate) fn panjang_koleksi(v: &Value) -> usize {
 /// Potong kembali ke panjang awal: penyambungan di tempat cuma MENAMBAH di ujung.
 pub(crate) fn pulihkan_koleksi(v: Value, awal: usize) -> Value {
     match v {
-        Value::Str(mut s) => { s.truncate(awal); Value::Str(s) }
+        Value::Str(mut s) => { std::sync::Arc::make_mut(&mut s).truncate(awal); Value::Str(s) }
         Value::Array(mut a) => { a.truncate(awal); Value::Array(a) }
         lain => lain,
     }

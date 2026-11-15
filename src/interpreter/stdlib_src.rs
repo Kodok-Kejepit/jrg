@@ -26,6 +26,31 @@ pub const STDLIB_MODULES: &[(&str, &str)] = &[
     // Lebar kolom dihitung dari isi TERLEBAR: menebaknya membuat kolom
     // menempel begitu ada yang lebih panjang dari tebakan.
     ("tabel",    include_str!("../../stdlib/tabel.jrg")),
+    // Perkakas program baris perintah dan berkas: tiap pengurai menolak bentuk yang dibaca lain oleh
+    // pengurai bahasa lain (singkatan opsi, waktu tanpa zona, kunci kembar), tes di `stdlib/uji/`.
+    ("cli",      include_str!("../../stdlib/cli.jrg")),
+    ("tanggal",  include_str!("../../stdlib/tanggal.jrg")),
+    ("glob",     include_str!("../../stdlib/glob.jrg")),
+    ("diff",     include_str!("../../stdlib/diff.jrg")),
+    ("shlex",    include_str!("../../stdlib/shlex.jrg")),
+    ("uuid",     include_str!("../../stdlib/uuid.jrg")),
+    ("ini",      include_str!("../../stdlib/ini.jrg")),
+    ("dotenv",   include_str!("../../stdlib/dotenv.jrg")),
+    ("log",      include_str!("../../stdlib/log.jrg")),
+    ("graf",     include_str!("../../stdlib/graf.jrg")),
+    ("base32",   include_str!("../../stdlib/base32.jrg")),
+    ("ip",       include_str!("../../stdlib/ip.jrg")),
+    ("mirip",    include_str!("../../stdlib/mirip.jrg")),
+    ("lru",      include_str!("../../stdlib/lru.jrg")),
+    ("os",       include_str!("../../stdlib/os.jrg")),
+    ("templat",  include_str!("../../stdlib/templat.jrg")),
+    ("bungkus",  include_str!("../../stdlib/bungkus.jrg")),
+    ("cron",     include_str!("../../stdlib/cron.jrg")),
+    ("sandi",    include_str!("../../stdlib/sandi.jrg")),
+    ("markdown", include_str!("../../stdlib/markdown.jrg")),
+    ("batas",    include_str!("../../stdlib/batas.jrg")),
+    ("hitung",   include_str!("../../stdlib/hitung.jrg")),
+    ("izin",     include_str!("../../stdlib/izin.jrg")),
     // Mesin game 2D di atas `canvas::`. Namespace-nya komponen
     // terakhir path: `import "std/mesin/vek"` memberi `vek::`.
     ("mesin",          include_str!("../../stdlib/mesin/mesin.jrg")),

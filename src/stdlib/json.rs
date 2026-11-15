@@ -8,10 +8,10 @@ use std::collections::HashMap;
 
 /// Pasangan key/value sebuah map, DIURUTKAN menurut key.
 fn pasangan_terurut(
-    g: &std::collections::HashMap<String, VmValue>,
+    g: &crate::vm::value::IsiPeta,
 ) -> Vec<(&String, &VmValue)> {
     let mut v: Vec<(&String, &VmValue)> =
-        g.iter().collect();
+        g.iter().map(|(k, v)| (&**k, v)).collect();
     v.sort_unstable_by(|a, b| a.0.cmp(b.0));
     v
 }
@@ -78,8 +78,8 @@ pub fn register(vm: &mut Vm) {
     vm.def("json::set", |a| match (a.get(0), a.get(1), a.get(2)) {
         (Some(o @ Map(m)), Some(Str(k)), Some(v)) if o.type_name_penuh() == "dict" => {
             let mut isi = m.lock().unwrap().clone();
-            isi.insert(k.as_str().to_string(), v.clone());
-            Ok(VmValue::map(isi))
+            isi.insert(crate::vm::value::Kunci(k.clone()), v.clone());
+            Ok(VmValue::Map(Arc::new(crate::vm::value::Peta::dari_isi(crate::vm::value::Label::Dict, isi))))
         }
         _ => Err("json::set(obj, key, val)".to_string()),
     });
@@ -125,7 +125,7 @@ pub fn register(vm: &mut Vm) {
                 crate::vm::value::Label::Dict => a_map.label.clone(),
                 lain => lain.clone(),
             };
-            Ok(Map(Arc::new(crate::vm::value::Peta::baru(label, merged))))
+            Ok(Map(Arc::new(crate::vm::value::Peta::dari_isi(label, merged))))
         }
         _ => Err("json::merge(a, b)".to_string()),
     });
@@ -160,65 +160,83 @@ fn parse_json(s: &str) -> Result<VmValue, String> {
 /// `NaN`/`inf` menghasilkan keluaran yang bukan JSON, dan `"<function>"`
 /// tampak seperti data di program yang membacanya.
 fn stringify(v: &VmValue, _depth: usize, _pretty: bool) -> Result<String, String> {
-    let tolak = |apa: &str, jalan: &str| -> Result<String, String> {
+    let mut keluar = String::new();
+    tulis_json(v, &mut keluar)?;
+    Ok(keluar)
+}
+
+/// Ditulis ke SATU penyangga (dulu string per tingkat, kuadratik), dan stack yang menipis berlanjut di thread baru.
+fn tulis_json(v: &VmValue, out: &mut String) -> Result<(), String> {
+    if crate::interpreter::stack_menipis() == Some(true) {
+        let s = crate::interpreter::di_stack_lega(|| { let mut o = String::new(); tulis_json(v, &mut o).map(|_| o) })?;
+        out.push_str(&s);
+        return Ok(());
+    }
+    let tolak = |apa: &str, jalan: &str| -> Result<(), String> {
         Err(crate::interpreter::galat_index::tidak_bisa_jadi_json(apa, jalan))
     };
     match v {
-        VmValue::Nil          => Ok("null".to_string()),
-        VmValue::Unit         => Ok("null".to_string()),
-        VmValue::Bool(b)      => Ok(b.to_string()),
-        VmValue::Int(n)       => Ok(n.to_string()),
+        VmValue::Nil | VmValue::Unit => out.push_str("null"),
+        VmValue::Bool(b)      => out.push_str(if *b { "true" } else { "false" }),
+        VmValue::Int(n)       => out.push_str(&n.to_string()),
         VmValue::Float(f)     => match crate::json_inti::sandi_pecahan(*f) {
-            Some(t) => Ok(t),
-            None => tolak(&format!("{}", f), crate::json_inti::JALAN_PECAHAN),
+            Some(t) => out.push_str(&t),
+            None => return tolak(&format!("{}", f), crate::json_inti::JALAN_PECAHAN),
         },
-        VmValue::Str(s)       => Ok(json_escape(s)),
+        VmValue::Str(s)       => out.push_str(&json_escape(s)),
         // Rune di-serialisasi sebagai string 1-karakter, sama seperti JSON
         // tidak punya tipe karakter tersendiri.
-        VmValue::Rune(c)      => Ok(json_escape(&c.to_string())),
+        VmValue::Rune(c)      => out.push_str(&json_escape(&c.to_string())),
         VmValue::Array(a)     => {
-            let items: Vec<String> = a.lock().unwrap().iter()
-                .map(|x| stringify(x, 0, false)).collect::<Result<_, _>>()?;
-            Ok(format!("[{}]", items.join(",")))
+            out.push('[');
+            for (i, x) in a.lock().unwrap().iter().enumerate() { if i > 0 { out.push(','); } tulis_json(x, out)?; }
+            out.push(']');
         }
         VmValue::Tuple(t)     => {
-            let items: Vec<String> = crate::vm::value::isi_tuple(t).iter()
-                .map(|x| stringify(x, 0, false)).collect::<Result<_, _>>()?;
-            Ok(format!("[{}]", items.join(",")))
+            out.push('[');
+            for (i, x) in crate::vm::value::isi_tuple(t).iter().enumerate() { if i > 0 { out.push(','); } tulis_json(x, out)?; }
+            out.push(']');
         }
         VmValue::Map(m)       => {
-            if let Some(j) = enum_ke_json_hasil(v)? { return Ok(j); }
-            let mut pairs: Vec<String> = Vec::new();
-            for (k, x) in bagian_json(m).iter() {
-                pairs.push(format!("{}:{}", json_escape(k), stringify(x, 0, false)?));
+            if let Some(j) = enum_ke_json_hasil(v)? { out.push_str(&j); return Ok(()); }
+            out.push('{');
+            for (i, (k, x)) in bagian_json(m).iter().enumerate() {
+                if i > 0 { out.push(','); }
+                out.push_str(&json_escape(k));
+                out.push(':');
+                tulis_json(x, out)?;
             }
-            Ok(format!("{{{}}}", pairs.join(",")))
+            out.push('}');
         }
         // Array numerik jadi array JSON biasa — itu satu-satunya bentuk
         // JSON yang punya arti untuknya, dan menuliskannya sebagai
         // `"<wokwok>"` akan membuang datanya tanpa memberi tahu.
-        VmValue::Nd(a) => stringify(&crate::wokwok::daftar::ke_daftar(a), _depth, _pretty),
+        VmValue::Nd(a) => tulis_json(&crate::wokwok::daftar::ke_daftar(a), out)?,
         // Fungsi dan handle tidak punya padanan JSON. Dulu keduanya jadi
         // TEKS (`"<function>"`, `"<canvas>"`) yang tampak seperti data.
         VmValue::Function(_) | VmValue::NativeFn(_) | VmValue::Ktor(_)
         | VmValue::ExternFn(_) | VmValue::Closure(_) =>
-            tolak("fungsi", crate::json_inti::JALAN_FUNGSI),
-        VmValue::Channel(_)  => tolak("channel", crate::json_inti::JALAN_CHANNEL),
-        VmValue::Sinkron(p)  => tolak(p.nama_tipe(), crate::json_inti::JALAN_PEGANGAN),
-        VmValue::Asing(a)    => tolak(&a.nama_tipe(), "ambil nilainya dulu (`py::to_jrg`, `js::to_jrg`, \
+            return tolak("fungsi", crate::json_inti::JALAN_FUNGSI),
+        VmValue::Channel(_)  => return tolak("channel", crate::json_inti::JALAN_CHANNEL),
+        VmValue::Sinkron(p)  => return tolak(p.nama_tipe(), crate::json_inti::JALAN_PEGANGAN),
+        VmValue::Asing(a)    => return tolak(&a.nama_tipe(), "ambil nilainya dulu (`py::to_jrg`, `js::to_jrg`, \
                                       `php::to_jrg`), bukan handle-nya"),
-        VmValue::Canvas(_)   => tolak("canvas",
+        VmValue::Canvas(_)   => return tolak("canvas",
             "simpan gambarnya (`canvas::save_png`) lalu kirim nama berkasnya"),
-        VmValue::Ptr(_)      => tolak("ptr",
+        VmValue::Ptr(_)      => return tolak("ptr",
             "kirim nilai yang ditunjuknya (`ptr::get(p)`), bukan pointernya"),
         // Sel binding closure tidak pernah sampai ke sini lewat jalur
         // normal, tapi kalau sampai, yang harus di-serialisasi adalah NILAI
         // di dalam binding-nya.
-        VmValue::Cell(c)     => stringify(&c.lock().unwrap_or_else(|p| p.into_inner()), _depth, _pretty),
+        VmValue::Cell(c)     => tulis_json(&c.lock().unwrap_or_else(|p| p.into_inner()), out)?,
     }
+    Ok(())
 }
 
 fn stringify_pretty(v: &VmValue, depth: usize, indent: usize) -> Result<String, String> {
+    if crate::interpreter::stack_menipis() == Some(true) {
+        return crate::interpreter::di_stack_lega(|| stringify_pretty(v, depth, indent));
+    }
     let pad   = " ".repeat(depth * indent);
     let inner = " ".repeat((depth + 1) * indent);
     match v {

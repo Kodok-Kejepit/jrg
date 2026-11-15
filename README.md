@@ -71,6 +71,7 @@ Hasilnya dua program, `jrgc` dan `jrgm`:
 ```sh
 jrgc halo.jrg              # jalankan
 jrgc halo.jrg --vm         # lewat VM bytecode
+jrgc halo.jrg --jit        # VM yang mengompilasi bagian panas jadi kode mesin
 jrgc halo.jrg --emit-llvm  # kompilasi native (butuh clang)
 jrgc                       # REPL
 jrgc --sunting halo.jrg    # penyunting di terminal
@@ -87,8 +88,8 @@ jrgm apk                   # bungkus jadi aplikasi Android
   `Option` dan `Result` dengan `?` dan `??`, operator buatan sendiri, goroutine dan channel.
 - **Nilai tidak pernah berbagi.** Menyalin, mengoper, dan mengembalikan selalu menghasilkan salinan (yang baru benar-benar
   dibuat saat ada yang menulis), jadi tidak ada pengumpul sampah.
-- **Pustaka:** 818 fungsi bawaan (teks, koleksi, berkas, JSON, regex, kripto, HTTP/HTTPS, server web dengan WebSocket,
-  SQLite, kanvas, suara, numerik), 14 modul `std/` yang ditulis dalam JRG, dan mesin game 2D.
+- **Pustaka:** 864 fungsi bawaan (teks, koleksi, berkas, JSON, regex, kripto, HTTP/HTTPS, server web dengan WebSocket,
+  SQLite, kanvas, suara, numerik), 37 modul `std/` yang ditulis dalam JRG, dan mesin game 2D.
 - **Bahasa lain:** C, C++, Rust, Go, Python, JavaScript, PHP, Lua, Java, Kotlin, .NET, dan WebAssembly.
 - **Perkakas:** pengelola proyek dengan tes, format, lint, dan dependensi lewat git; server bahasa (LSP); pembungkus
   APK Android; dan [JRG IDE](https://jrg-lang.org/web_dokumentasi/editor.html) untuk peramban dan HP.
@@ -117,8 +118,9 @@ nilai yang tampak masuk akal; dan program yang jalan di dua mesin harus mencetak
 
 ## Status
 
-Versi **0.2.0**. Interpreter dan VM menjalankan seluruh bahasa; backend LLVM menjalankan semua uji konformans tapi
-belum seluruh bahasa. Selama `0.x`, perubahan yang memutus program lama masih mungkin dan selalu dicatat di
+Versi **0.3.0**. Interpreter dan VM menjalankan seluruh bahasa, `--jit` menjalankannya juga sambil mengompilasi bagian
+yang panas ke kode mesin; backend LLVM menjalankan semua uji konformans tapi belum seluruh bahasa. Selama `0.x`,
+perubahan yang memutus program lama masih mungkin dan selalu dicatat di
 [CHANGELOG](CHANGELOG.md). Daftar yang belum jadi ada di [Yang belum jadi](https://jrg-lang.org/web_dokumentasi/batasan.html).
 
 ## Lisensi

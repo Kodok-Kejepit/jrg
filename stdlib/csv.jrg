@@ -13,15 +13,17 @@ pub fn parse_with(teks, pemisah) {
     var dikutip = false
     var ada_isi = false
     var i = 0
-    let n = len(teks)
+    // Karakternya diambil sekali: `str::char_at(teks, i)` menghitung dari awal tiap kali (kuadrat).
+    let cs = str::chars(teks)
+    let n = len(cs)
 
     while i < n {
-        let c = str::char_at(teks, i)
+        let c = cs[i]
 
         if dikutip {
             if c == '"' {
                 if i + 1 < n {
-                    if str::char_at(teks, i + 1) == '"' {
+                    if cs[i + 1] == '"' {
                         buf = buf + "\""
                         i = i + 2
                         continue

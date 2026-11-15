@@ -122,7 +122,10 @@ impl Tls {
             let t = Tls { ctx, ssl, _tcp: tcp };
             (s.set_fd)(ssl, fd);
             (s.ctrl)(ssl, 55, 0, nama.as_ptr() as P);
-            (s.set1_host)(ssl, nama.as_ptr());
+            // Tanpa nama host yang terpasang, sertifikat sah milik host LAIN pun diterima.
+            if (s.set1_host)(ssl, nama.as_ptr()) != 1 {
+                return Err(format!("TLS ke {}: nama host tidak bisa dipasang untuk pemeriksaan sertifikat", host));
+            }
             if (s.connect)(ssl) != 1 {
                 let v = (s.verify_result)(ssl);
                 let alasan = if v != 0 {

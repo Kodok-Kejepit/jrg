@@ -1,0 +1,89 @@
+package std_bungkus
+
+// Membungkus teks ke lebar KOLOM layar (`term::lebar`: huruf Asia Timur dua kolom, tanda gabung nol), bukan jumlah
+// karakter — `日本` menempati 4 kolom. Kata yang lebih lebar dari barisnya dipotong di batas karakter, dan tanda
+// gabung tidak pernah dipisah dari huruf induknya. Tab jadi empat spasi; baris kosong dan paragraf dipertahankan.
+
+fn _periksa(lebar, apa) {
+    if typeof(lebar) != "int" || lebar < 1 { panik(«bungkus::${apa}: lebar harus bilangan bulat 1 ke atas, dapat ${lebar}») }
+}
+
+// Pecah satu kata jadi potongan selebar paling banyak `lebar`, tanpa memisah tanda gabung dari induknya.
+fn _potong_kata(kata, lebar) {
+    let cs = arr::map(str::chars(kata), |r| str(r))
+    let w = term::lebar_tiap(kata)
+    var hasil = []
+    var kini = ""
+    var lk = 0
+    for i, c in cs {
+        if w[i] > 0 && lk + w[i] > lebar && kini != "" {
+            hasil = arr::push(hasil, kini)
+            kini = ""
+            lk = 0
+        }
+        kini = kini + c
+        lk = lk + w[i]
+    }
+    if kini != "" { hasil = arr::push(hasil, kini) }
+    return hasil
+}
+
+fn _satu_baris(b, lebar) {
+    var hasil = []
+    var kini = ""
+    var lk = 0
+    for _, kata in str::split(b, " ") {
+        if kata == "" { continue }
+        let lw = term::lebar(kata)
+        if lw > lebar {
+            if kini != "" {
+                hasil = arr::push(hasil, kini)
+                kini = ""
+                lk = 0
+            }
+            let p = _potong_kata(kata, lebar)
+            for _, x in p[0:len(p) - 1] { hasil = arr::push(hasil, x) }
+            kini = p[len(p) - 1]
+            lk = term::lebar(kini)
+        } else if kini == "" {
+            kini = kata
+            lk = lw
+        } else if lk + 1 + lw <= lebar {
+            kini = kini + " " + kata
+            lk = lk + 1 + lw
+        } else {
+            hasil = arr::push(hasil, kini)
+            kini = kata
+            lk = lw
+        }
+    }
+    if kini != "" || len(hasil) == 0 { hasil = arr::push(hasil, kini) }
+    return hasil
+}
+
+/// Teks dibungkus jadi array baris yang masing-masing paling lebar `lebar` kolom.
+pub fn baris(teks, lebar) {
+    _periksa(lebar, "baris")
+    var hasil = []
+    for _, b0 in str::split(str::replace(teks, "\t", "    "), "\n") {
+        let b = str::ends_with(b0, "\r") $ b0[0:len(b0) - 1] : b0
+        hasil = arr::concat(hasil, _satu_baris(b, lebar))
+    }
+    return hasil
+}
+
+/// Seperti `baris`, digabung dengan ganti baris.
+pub fn teks(t, lebar) { return str::join(baris(t, lebar), "\n") }
+
+/// Potong `t` supaya muat `lebar` kolom; yang terpotong diakhiri `…` (satu kolom).
+pub fn potong(t, lebar) {
+    _periksa(lebar, "potong")
+    if term::lebar(t) <= lebar { return t }
+    let p = _potong_kata(t, lebar - 1)
+    return lebar == 1 $ "…" : p[0] + "…"
+}
+
+/// Tambah awalan (mis. `"  "` atau `"> "`) di depan tiap baris yang tidak kosong.
+pub fn indentasi(t, awalan) {
+    return str::join(arr::map(str::split(t, "\n"), |b| b == "" $ b : awalan + b), "\n")
+}

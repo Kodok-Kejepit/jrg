@@ -1,0 +1,69 @@
+package std_mirip
+
+// Kemiripan teks per KARAKTER (bukan byte): jarak Levenshtein, rasio, dan saran ejaan. Biayanya panjang kali
+// panjang, jadi teks di atas `MAKS` karakter ditolak alih-alih dihitung berjam-jam (masukan raksasa adalah DoS).
+
+pub const MAKS = 2000
+
+fn _huruf(s, apa) {
+    if typeof(s) != "string" { panik(«mirip: ${apa} harus teks, dapat `${typeof(s)}`») }
+    let cs = arr::map(str::chars(s), |r| str(r))
+    if len(cs) > MAKS { return Err(«mirip: ${apa} ${len(cs)} karakter, di atas batas ${MAKS}») }
+    return Ok(cs)
+}
+
+// Jarak dengan batas: berhenti lebih awal dan menjawab `batas + 1` kalau jaraknya pasti melewati batas.
+fn _jarak(a, b, batas) {
+    let n = len(a)
+    let m = len(b)
+    if math::abs(n - m) > batas { return batas + 1 }
+    var atas = range(m + 1)
+    for i, ca in a {
+        var kini = [i + 1]
+        var terkecil = i + 1
+        for j, cb in b {
+            let ganti = atas[j] + (ca == cb $ 0 : 1)
+            let v = math::min(math::min(atas[j + 1] + 1, kini[j] + 1), ganti)
+            kini = arr::push(kini, v)
+            if v < terkecil { terkecil = v }
+        }
+        if terkecil > batas { return batas + 1 }
+        atas = kini
+    }
+    return atas[m]
+}
+
+/// Jarak Levenshtein: jumlah sisip/hapus/ganti karakter paling sedikit dari `a` ke `b`.
+pub fn jarak(a, b) {
+    let x = _huruf(a, "teks pertama")?
+    let y = _huruf(b, "teks kedua")?
+    return Ok(_jarak(x, y, len(x) + len(y)))
+}
+
+/// Kemiripan 0.0 sampai 1.0 (`1.0` sama persis), dari jarak dibagi panjang yang lebih panjang.
+pub fn rasio(a, b) {
+    let x = _huruf(a, "teks pertama")?
+    let y = _huruf(b, "teks kedua")?
+    let p = math::max(len(x), len(y))
+    if p == 0 { return Ok(1.0) }
+    return Ok(1.0 - (_jarak(x, y, p) as float) / (p as float))
+}
+
+/// Kandidat dari `daftar` yang jaraknya ke `kata` paling banyak `batas`, terdekat dulu (seri: urutan daftar).
+pub fn saran(kata, daftar, batas) {
+    let x = _huruf(kata, "kata")?
+    var hasil = []
+    for i, k in daftar {
+        let y = _huruf(k, «kandidat ke-${i}»)?
+        let d = _jarak(x, y, batas)
+        if d <= batas { hasil = arr::push(hasil, [d, i, k]) }
+    }
+    return Ok(arr::map(arr::sort(hasil), |t| t[2]))
+}
+
+/// Satu saran terdekat, atau `None`; batasnya sepertiga panjang kata (paling sedikit 1), seperti saran ejaan `jrgc`.
+pub fn terdekat(kata, daftar) {
+    let b = math::max(1, len(str::chars(kata)) / 3)
+    let s = saran(kata, daftar, b)?
+    return Ok(s.first())
+}

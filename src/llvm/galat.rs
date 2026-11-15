@@ -34,22 +34,19 @@ pub fn beri_span_bila_kosong(pesan: String, sp: Span) -> String {
     tandai(sp, GalatLlvm::dari_pesan(&pesan).msg)
 }
 
-/// Jelaskan `ns::item` yang tidak ditemukan backend LLVM.
-pub fn jelaskan_path_hilang(ns: &str, item: &str, di_import: bool) -> String {
-    let penuh = format!("{}::{}", ns, item);
+/// Kalimat acuan untuk path yang tidak ada; `program_punya_ekor`: nama telanjangnya milik program.
+pub fn pesan_path_acuan(penuh: &str, program_punya_ekor: bool) -> String {
+    let daftar = crate::vm::daftar_builtin();
+    let lain = crate::diag::nama_di_namespace_lain(penuh, daftar.iter().map(|s| s.as_str()));
+    let saran = crate::diag::saran_nama_terdekat(penuh, daftar.iter().map(|s| s.as_str()));
+    let ekor = penuh.rsplit("::").next().unwrap_or("");
+    let telanjang = program_punya_ekor || crate::vm::bawaan::bawaan(ekor).is_some();
+    crate::interpreter::pesan_path_tak_dikenal_plus(penuh, saran.as_deref(), &lain, telanjang)
+}
 
-    // `py::` dan `js::` cuma ada di interpreter: pekerjanya harus memanggil balik fungsi JRG
-    // di tengah permintaan. Diperiksa DULU, karena registry juga memuat nama keduanya.
-    if matches!(ns, "py" | "js") {
-        let apa = if ns == "py" { "interop Python" } else { "interop JavaScript" };
-        return format!(
-            "namespace `{}::` ({}) cuma ada di interpreter, karena pekerjanya harus memanggil \
-             balik fungsi JRG di tengah permintaan\n\
-             bantuan: jalankan tanpa `--emit-llvm` dan tanpa `--vm`\n\
-             catatan: `{}` memang ada di sana; yang tidak ada adalah dukungannya di backend ini",
-            ns, apa, penuh
-        );
-    }
+/// Jelaskan `ns::item` yang tidak ditemukan backend LLVM.
+pub fn jelaskan_path_hilang(ns: &str, item: &str, di_import: bool, item_milik_program: bool) -> String {
+    let penuh = format!("{}::{}", ns, item);
 
     // "Ada" diturunkan dari registry yang sedang berjalan — termasuk HOF seperti `arr::map`,
     // yang bukan `def` dan dulu dijawab "tidak ditemukan ... periksa ejaan".
@@ -80,14 +77,8 @@ pub fn jelaskan_path_hilang(ns: &str, item: &str, di_import: bool) -> String {
         );
     }
 
-    // Bukan stdlib, dan namespace-nya tidak di-`import` berkas ini.
-    format!(
-        "`{}` tidak ditemukan\n\
-         bantuan: kalau ini dari berkas lain, `import` modulnya dulu di berkas ini\n\
-         catatan: kalau `{}` mestinya ada di berkas ini, periksa ejaan nama \
-         namespace-nya",
-        penuh, penuh
-    )
+    // Bukan stdlib dan bukan import: kalimat acuan, lengkap dengan sarannya.
+    pesan_path_acuan(&penuh, item_milik_program)
 }
 
 #[derive(Debug, Clone)]
@@ -215,7 +206,7 @@ mod tes_path_hilang {
         for nama in crate::vm::daftar_builtin() {
             let Some((ns, item)) = nama.split_once("::") else { continue };
             diperiksa += 1;
-            let pesan = super::jelaskan_path_hilang(ns, item, false);
+            let pesan = super::jelaskan_path_hilang(ns, item, false, false);
             if pesan.contains("tidak ditemukan") || pesan.contains("periksa ejaan") {
                 salah.push(nama.clone());
             }

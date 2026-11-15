@@ -727,12 +727,12 @@ pub fn json_to_value(rt: &'static Runtime, j: Json) -> Value {
         Json::Bool(b) => Value::Bool(b),
         Json::Int(n) => Value::Int(n),
         Json::Float(f) => Value::Float(f),
-        Json::Str(s) => Value::Str(s),
+        Json::Str(s) => Value::Str(std::sync::Arc::new(s)),
         Json::Arr(items) => Value::Array(items.into_iter().map(|v| json_to_value(rt, v)).collect()),
         Json::Obj(pairs) => {
             if pairs.len() == 1 && pairs[0].0 == "__pyrepr__" {
                 if let Json::Str(s) = &pairs[0].1 {
-                    return Value::Str(s.clone());
+                    return Value::Str(std::sync::Arc::new(s.clone()));
                 }
             }
             // Handle yang dikirim INLINE, bukan di tingkat teratas respons.

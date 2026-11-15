@@ -380,12 +380,33 @@ fn menumbuhkan_field_tetap_linear() {
              for i := 0; i < {}; i = i + 1 {{ {} }}\n assert_eq(len(p.xs), {}) }}\n", n, bentuk, n
         ).into_boxed_str())
     }
-    for bentuk in ["p.xs = p.xs + [i]", "p.xs += [i]"] {
+    for bentuk in ["p.xs = p.xs + [i]", "p.xs += [i]", "p.xs = arr::push(p.xs, i)"] {
         let kecil = tercepat(sumber(bentuk, 4000), 3);
         let besar = tercepat(sumber(bentuk, 32000), 3);
         let rasio = besar / kecil;
         assert!(rasio < 24.0,
             "`{}`: 8x elemen membuat waktunya {:.1}x ({:.1} → {:.1} ms) — linear ±8x, kuadratik ±64x",
+            bentuk, rasio, kecil * 1e3, besar * 1e3);
+    }
+}
+
+/// **Mengubah dict di field tetap linear** (#915): `p.d = dict::set(p.d, k, v)` dan `dict::remove` dulu
+/// menyalin seluruh dict tiap putaran — isinya sekarang dipindahkan ke builtin.
+#[test]
+fn mengubah_dict_di_field_tetap_linear() {
+    fn sumber(bentuk: &str, n: usize) -> &'static str {
+        Box::leak(format!(
+            "package main\nstruct P {{ pub d: dict }}\npub fn main() {{ var p = P {{ d: dict::new() }}\n \
+             for i := 0; i < {n}; i = i + 1 {{ p.d[str(i)] = i }}\n \
+             for i := 0; i < {n}; i = i + 1 {{ {} }}\n assert(len(p.d) >= 0) }}\n", bentuk, n = n
+        ).into_boxed_str())
+    }
+    for bentuk in ["p.d = dict::remove(p.d, str(i))", "p.d = dict::set(p.d, str(i), 0)"] {
+        let kecil = tercepat(sumber(bentuk, 2000), 3);
+        let besar = tercepat(sumber(bentuk, 16000), 3);
+        let rasio = besar / kecil;
+        assert!(rasio < 24.0,
+            "`{}`: 8x kunci membuat waktunya {:.1}x ({:.1} → {:.1} ms) — linear ±8x, kuadratik ±64x",
             bentuk, rasio, kecil * 1e3, besar * 1e3);
     }
 }
@@ -500,6 +521,50 @@ fn membaca_satu_nilai_tidak_ikut_ukuran_koleksi() {
     }
 }
 
+/// Fase AMAN-35: membaca teks (argumen `str::`, `s[i]`) tidak menyalin isinya — dulu `Value::Str` adalah
+/// `String`, jadi tiap baca variabel teks O(panjang), dan `s[i]` membuat `Vec<char>` seluruh teks.
+#[test]
+fn membaca_teks_tidak_ikut_panjangnya() {
+    fn sumber_teks(baca: &str, n: usize) -> String {
+        format!("package main\npub fn main() {{ let s = str::repeat(\"ab\", {n})\n var k = 0\n \
+                 for i := 0; i < 20000; i = i + 1 {{ if {baca} {{ k = k + 1 }} }}\n assert(k >= 0) }}\n", n = n, baca = baca)
+    }
+    const BACA_TEKS: &[&str] = &["str::starts_with(s, \"ab\")", "str::ends_with(s, \"ab\")", "!str::is_empty(s)",
+        "str::char_at(s, 3) == 'b'", "s[3] == 'b'"];
+    for baca in BACA_TEKS {
+        let kecil = tercepat(Box::leak(sumber_teks(baca, 5000).into_boxed_str()), 2);
+        let besar = tercepat(Box::leak(sumber_teks(baca, 320000).into_boxed_str()), 2);
+        let rasio = besar / kecil;
+        assert!(rasio < 12.0,
+            "`{}`: teks 64x lebih panjang membuat 20 ribu pembacaan {:.1}x lebih lama ({:.1} → {:.1} ms) — \
+             pembacaannya ikut menyalin teksnya", baca, rasio, kecil * 1e3, besar * 1e3);
+    }
+}
+
+/// Fase AMAN-35: lima fungsi `std/` yang dulu kuadrat (`char_at` per karakter, potongan/`take` sebagai pop,
+/// salinan kelompok, antrean `lru` yang tak pernah dipadatkan) — data 8x harus tetap di bawah 24x.
+#[test]
+fn fungsi_std_tetap_linear() {
+    let kasus: &[(&str, &str, &str)] = &[
+        ("csv", "var b = []\n for _, i in range(N) { b = arr::push(b, «${i},\"a,b\",x») }\n let t = str::join(b, \"\\n\")", "let r = csv::parse(t)"),
+        ("path", "var b = []\n for _, i in range(N) { b = arr::push(b, \"a/./b/..\") }\n let t = str::join(b, \"/\")", "let r = path::normalize(t)"),
+        ("graf", "var g = graf::baru()\n for _, i in range(N) { g = graf::sisi(g, str(i), str(i + 1), 1) }", "let r = graf::urut_topologi(g)"),
+        ("lru", "var c = lru::baru(50)\n for _, i in range(N) { c = lru::taruh(c, str(i % 200), i) }", "for _, i in range(N) { let x = lru::ambil(c, str(i % 100)) }"),
+        ("iterator", "let a = range(N)", "let r = iterator::group_by(a, |x| x % 5)"),
+        ("tabel", "var t = tabel::baru([\"a\", \"b\"])\n for _, i in range(N) { t = t.baris_baru([str(i), \"x\"]) }", "let r = t.teks()"),
+    ];
+    for (m, siap, op) in kasus {
+        let sumber = |n: usize| -> &'static str { Box::leak(format!(
+            "package main\nimport \"std/{}\"\npub fn main() {{\n {}\n {}\n}}\n", m,
+            siap.replace('N', &n.to_string()), op.replace('N', &n.to_string())).into_boxed_str()) };
+        let kecil = tercepat(sumber(1500), 2);
+        let besar = tercepat(sumber(12000), 2);
+        let rasio = besar / kecil;
+        assert!(rasio < 24.0, "std/{}: data 8x membuat `{}` {:.1}x lebih lama ({:.1} → {:.1} ms)",
+            m, op, rasio, kecil * 1e3, besar * 1e3);
+    }
+}
+
 /// `q, v = q.pop()` LINEAR: `q` dipindahkan ke `pop`, dan `self = self.rest()` di dalamnya
 /// mengubah di tempat. Bentuk dua pernyataan (`let r = q.pop(); q = r[0]`) tidak bisa begitu.
 #[test]
@@ -533,3 +598,22 @@ pub fn main() {{ var q = Q {{ xs: [], k: 0 }}
         rasio, kecil * 1e3, besar * 1e3);
 }
 
+
+/// Fase AMAN-43 (butir antrean "pop dua pernyataan kuadrat"): `pop` atas larik yang tidak dibaca lagi
+/// sebelum ditimpa memindahkannya (`capture::pindah_sebelum_ditimpa`) — dulu 56–69x untuk 8x n.
+#[test]
+fn pop_yang_ditimpa_tetap_linear() {
+    for (nama, bentuk) in [
+        ("dua pernyataan `let r = arr::pop(a); a = r[0]`", "let r = arr::pop(a)\n a = r[0]\n s += r[1].unwrap_or(0)"),
+        ("dua pernyataan `let r = a.pop(); a = r[0]`", "let r = a.pop()\n a = r[0]\n s += r[1].unwrap_or(0)"),
+        ("bongkar `a, x = a.pop()`", "var x = Option::None\n a, x = a.pop()\n s += x.unwrap_or(0)"),
+    ] {
+        let sumber = |n: usize| format!("package main\npub fn main() {{ var a = []\n for i in 0..{n} {{ a = arr::push(a, i) }}\n var s = 0\n \
+             for i in 0..{n} {{ {bentuk} }}\n assert_eq(len(a), 0)\n wok(s) }}\n", n = n, bentuk = bentuk);
+        let kecil = tercepat(Box::leak(sumber(4000).into_boxed_str()), 3);
+        let besar = tercepat(Box::leak(sumber(32000).into_boxed_str()), 3);
+        let rasio = besar / kecil.max(1e-6);
+        assert!(rasio < 24.0, "{}: n=4000 {:.3}s, n=32000 {:.3}s (rasio {:.1}x, ambang 24x; linear ~8x, \
+            kuadratik ~64x)", nama, kecil, besar, rasio);
+    }
+}

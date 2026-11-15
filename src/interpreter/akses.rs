@@ -55,7 +55,7 @@ impl Interpreter {
                         lain            => Err(gagal(k::pesan_tak_bisa_jadi(&lain.type_name(), "float"))),
                     },
                     PrimTy::Bool => Ok(Value::Bool(self.truthy(&v))),
-                    PrimTy::Str | PrimTy::String_ => Ok(Value::Str(format!("{}", v))),
+                    PrimTy::Str | PrimTy::String_ => Ok(Value::teks(format!("{}", v))),
                     PrimTy::Rune => match v {
                         Value::Rune(c) => Ok(Value::Rune(c)),
                         Value::Int(n)  => k::kode_ke_rune(n).map(Value::Rune).map_err(gagal),
@@ -267,13 +267,10 @@ impl Interpreter {
                     None => runtime_err!("{}", Self::oob_msg("array", "elemen", *i, a.len())),
                 }
             }
-            (Value::Str(s), Value::Int(i)) => {
-                let ch: Vec<char> = s.chars().collect();
-                match Self::resolve_index(*i, ch.len()) {
-                    Some(ix) => Ok(Value::Rune(ch[ix])),
-                    None => runtime_err!("{}", Self::oob_msg("string", "karakter", *i, ch.len())),
-                }
-            }
+            (Value::Str(s), Value::Int(i)) => match crate::interpreter::karakter_ke(s.as_str(), *i) {
+                Ok(c) => Ok(Value::Rune(c)),
+                Err(n) => runtime_err!("{}", Self::oob_msg("string", "karakter", *i, n)),
+            },
             // Dict dan struct sama-sama `Value::Struct`, tapi index-nya dijawab dengan
             // KOSAKATA yang berbeda: sebuah dict punya "key", sebuah struct punya …
             (Value::Struct { name, fields }, indeks) => {
@@ -320,26 +317,13 @@ impl Interpreter {
 
     /// Ubah satu batas potongan jadi posisi sebenarnya.
     pub(crate) fn slice_bound(v: &Value, len: usize, sisi: &str) -> Result<usize, Signal> {
-        let raw = match v {
-            Value::Int(n) => *n,
-            Value::Float(f) => return runtime_err!(
-                "batas {} potongan harus bilangan bulat, dapat pecahan `{}` — \
-                 tulis `{} as int` kalau memang mau dipotong ke bawah",
-                sisi, f, f
-            ),
-            lain => return runtime_err!(
-                "batas {} potongan harus bilangan bulat, dapat `{}` (tipe {})",
-                sisi, lain, lain.type_name()
-            ),
+        use crate::interpreter::galat_index as g;
+        let Value::Int(raw) = v else {
+            return runtime_err!("{}", g::batas_potongan_tipe(sisi, &v.type_name()));
         };
-        let len_i = len as i128;
-        let pos = if raw < 0 { raw + len_i } else { raw };
-        if pos < 0 || pos > len_i {
-            return runtime_err!(
-                "batas {} potongan [{}] di luar jangkauan — panjangnya {}, \
-                 jadi batas yang sah 0..{} (atau -1..{} kalau dihitung dari belakang)",
-                sisi, raw, len, len, -len_i
-            );
+        let pos = if *raw < 0 { raw + len as i128 } else { *raw };
+        if pos < 0 || pos > len as i128 {
+            return runtime_err!("{}", g::batas_potongan_luar(sisi, *raw, len));
         }
         Ok(pos as usize)
     }
@@ -347,11 +331,7 @@ impl Interpreter {
     /// Validasi batas `obj[awal:akhir]` setelah keduanya jadi posisi nyata.
     pub(crate) fn slice_bounds(awal: usize, akhir: usize) -> Result<(usize, usize), Signal> {
         if awal > akhir {
-            return runtime_err!(
-                "potongan [{}:{}] terbalik — batas awal ({}) lebih besar dari batas akhir ({}); \
-                 tulis yang kecil dulu, mis. [{}:{}]",
-                awal, akhir, awal, akhir, akhir, awal
-            );
+            return runtime_err!("{}", crate::interpreter::galat_index::potongan_terbalik(awal, akhir));
         }
         Ok((awal, akhir))
     }
@@ -381,10 +361,7 @@ impl Interpreter {
                 let (s, e) = Self::slice_bounds(s, e)?;
                 Ok(Value::Tuple(t[s..e].to_vec().into()))
             }
-            o => runtime_err!(
-                "tidak bisa slice `{}` (tipe {}) — yang bisa dipotong: array, string, tuple",
-                o, o.type_name()
-            ),
+            o => runtime_err!("{}", crate::interpreter::galat_index::bukan_bisa_dipotong(&o.type_name())),
         }
     }
 

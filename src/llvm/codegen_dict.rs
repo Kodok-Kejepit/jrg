@@ -29,7 +29,7 @@ impl Codegen {
                 "`dict::{}` butuh {} argumen, diberi {}", item, arity, args.len()))));
         }
         Some(match item {
-            "from_pairs" => self.dict_dari_pasangan(&args[0], span),
+            "from_pairs" => self.dict_dari_pasangan(&args[0], harap, span),
             "len" => self.dict_panjang(&args[0], span),
             "is_empty" => self.dict_kosong(&args[0], span),
             "has" => self.dict_punya(args, span),
@@ -57,12 +57,7 @@ impl Codegen {
     pub fn kunci_dict(&mut self, e: &Expr, span: Span) -> Result<Val, String> {
         let k = self.codegen_expr(e, Some(&JrgType::Str))?;
         if k.ty == JrgType::Str { return Ok(k); }
-        if !(k.ty.is_int() || k.ty.is_float() || matches!(k.ty, JrgType::Bool | JrgType::Rune | JrgType::Any)) {
-            return Err(super::galat::tandai(span, format!(
-                "kunci dict bertipe `{}` belum didukung backend `--emit-llvm` — baru teks, angka, bool dan rune\n  \
-                 bantuan: ubah jadi teks dulu dengan `str(x)`", k.ty.nama_typeof())));
-        }
-        self.do_cast(&k, &JrgType::Str, span)
+        self.val_to_str(&k).map_err(|m| super::galat::tandai(span, m))
     }
 
     /// `dict::get_or(d, k, bawaan)` — nilainya, atau `bawaan` kalau kuncinya tidak ada.
@@ -140,10 +135,18 @@ impl Codegen {
     /// `dict::set(d, k, v)` — dict BARU; aslinya tidak berubah.
     fn dict_pasang(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         let (d, vty) = self.arg_dict(&args[0], "set", span)?;
-        let d = self.salin_dict(&d);
         let k = self.kunci_dict(&args[1], span)?;
-        let v = self.codegen_expr(&args[2], Some(&vty))?;
+        // Nilai berjenis lain dari isinya (`{"a": 1}` lalu teks): dict-nya jadi bernilai bertag,
+        // seperti di dua mesin acuan — bukan ditolak.
+        let jenis_v = self.peek_expr_type(&args[2]).or_else(|| super::codegen_expr::tipe_bawaan_ekspresi(&args[2]));
+        let petunjuk = match &jenis_v { Some(t) if !super::codegen_any::ganti_jenis_isi(&vty, t) => Some(vty.clone()), _ => None };
+        let v = self.codegen_expr(&args[2], petunjuk.as_ref())?;
         let v = self.ambil_milik(&args[2], v)?;
+        let (d, vty) = if super::codegen_any::ganti_jenis_isi(&vty, &v.ty) {
+            let any = JrgType::Dict(Box::new(JrgType::Any));
+            (self.coerce(&d, &any), JrgType::Any)
+        } else { (d, vty) };
+        let d = self.salin_dict(&d);
         let v = self.coerce(&v, &vty);
         let (tempat, baru) = self.dict_tempat_tulis(&d, &k, span)?;
         if vty != JrgType::Unit {
@@ -162,11 +165,11 @@ impl Codegen {
     }
 
     /// Tipe LLVM satu pasangan `{ %JrgStr, V }`.
-    fn tipe_pasangan(&self, v: &JrgType) -> String {
+    pub(crate) fn tipe_pasangan(&self, v: &JrgType) -> String {
         format!("{{ %JrgStr, {} }}", v.llvm_ty())
     }
 
-    fn ukuran_pasangan(&self, v: &JrgType) -> u64 {
+    pub(crate) fn ukuran_pasangan(&self, v: &JrgType) -> u64 {
         // Kunci `%JrgStr` 16 byte dan align 8; nilai mengikuti perataannya
         // sendiri, jadi ukurannya dibulatkan seperti struct LLVM.
         let uv = self.types.sizeof(v);
@@ -238,7 +241,7 @@ impl Codegen {
 
     /// `{ "a": 1, "b": 2 }` — diturunkan parser jadi `dict::from_pairs([[k, v],
     /// …])`.
-    fn dict_dari_pasangan(&mut self, arg: &Expr, span: Span) -> Result<Val, String> {
+    pub(crate) fn dict_dari_pasangan(&mut self, arg: &Expr, harap: Option<&JrgType>, span: Span) -> Result<Val, String> {
         let Expr::Array { elems, .. } = arg else {
             return Err(super::galat::tandai(span,
                 "`dict::from_pairs` butuh daftar pasangan `[[kunci, nilai], …]`"
@@ -260,11 +263,10 @@ impl Codegen {
             pasangan.push((&kv[0], &kv[1]));
         }
 
+        // Kosong: tipe nilainya dari tempatnya, seperti `dict::new()`; tanpa petunjuk, bertag.
         if pasangan.is_empty() {
-            return Err(super::galat::tandai(span,
-                "dict kosong tidak menyebut tipe nilainya, dan backend LLVM \
-                 tidak punya tempat untuk menyimpulkannya\n\
-                 bantuan: bangun dengan setidaknya satu isi".to_string()));
+            let v = match harap { Some(JrgType::Dict(v)) => (**v).clone(), _ => JrgType::Any };
+            return self.dict_kosong_bertipe(&v);
         }
 
         // Semua kunci dan nilai diturunkan TEPAT SEKALI, lalu tipenya disatukan.
@@ -289,6 +291,13 @@ impl Codegen {
                         let luruh = self.coerce(v, &target);
                         *v = self.salin_slice(&luruh);
                     }
+                    target
+                }
+                // Semuanya dict, berlainan tipe isinya (`{"a": {"k": "x"}, "b": {"p": 1}}`): dict bernilai
+                // bertag, bukan nilai bertag — `for k, v in d["b"]` lalu tetap perulangan dict.
+                (true, _) if nilai.iter().all(|v| matches!(v.ty, JrgType::Dict(_) | JrgType::DictCampur(_))) => {
+                    let target = JrgType::Dict(Box::new(JrgType::Any));
+                    for v in nilai.iter_mut() { *v = self.coerce(v, &target); }
                     target
                 }
                 // Tipe nilainya benar-benar campur.
@@ -371,7 +380,7 @@ impl Codegen {
             return Err(super::galat::tandai(span, "bukan dict".to_string()));
         };
         let vty = (**vty).clone();
-        let (idx, p, _n) = self.cari_kunci(d, &vty, k);
+        let (idx, p, n) = self.cari_kunci(d, &vty, k);
 
         let ada = self.fresh("dba.");
         self.emit(format!("{} = icmp sge i64 {}, 0", ada, idx));
@@ -380,12 +389,21 @@ impl Codegen {
         self.terminate_unlikely_true(&ada, &ok, &hilang);
 
         self.start_block(hilang);
-        self.ensure_extern(
-            "declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
-        let pesan = self.intern_string(
-            "kunci ini tidak ada di dict — cek dulu dengan `dict::has` atau pakai `dict::get`");
-        let (mp, ml) = self.split_str(&pesan);
-        self.emit(format!("call void @jrg_panic(ptr {}, i64 {})", mp, ml));
+        // Kalimatnya disusun runtime dari kunci yang ada (`galat_index::key_hilang`).
+        self.ensure_extern("declare void @jrg_panic_kunci_hilang(ptr, i64, i64, ptr, i64) cold nounwind noreturn",
+                           "jrg_panic_kunci_hilang");
+        let uk = self.ukuran_pasangan(&vty);
+        if let Some((a, b)) = self.pesan_field_dict.get(&(span.lo.0, span.hi.0)).cloned() {
+            self.ensure_extern("declare void @jrg_panic_field_dict(ptr, i64, i64, ptr, i64, ptr, i64) cold nounwind noreturn",
+                               "jrg_panic_field_dict");
+            let (a, b) = (self.intern_string(&a), self.intern_string(&b));
+            let ((ap, al), (bp, bl)) = (self.split_str(&a), self.split_str(&b));
+            self.emit(format!("call void @jrg_panic_field_dict(ptr {}, i64 {}, i64 {}, ptr {}, i64 {}, ptr {}, i64 {})",
+                              p, n, uk, ap, al, bp, bl));
+        } else {
+            let (kp, kl) = self.split_str(k);
+            self.emit(format!("call void @jrg_panic_kunci_hilang(ptr {}, i64 {}, i64 {}, ptr {}, i64 {})", p, n, uk, kp, kl));
+        }
         self.terminate("unreachable".to_string());
 
         self.start_block(ok);
@@ -645,6 +663,12 @@ impl Codegen {
     fn dict_gabung(&mut self, args: &[Expr], span: Span) -> Result<Val, String> {
         let (a, vty) = self.arg_dict(&args[0], "merge", span)?;
         let (b, vty2) = self.arg_dict(&args[1], "merge", span)?;
+        // Jenis isi yang berbeda: hasilnya dict bernilai bertag, seperti `dict::set` (dulu ditolak).
+        let (a, b, vty, vty2) = if vty != vty2 && (super::codegen_any::ganti_jenis_isi(&vty, &vty2)
+            || super::codegen_any::ganti_jenis_isi(&vty2, &vty)) {
+            let any = JrgType::Dict(Box::new(JrgType::Any));
+            (self.coerce(&a, &any), self.coerce(&b, &any), JrgType::Any, JrgType::Any)
+        } else { (a, b, vty, vty2) };
         if vty != vty2 {
             return Err(super::galat::tandai(span, format!(
                 "`dict::merge` butuh dua dict dengan tipe nilai sama, diberi `{}` dan `{}`",

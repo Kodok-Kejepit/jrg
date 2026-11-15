@@ -5,6 +5,11 @@ use crate::parser::Expr;
 
 use super::codegen::{Codegen, Val};
 use super::types::JrgType;
+use crate::parser::Pattern;
+
+/// Fungsi yang diserahkan ke HOF: nilainya, atau kalimat gagal saat dipanggil.
+#[derive(Clone)]
+struct HofFn { f: Result<Val, String>, ret: JrgType, span: Span }
 
 impl Codegen {
     /// Layani method tingkat-tinggi atas koleksi. `None` kalau namanya bukan
@@ -47,11 +52,21 @@ impl Codegen {
             None => vec![elem.clone()],
         };
         let f = self.turunkan_fungsi_arg(&args[i_fungsi], &ptys, span)?;
-        let JrgType::Fn(_, fret) = f.ty.clone() else {
-            return Err(super::galat::tandai(span, format!(
-                "`{}` butuh sebuah fungsi, diberi `{}`", method, f.ty.display_name())));
+        // Yang bukan fungsi gagal saat DIPANGGIL, seperti acuan: koleksi kosong tidak pernah gagal.
+        let fret = match &f {
+            Ok(v) => match &v.ty {
+                JrgType::Fn(_, r) => (**r).clone(),
+                lain => return Err(super::galat::tandai(span, format!(
+                    "`{}` butuh sebuah fungsi, diberi `{}`", method, lain.display_name()))),
+            },
+            Err(_) => match method {
+                "map" => JrgType::Any,
+                "each" => JrgType::Unit,
+                "reduce" | "fold" => awal.as_ref().map(|a| a.ty.clone()).unwrap_or(JrgType::Any),
+                _ => JrgType::Bool,
+            },
         };
-        let fret = *fret;
+        let f = HofFn { f, ret: fret.clone(), span };
 
         let tempat = self.spill_to_place(obj);
         let (data, n) = self.data_dan_panjang(&tempat, &obj.ty, elem);
@@ -59,13 +74,15 @@ impl Codegen {
             "each" => {
                 let f = f.clone();
                 self.loop_hof(&data, &n, elem, |cg, v| {
-                    cg.panggil_val(&f, &[v])?;
+                    cg.panggil_hof(&f, &[v])?;
                     Ok(())
                 })?;
                 Ok(Val::unit())
             }
             "map" | "filter" => {
-                let hasil_elem = if method == "map" { fret.clone() } else { elem.clone() };
+                // Hasil `map` berupa array berukuran tetap disimpan sebagai slice, seperti `push`:
+                // `arr::map(a, |x| ["=", x])` lalu bisa disambung dengan array yang tumbuh.
+                let hasil_elem = if method == "map" { super::codegen_any::luruh(&fret) } else { elem.clone() };
                 let buf = self.buffer_baru(&n, &hasil_elem);
                 let buf_k = buf.clone();
                 let cacah = self.alloca_raw("hofc.", "i64", Some(8));
@@ -75,8 +92,8 @@ impl Codegen {
                 let he = hasil_elem.clone();
                 let is_map = method == "map";
                 self.loop_hof(&data, &n, elem, move |cg, v| {
-                    let r = cg.panggil_val(&f, &[v.clone()])?;
-                    let (simpan, isi) = if is_map { (true, r) } else {
+                    let r = cg.panggil_hof(&f, &[v.clone()])?;
+                    let (simpan, isi) = if is_map { (true, cg.coerce(&r, &he)) } else {
                         let b = cg.to_i1(&r);
                         let ya = cg.fresh_label("hof.ya.");
                         let usai = cg.fresh_label("hof.usai.");
@@ -124,7 +141,7 @@ impl Codegen {
                 let f = f.clone();
                 self.loop_hof(&data, &n, elem, move |cg, v| {
                     let a = cg.load_place(&akum_k, &aty);
-                    let r = cg.panggil_val(&f, &[a, v])?;
+                    let r = cg.panggil_hof(&f, &[a, v])?;
                     let r = cg.coerce(&r, &aty);
                     if aty != JrgType::Unit {
                         cg.emit(format!("store {} {}, ptr {}", aty.llvm_ty(), r.text, akum_k));
@@ -142,7 +159,7 @@ impl Codegen {
                 self.emit(format!("store i8 {}, ptr {}", if semua { 1 } else { 0 }, slot));
                 let f = f.clone();
                 self.loop_hof(&data, &n, elem, move |cg, v| {
-                    let r = cg.panggil_val(&f, &[v])?;
+                    let r = cg.panggil_hof(&f, &[v])?;
                     let b = cg.to_i1(&r);
                     let ubah = cg.fresh_label("hof.ubah.");
                     let usai = cg.fresh_label("hof.usai.");
@@ -183,7 +200,7 @@ impl Codegen {
                     cg.terminate(format!("br i1 {}, label %{}, label %{}", s1, usai, cek));
 
                     cg.start_block(cek);
-                    let r = cg.panggil_val(&f, &[v.clone()])?;
+                    let r = cg.panggil_hof(&f, &[v.clone()])?;
                     let b = cg.to_i1(&r);
                     let isi = cg.fresh_label("hof.isi.");
                     cg.terminate(format!("br i1 {}, label %{}, label %{}", b, isi, usai));
@@ -210,26 +227,86 @@ impl Codegen {
 
     /// Turunkan argumen fungsi sebuah HOF, dengan tipe parameternya sudah
     /// diketahui tapi tipe hasilnya belum.
+    /// `Err` di dalam berarti kalimat acuan yang diucapkan saat fungsinya dipanggil.
     fn turunkan_fungsi_arg(&mut self, e: &Expr, ptys: &[JrgType], span: Span)
-        -> Result<Val, String>
+        -> Result<Result<Val, String>, String>
     {
         // `is_move` DIBACA, bukan dibuang lewat `..`.
         if let Expr::Closure { params, body, is_move, .. } = e {
             if params.len() != ptys.len() {
-                return Err(super::galat::tandai(span, format!(
-                    "fungsi di sini butuh {} parameter, closure ini punya {}",
-                    ptys.len(), params.len())));
+                let polos = params.iter().all(|p| p.default.is_none() && !p.is_variadic);
+                if !polos {
+                    return Err(super::galat::tandai(span, format!(
+                        "fungsi di sini butuh {} parameter, closure ini punya {}",
+                        ptys.len(), params.len())));
+                }
+                let nama: Vec<String> = params.iter().map(|p| match &p.pattern {
+                    Pattern::Ident { name, .. } => name.clone(),
+                    _ => String::new(),
+                }).collect();
+                return Ok(Err(Self::pesan_aritas_hof("<closure>", &nama, ptys.len())));
             }
-            return self.closure_dgn_params(params, body, ptys, *is_move, span);
+            return self.closure_dgn_params(params, body, ptys, *is_move, span).map(Ok);
+        }
+        // Nama builtin (`xs.filter(str::is_numeric)`, `xs.map(abs)`): closure `<native fn>` dengan tipe
+        // parameter dari elemennya, jalur yang sama dengan closure literal.
+        let bawaan = match e {
+            Expr::Ident(n, _) if self.lookup_local(n).is_none() && !self.tables.functions.contains_key(&self.k(n)) => Some(n.clone()),
+            Expr::PathExpr { segments, .. } if segments.len() == 2 && self.unit_alias(&segments[0]).is_none() => Some(segments.join("::")),
+            _ => None,
+        };
+        if let Some(Expr::Closure { params, body, .. }) = bawaan.and_then(|n| self.closure_bawaan(&n, span, Some(ptys.len()))) {
+            if params.len() == ptys.len() {
+                self.closure_bernama = Some("<native fn>".to_string());
+                let r = self.closure_dgn_params(&params, &body, ptys, false, span);
+                self.closure_bernama = None;
+                return r.map(Ok);
+            }
         }
         // Bukan closure literal — sebuah nama fungsi, atau ekspresi apa pun
         // yang menghasilkan nilai fungsi.
         let v = self.codegen_expr(e, None)?;
-        if !matches!(v.ty, JrgType::Fn(..)) {
-            return Err(super::galat::tandai(span, format!(
-                "butuh sebuah fungsi di sini, diberi `{}`", v.ty.display_name())));
+        match &v.ty {
+            JrgType::Fn(ps, _) if ps.len() != ptys.len() => {
+                let decl = match e {
+                    Expr::Ident(n, _) if self.lookup_local(n).is_none() =>
+                        self.tables.functions.get(&self.k(n)).cloned().map(|d| (n.clone(), d)),
+                    _ => None,
+                };
+                let Some((n, d)) = decl.filter(|(_, d)| d.params.iter().all(|p| p.default.is_none() && !p.is_variadic))
+                else { return Ok(Ok(v)); };
+                let nama: Vec<String> = d.params.iter().map(|p| match &p.pattern {
+                    Pattern::Ident { name, .. } => name.clone(),
+                    _ => String::new(),
+                }).collect();
+                Ok(Err(Self::pesan_aritas_hof(&n, &nama, ptys.len())))
+            }
+            JrgType::Fn(..) => Ok(Ok(v)),
+            lain => Ok(Err(crate::interpreter::pesan_bukan_fungsi(&lain.nama_typeof()))),
         }
-        Ok(v)
+    }
+
+    /// Kalimat acuan untuk fungsi yang dipanggil dengan `diberi` argumen.
+    fn pesan_aritas_hof(fnama: &str, param: &[String], diberi: usize) -> String {
+        if param.len() > diberi {
+            crate::interpreter::pesan_parameter_wajib(fnama, &param[diberi], diberi + 1)
+        } else {
+            crate::interpreter::pesan_fungsi_kebanyakan(fnama, param.len(), diberi, param)
+        }
+    }
+
+    /// Memanggil fungsi sebuah HOF, atau gagal di situ dengan kalimat acuan.
+    fn panggil_hof(&mut self, f: &HofFn, args: &[Val]) -> Result<Val, String> {
+        match &f.f {
+            Ok(v) => self.panggil_val(v, args),
+            Err(pesan) => {
+                let lama = self.span_kini.replace(f.span);
+                let r = self.gagal_sesudah_argumen(pesan, &[]);
+                self.span_kini = lama;
+                r?;
+                Ok(if f.ret == JrgType::Unit { Val::unit() } else { Val { text: "undef".into(), ty: f.ret.clone() } })
+            }
+        }
     }
 
     /// Loop atas `n` elemen mulai dari `ptr`. Sama bentuknya dengan

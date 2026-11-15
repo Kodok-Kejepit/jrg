@@ -140,19 +140,6 @@ impl Biner {
     fn logika(self) -> bool { matches!(self, Biner::Dan | Biner::Atau) }
 }
 
-fn f_op(op: Biner, x: f64, y: f64) -> f64 {
-    match op {
-        Biner::Tambah => x + y, Biner::Kurang => x - y,
-        Biner::Kali => x * y, Biner::Bagi => x / y,
-        Biner::Pangkat => x.powf(y), Biner::Sisa => x % y,
-        // NaN menular, bukan diam-diam kalah. `min` yang mengabaikan NaN
-        // akan menjawab angka yang tampak sah untuk data yang jelas rusak.
-        Biner::Min => if x.is_nan() || y.is_nan() { f64::NAN } else { x.min(y) },
-        Biner::Maks => if x.is_nan() || y.is_nan() { f64::NAN } else { x.max(y) },
-        _ => unreachable!("pembanding/logika tidak lewat f_op"),
-    }
-}
-
 fn i_op(op: Biner, x: i64, y: i64) -> Hasil<i64> {
     let luber = |o: &str| format!(
         "wokwok: `{} {} {}` kelewat besar buat integer 64 bit", x, o, y);
@@ -168,15 +155,6 @@ fn i_op(op: Biner, x: i64, y: i64) -> Hasil<i64> {
         Biner::Maks => x.max(y),
         _ => unreachable!("op ini tidak dilayani jalur integer"),
     })
-}
-
-fn banding(op: Biner, x: f64, y: f64) -> bool {
-    match op {
-        Biner::Sama => x == y, Biner::Beda => x != y,
-        Biner::Kurang_ => x < y, Biner::KurangSama => x <= y,
-        Biner::Lebih => x > y, Biner::LebihSama => x >= y,
-        _ => unreachable!(),
-    }
 }
 
 /// Operasi biner dengan broadcasting.

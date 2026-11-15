@@ -158,17 +158,17 @@ impl Interpreter {
             TimeHour   => { let ms = ms_arg(args)?; Ok(Value::Int(breakdown(ms).3 as i128)) }
             TimeMinute => { let ms = ms_arg(args)?; Ok(Value::Int(breakdown(ms).4 as i128)) }
             TimeSecond => { let ms = ms_arg(args)?; Ok(Value::Int(breakdown(ms).5 as i128)) }
-            TimeWeekday => { let ms = ms_arg(args)?; Ok(Value::Str(breakdown(ms).7.to_string())) }
+            TimeWeekday => { let ms = ms_arg(args)?; Ok(Value::Str(std::sync::Arc::new(breakdown(ms).7.to_string()))) }
 
             TimeFormat => {
                 let ms = ms_arg(args)?;
                 match args.get(1) {
                     None => {
                         let (y, mo, d, hh, mm, ss, _, _) = breakdown(ms);
-                        Ok(Value::Str(format!(
+                        Ok(Value::teks(format!(
                             "{:04}-{:02}-{:02} {:02}:{:02}:{:02}", y, mo, d, hh, mm, ss)))
                     }
-                    Some(Value::Str(pola)) => Ok(Value::Str(format_waktu(ms, pola)?)),
+                    Some(Value::Str(pola)) => Ok(Value::Str(std::sync::Arc::new(format_waktu(ms, pola)?))),
                     Some(lain) => runtime_err!(
                         "time::format: polanya harus string, dapat `{}`", lain.type_name()),
                 }

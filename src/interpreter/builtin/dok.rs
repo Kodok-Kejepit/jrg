@@ -148,6 +148,7 @@ impl Interpreter {
             CryptoSha256        => crate::dok::crypto::f_sha256(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             CryptoSha512        => crate::dok::crypto::f_sha512(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             CryptoHmacSha256    => crate::dok::crypto::f_hmac_sha256(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
+            CryptoCompareDigest => crate::dok::crypto::f_compare_digest(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             CryptoCrc32         => crate::dok::crypto::f_crc32(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             CryptoBase64Encode  => crate::dok::crypto::f_base64_encode(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             CryptoBase64Decode  => crate::dok::crypto::f_base64_decode(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),

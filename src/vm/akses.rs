@@ -48,12 +48,15 @@ impl Vm {
             }
             // FIELD bernama sama, tanpa method: dulu isinya dipanggil dengan
             // penerimanya disisipkan sebagai argumen pertama — dan BERHASIL.
-            let punya_field = m.lock().unwrap().get(name)
-                .is_some_and(|v| v.bisa_dipanggil());
-            if punya_field {
+            let isi = m.lock().unwrap().get(name).map(|v| v.bisa_dipanggil());
+            if isi == Some(true) {
                 let t = m.nama_tipe().unwrap_or("dict").to_string();
                 return Err(VmError::at(
                     crate::interpreter::galat_index::field_fungsi_bukan_metode(&t, name), sp));
+            }
+            // Field yang bukan fungsi bukan method: kalimat acuan, bukan "`int` bukan fungsi".
+            if isi == Some(false) && !matches!(m.label, Label::Enum { .. }) {
+                return Err(self.galat_tak_punya(m, name, sp));
             }
         }
         self.get_field_pintu(obj, name, sp, true)
@@ -76,7 +79,7 @@ impl Vm {
             VmValue::Sinkron(p) => p.ns_metode()?,
             VmValue::Map(m) => match &m.label {
                 Label::Dict => "dict",
-                Label::Enum { tipe, .. } if matches!(tipe.as_ref(), "Option" | "Result") => tipe.as_ref(),
+                Label::Enum { nama, .. } if matches!(nama.tipe.as_ref(), "Option" | "Result") => nama.tipe.as_ref(),
                 _ => return None,
             },
             _ => return None,
@@ -116,6 +119,10 @@ impl Vm {
     /// field menyerahkan methodnya sebagai nilai, sementara acuan memanggilnya.
     pub(crate) fn get_field_pintu(&self, obj: &VmValue, name: &str, sp: Option<crate::lexer::Span>,
                                   pintu_metode: bool) -> VmResult<VmValue> {
+        // Field yang ada di struct/dict selalu menang di dua pintu (langkah 1 `get_field_khusus`).
+        if let VmValue::Map(m) = obj {
+            if let Some(v) = m.lock().unwrap().get(name) { return Ok(v.clone()); }
+        }
         if !pintu_metode {
             let tn = obj.type_name();
             if matches!(obj, VmValue::Asing(_)) {
@@ -138,6 +145,24 @@ impl Vm {
         }
     }
 
+    /// Struct/dict tanpa method (atau field) `name`; menyebut field/key yang MEMANG ada, karena
+    /// pembacanya biasanya salah ketik key, bukan salah ketik method.
+    fn galat_tak_punya(&self, m: &super::value::Peta, name: &str, sp: Option<crate::lexer::Span>) -> VmError {
+        let ns = m.nama_tipe().unwrap_or("dict");
+        let tipe = match &m.label {
+            Label::Struct(n) => format!("struct {}", n),
+            _ => "dict".to_string(),
+        };
+        let mut punya: Vec<String> = m.lock().unwrap().keys().map(|k| k.to_string()).collect();
+        punya.sort();
+        let tambahan = if punya.is_empty() { String::new() } else {
+            format!(" (kalau maksudnya field/key, yang ada: {})", punya.join(", "))
+        };
+        let calon = self.nama_metode_tipe(ns);
+        let saran = crate::diag::saran_nama_terdekat(name, calon.iter().map(|s| s.as_str()));
+        VmError::at(crate::interpreter::pesan_method_tak_ada(&tipe, name, &tambahan, saran.as_deref()), sp)
+    }
+
     fn get_field_khusus(&self, obj: &VmValue, name: &str, sp: Option<crate::lexer::Span>) -> VmResult<VmValue> {
         match obj {
             VmValue::Map(m) => {
@@ -153,7 +178,8 @@ impl Vm {
                         crate::interpreter::galat_index::metode_tanpa_kurung(ns, name), sp));
                 }
                 // Tidak ada langkah ketiga.
-                if let Label::Enum { tipe, .. } = &m.label {
+                if let Label::Enum { nama, .. } = &m.label {
+                    let tipe = &nama.tipe;
                     let mut calon: Vec<String> = crate::interpreter::calon_method_enum(tipe)
                         .iter().map(|s| s.to_string()).collect();
                     calon.extend(self.nama_metode_tipe(tipe));
@@ -162,23 +188,7 @@ impl Vm {
                     return Err(VmError::at(crate::interpreter::pesan_method_tak_ada(
                         &format!("enum:{}", tipe), name, "", saran.as_deref()), sp));
                 }
-                Err({
-                    let tipe = match &m.label {
-                        Label::Struct(n) => format!("struct {}", n),
-                        _ => "dict".to_string(),
-                    };
-                    // Sebut field/key yang MEMANG ada — pembacanya biasanya salah ketik
-                    // key, bukan salah ketik method.
-                    let mut punya: Vec<String> = m.lock().unwrap().keys().cloned().collect();
-                    punya.sort();
-                    let tambahan = if punya.is_empty() { String::new() } else {
-                        format!(" (kalau maksudnya field/key, yang ada: {})", punya.join(", "))
-                    };
-                    let calon = self.nama_metode_tipe(ns);
-                    let saran = crate::diag::saran_nama_terdekat(name, calon.iter().map(|s| s.as_str()));
-                    VmError::at(crate::interpreter::pesan_method_tak_ada(
-                        &tipe, name, &tambahan, saran.as_deref()), sp)
-                })
+                Err(self.galat_tak_punya(m, name, sp))
             }
             // Method kanvas dicari di namespace `canvas::`, pola yang sama
             // dengan array (`arr::`) dan channel (`chan::`).
@@ -211,7 +221,7 @@ impl Vm {
                         .ok_or_else(|| VmError::at(self.pesan_method_hilang("array", "arr", name), sp)),
             }
             VmValue::Str(s) => match name {
-                "len"  => Ok(VmValue::Int(s.chars().count() as i128)),
+                "len"  => Ok(VmValue::Int(crate::vm::value::jumlah_karakter(s) as i128)),
                 "is_empty" => Ok(VmValue::Bool(s.is_empty())),
                 // Ejaan kedua yang ada di acuan sebagai method dan tidak punya
                 // bentuk `str::` sama sekali.
@@ -233,11 +243,9 @@ impl Vm {
                 _ if name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() => {
                     let i: usize = name.parse().map_err(|_| VmError::at(
                         format!("index tuple `{}` kegedean", name), sp))?;
-                    t.get(i).cloned().ok_or_else(|| VmError::at(format!(
-                        "index tuple .{} di luar batas — tuple ini isinya {} elemen \
-                         (index valid: 0..{})",
-                        i, t.len(), t.len().saturating_sub(1)
-                    ), sp))
+                    // Kalimat yang sama dengan interpreter dan jalur tulis `t.7[0] = ..` (dulu kalimat sendiri).
+                    t.get(i).cloned().ok_or_else(|| VmError::at(
+                        crate::interpreter::Interpreter::oob_msg("tuple", "elemen", i as i128, t.len()), sp))
                 }
                 // Tuple tidak punya namespace method, jadi tidak ada calon
                 // untuk disarankan — yang sah cuma indeks numerik.
@@ -333,7 +341,7 @@ impl Vm {
                         }
                     }
                 }
-                m.lock().unwrap().insert(name.to_string(), val);
+                m.sisip(name.to_string(), val);
                 Ok(())
             }
             _ => Err(VmError::at(
@@ -342,8 +350,8 @@ impl Vm {
     }
 
 /// Kalimat untuk key/field yang tidak ada di sebuah dict atau struct.
-fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue>, k: &str) -> String {
-    let ada: Vec<String> = g.keys().cloned().collect();
+fn pesan_map_hilang(label: &Label, g: &crate::vm::value::IsiPeta, k: &str) -> String {
+    let ada: Vec<String> = g.keys().map(|k| k.to_string()).collect();
     match label {
         Label::Struct(t) => crate::interpreter::galat_index::field_hilang(t, k, &ada),
         _ => crate::interpreter::galat_index::key_hilang(k, &ada),
@@ -362,19 +370,18 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
                 let i = norm_idx(*i, t.len(), "tuple", "elemen", sp)?;
                 Ok(t[i].clone())
             }
-            (VmValue::Str(s), VmValue::Int(i)) => {
-                let chars: Vec<char> = s.chars().collect();
-                let i = norm_idx(*i, chars.len(), "string", "karakter", sp)?;
-                // Satu karakter dari string adalah RUNE, bukan string
-                // sepanjang satu — sama seperti interpreter, sehingga
-                // `"halo"[-1] == 'o'` bernilai benar di kedua backend.
-                Ok(VmValue::Rune(chars[i]))
-            }
+            // Satu karakter dari string adalah RUNE (`"halo"[-1] == 'o'`), seperti interpreter.
+            (VmValue::Str(s), VmValue::Int(i)) => match crate::interpreter::karakter_ke(s.as_str(), *i) {
+                Ok(c) => Ok(VmValue::Rune(c)),
+                Err(n) => { norm_idx(*i, n, "string", "karakter", sp)?; unreachable!("di luar batas sudah ditolak") }
+            },
             // Enum bukan wadah: `o["variant"]` dulu membaca label yang tersimpan sebagai kunci.
             (VmValue::Map(m), _) if matches!(m.label, Label::Enum { .. }) => Err(VmError::at(
                 crate::interpreter::galat_index::bukan_wadah(&obj.type_name_penuh()), sp)),
             (VmValue::Map(m), key) => {
                 let k = format!("{}", key);
+                // `p["x"]` atas struct dijaga privasinya seperti `p.x`.
+                if matches!(m.label, Label::Struct(_)) { self.periksa_visibilitas(obj, &k, sp)?; }
                 let g = m.lock().unwrap_or_else(|p| p.into_inner());
                 match g.get(&k) {
                     Some(v) => Ok(v.clone()),
@@ -423,6 +430,7 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
                 crate::interpreter::galat_index::tipe_index_salah("tuple", &i.type_name_penuh()), sp)),
             (VmValue::Map(m), key) => {
                 let k = format!("{}", key);
+                if matches!(m.label, Label::Struct(_)) { self.periksa_visibilitas(induk, &k, sp)?; }
                 if let Some(slot) = m.lock().unwrap_or_else(|p| p.into_inner()).get_mut(&k) {
                     slot.pisahkan();
                     return Ok(slot.clone());
@@ -455,6 +463,10 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
         }
         match induk {
             VmValue::Map(m) => {
+                // Field antara yang privat tidak bisa dilewati untuk menulis ke dalamnya (`p.q.y = 4`).
+                if matches!(m.label, Label::Struct(_)) && crate::vm::visibilitas::perlu_diperiksa(name) {
+                    self.periksa_visibilitas(induk, name, sp)?;
+                }
                 if let Some(slot) = m.lock().unwrap_or_else(|p| p.into_inner()).get_mut(name) {
                     slot.pisahkan();
                     return Ok(slot.clone());
@@ -496,8 +508,14 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
             }
             (VmValue::Tuple(_), i) => Err(VmError::at(
                 crate::interpreter::galat_index::tipe_index_salah("tuple", &i.type_name_penuh()), sp)),
+            // `p["x"] = v` atas struct adalah `p.x = v`: privasi dan field yang tak dideklarasikan ikut.
+            (VmValue::Map(m), _) if matches!(m.label, Label::Struct(_)) => {
+                let k = format!("{}", idx);
+                self.periksa_visibilitas(obj, &k, sp)?;
+                self.set_field(obj, &k, val, sp)
+            }
             (VmValue::Map(m), _) if !matches!(m.label, Label::Enum { .. }) => {
-                m.lock().unwrap().insert(format!("{}", idx), val);
+                m.lock().unwrap().insert(super::value::Kunci::dari_nilai(&idx), val);
                 Ok(())
             }
             // Kalimat yang sama dengan langkah tengah (`pinjam_index`) dan dengan interpreter.
@@ -508,65 +526,56 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
         }
     }
 
-    /// Menyelesaikan satu batas potongan terhadap panjang.
+    /// Menyelesaikan satu batas potongan terhadap panjang; `None` = batas tidak ditulis.
     pub(crate) fn batas_potongan(
         &self,
-        nilai: Option<i128>,
+        nilai: Option<&VmValue>,
         bawaan: usize,
         panjang: usize,
         sisi: &str,
         sp: Option<crate::lexer::Span>,
     ) -> VmResult<usize> {
-        let Some(i) = nilai else { return Ok(bawaan) };
-        let diselesaikan = if i < 0 { i + panjang as i128 } else { i };
+        use crate::interpreter::galat_index as g;
+        let Some(v) = nilai else { return Ok(bawaan) };
+        let VmValue::Int(i) = v else {
+            return Err(VmError::at(g::batas_potongan_tipe(sisi, &v.type_name_penuh()), sp));
+        };
+        let diselesaikan = if *i < 0 { i + panjang as i128 } else { *i };
         if diselesaikan < 0 || diselesaikan > panjang as i128 {
-            return Err(VmError::at(
-                format!(
-                    "batas {} potongan [{}] di luar jangkauan — panjangnya {}, jadi batas yang sah 0..{} (atau -1..-{} kalau dihitung dari belakang)",
-                    sisi, i, panjang, panjang, panjang
-                ),
-                sp,
-            ));
+            return Err(VmError::at(g::batas_potongan_luar(sisi, *i, panjang), sp));
         }
         Ok(diselesaikan as usize)
     }
 
+    /// `obj[lo:hi]`: wadahnya diperiksa dulu, lalu batas awal, lalu akhir — urutan interpreter.
     pub(crate) fn slice_value(
         &self,
         obj: &VmValue,
-        lo: Option<i128>,
-        hi: Option<i128>,
+        lo: Option<&VmValue>,
+        hi: Option<&VmValue>,
         sp: Option<crate::lexer::Span>,
     ) -> VmResult<VmValue> {
+        use crate::interpreter::galat_index as g;
         let panjang = match obj {
             VmValue::Array(a) => a.lock().unwrap_or_else(|p| p.into_inner()).len(),
-            VmValue::Str(s) => s.chars().count(),
-            other => {
-                return Err(VmError::at(
-                    format!("tidak bisa slice `{}`", other.type_name_penuh()),
-                    sp,
-                ))
-            }
+            VmValue::Str(s) => crate::vm::value::jumlah_karakter(s),
+            VmValue::Tuple(t) => t.lock().unwrap_or_else(|p| p.into_inner()).len(),
+            other => return Err(VmError::at(g::bukan_bisa_dipotong(&other.type_name_penuh()), sp)),
         };
         let awal = self.batas_potongan(lo, 0, panjang, "awal", sp)?;
         let akhir = self.batas_potongan(hi, panjang, panjang, "akhir", sp)?;
         if awal > akhir {
-            return Err(VmError::at(
-                format!(
-                    "potongan [{}:{}] terbalik — batas awal ({}) lebih besar dari batas akhir ({}); tulis yang kecil dulu, mis. [{}:{}]",
-                    awal, akhir, awal, akhir, akhir, awal
-                ),
-                sp,
-            ));
+            return Err(VmError::at(g::potongan_terbalik(awal, akhir), sp));
         }
         match obj {
             VmValue::Array(a) => {
                 let a = a.lock().unwrap_or_else(|p| p.into_inner());
                 Ok(VmValue::array(a[awal..akhir].to_vec()))
             }
-            VmValue::Str(s) => {
-                let chars: Vec<char> = s.chars().collect();
-                Ok(VmValue::str(chars[awal..akhir].iter().collect::<String>()))
+            VmValue::Str(s) => Ok(VmValue::str(crate::interpreter::potong_karakter(s, panjang, awal, akhir))),
+            VmValue::Tuple(t) => {
+                let t = t.lock().unwrap_or_else(|p| p.into_inner());
+                Ok(VmValue::tuple(t[awal..akhir].to_vec()))
             }
             _ => unreachable!("tipe sudah diperiksa di atas"),
         }
@@ -574,7 +583,7 @@ fn pesan_map_hilang(label: &Label, g: &std::collections::HashMap<String, VmValue
 
     pub(crate) fn vm_len(&self, val: &VmValue, sp: Option<crate::lexer::Span>) -> VmResult<usize> {
         match val {
-            VmValue::Str(s)     => Ok(s.chars().count()),
+            VmValue::Str(s)     => Ok(crate::vm::value::jumlah_karakter(s)),
             VmValue::Array(a)   => Ok(a.lock().unwrap().len()),
             VmValue::Tuple(t)   => Ok(t.lock().unwrap_or_else(|p| p.into_inner()).len()),
             VmValue::Map(m)     => Ok(m.lock().unwrap().len()),

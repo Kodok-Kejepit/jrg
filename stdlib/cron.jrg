@@ -1,0 +1,134 @@
+package std_cron
+
+import "std/tanggal"
+
+// Ekspresi cron lima kolom (menit jam hari-bulan bulan hari-pekan): `*`, angka, `a-b`, `a,b`, `*/n`, `a-b/n`, nama
+// bulan/hari (`jan`, `mon`). Langkah 0, rentang terbalik, angka di luar batas dan kolom kosong jadi `Err`. Kalau
+// hari-bulan DAN hari-pekan sama-sama dibatasi, cukup salah satu yang cocok (aturan Vixie cron, ditulis di sini).
+
+pub struct Jadwal {
+    pub teks: string,
+    pub menit: array,
+    pub jam: array,
+    pub hari: array,
+    pub bulan: array,
+    pub pekan: array,
+    pub hari_bebas: bool,
+    pub pekan_bebas: bool,
+}
+
+const _BULAN = ["jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec"]
+const _PEKAN = ["sun", "mon", "tue", "wed", "thu", "fri", "sat"]
+
+fn _angka(t, nama, lo, nama_nama) {
+    let k = str::lower(t)
+    for i, n in nama_nama {
+        if n == k { return Ok(i + lo) }
+    }
+    if t == "" { return Err(«kolom ${nama}: angka kosong») }
+    for _, r in str::chars(t) {
+        if !(str(r) >= "0" && str(r) <= "9") { return Err(«kolom ${nama}: `${t}` bukan angka») }
+    }
+    if len(t) > 4 { return Err(«kolom ${nama}: `${t}` terlalu besar») }
+    return Ok(str::to_int(t))
+}
+
+fn _kolom(t, nama, lo, hi, nama_nama) {
+    var ada = arr::fill(false, hi + 1)
+    if t == "" { return Err(«kolom ${nama} kosong») }
+    for _, bagian in str::split(t, ",") {
+        var dasar = bagian
+        var langkah = 1
+        match str::index_of(bagian, "/") {
+            Some(k) => {
+                dasar = bagian[0:k]
+                langkah = _angka(bagian[k + 1:], nama, 0, [])?
+                if langkah == 0 { return Err(«kolom ${nama}: langkah `/0` tidak pernah maju») }
+            }
+            None => {}
+        }
+        var a = lo
+        var b = hi
+        if dasar == "*" {
+        } else {
+            match str::index_of(dasar, "-") {
+                Some(k) => {
+                    a = _angka(dasar[0:k], nama, lo, nama_nama)?
+                    b = _angka(dasar[k + 1:], nama, lo, nama_nama)?
+                    if a > b { return Err(«kolom ${nama}: rentang `${dasar}` terbalik») }
+                }
+                None => {
+                    a = _angka(dasar, nama, lo, nama_nama)?
+                    b = langkah > 1 $ hi : a
+                }
+            }
+        }
+        if a < lo || b > hi { return Err(«kolom ${nama}: `${bagian}` di luar ${lo} sampai ${hi}») }
+        var x = a
+        while x <= b {
+            ada[x] = true
+            x += langkah
+        }
+    }
+    var hasil = []
+    for i, v in ada { if v { hasil = arr::push(hasil, i) } }
+    return Ok(hasil)
+}
+
+/// Urai `menit jam hari-bulan bulan hari-pekan`; hari-pekan 0–7 (0 dan 7 Minggu).
+pub fn urai(teks) {
+    let k = arr::filter(str::split(str::replace(str::trim(teks), "\t", " "), " "), |x| x != "")
+    if len(k) != 5 {
+        return Err(«cron butuh tepat 5 kolom (menit jam hari-bulan bulan hari-pekan), dapat ${len(k)}»)
+    }
+    let menit = _kolom(k[0], "menit", 0, 59, [])?
+    let jam = _kolom(k[1], "jam", 0, 23, [])?
+    let hari = _kolom(k[2], "hari-bulan", 1, 31, [])?
+    let bulan = _kolom(k[3], "bulan", 1, 12, _BULAN)?
+    var pekan = _kolom(k[4], "hari-pekan", 0, 7, _PEKAN)?
+    if arr::contains(pekan, 7) && !arr::contains(pekan, 0) { pekan = arr::sort(arr::push(pekan, 0)) }
+    pekan = arr::filter(pekan, |x| x != 7)
+    return Ok(Jadwal { teks: teks, menit: menit, jam: jam, hari: hari, bulan: bulan, pekan: pekan,
+        hari_bebas: str::starts_with(k[2], "*"), pekan_bebas: str::starts_with(k[4], "*") })
+}
+
+fn _hari_cocok(j, w) {
+    let d = arr::contains(j.hari, w.hari)
+    let p = arr::contains(j.pekan, tanggal::hari_pekan(w) % 7)
+    if j.hari_bebas || j.pekan_bebas { return d && p }
+    return d || p
+}
+
+/// Apakah waktu `w` (menit utuh) cocok dengan jadwal.
+pub fn cocok(j, w) {
+    return arr::contains(j.menit, w.menit) && arr::contains(j.jam, w.jam) && arr::contains(j.bulan, w.bulan) && _hari_cocok(j, w)
+}
+
+/// Waktu cocok pertama SESUDAH `w` (di offset `w`), dicari paling jauh lima tahun; `Err` kalau tidak ada.
+pub fn berikutnya(j, w) {
+    var t = w
+    t.detik = 0
+    t.nano = 0
+    t = tanggal::tambah_detik(t, 60)?
+    var hari = 0
+    while hari < 366 * 5 {
+        if arr::contains(j.bulan, t.bulan) && _hari_cocok(j, t) {
+            for _, h in j.jam {
+                if h < t.jam { continue }
+                for _, m in j.menit {
+                    if h == t.jam && m < t.menit { continue }
+                    var r = t
+                    r.jam = h
+                    r.menit = m
+                    return Ok(r)
+                }
+            }
+        }
+        var besok = t
+        besok.jam = 0
+        besok.menit = 0
+        t = tanggal::tambah_hari(besok, 1)?
+        hari += 1
+    }
+    return Err(«jadwal `${j.teks}` tidak pernah cocok dalam lima tahun (mis. 31 Februari)»)
+}
