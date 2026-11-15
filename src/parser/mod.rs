@@ -570,6 +570,7 @@ impl Parser {
                 _ => {}
             }
         }
+        pm.struktur = struktur_pasti(file);
         // `T::m(..)`: cuma method yang dideklarasikan tepat sekali untuk `T` di berkas ini
         // (warisan, default trait dan nama ganda diputuskan saat jalan), tipe non-generik.
         let mut metode: HashMap<String, Option<(usize, Option<usize>, Vec<String>)>> = HashMap::new();
@@ -1426,6 +1427,65 @@ fn periksa_ekor_main(items: &mut [Item]) {
             _ => {}
         }
     }
+}
+
+/// `x.hantu()`/`x.hantu` atas lokal `let x = T { .. }` yang anggotanya pasti diketahui (`--periksa`).
+pub fn anggota_tak_ada(file: &ParsedFile) -> Vec<(String, Span)> {
+    Parser::telusuri_lingkup(file).anggota_hilang
+}
+
+/// Field (urut abjad, termasuk warisan) dan method tiap struct berkas ini — hanya yang PASTI: induk dari luar
+/// berkas, atau `impl` atas trait yang tidak dideklarasikan di sini (default-nya tak terlihat), membuatnya keluar.
+fn struktur_pasti(file: &ParsedFile) -> std::collections::HashMap<String, (Vec<String>, Vec<String>)> {
+    use std::collections::{HashMap, HashSet};
+    let mut induk: HashMap<&str, Option<&str>> = HashMap::new();
+    let mut field: HashMap<&str, Vec<String>> = HashMap::new();
+    let mut trait_: HashMap<&str, Vec<String>> = HashMap::new();
+    for item in &file.items {
+        match item {
+            Item::Struct(d) => {
+                induk.insert(&d.name, d.parent.as_deref());
+                field.insert(&d.name, d.fields.iter().map(|f| f.name.clone()).collect());
+            }
+            Item::Trait(t) => {
+                trait_.insert(&t.name, t.items.iter().map(|i| match i {
+                    TraitItem::Method(f) | TraitItem::DefaultMethod(f) => f.name.clone() }).collect());
+            }
+            _ => {}
+        }
+    }
+    let mut metode: HashMap<String, HashSet<String>> = HashMap::new();
+    let mut tak_pasti: HashSet<String> = HashSet::new();
+    for item in &file.items {
+        let Item::Impl(im) = item else { continue };
+        let TypeExpr::Named(nt) = &im.self_type else { continue };
+        if nt.package.is_some() || nt.modul.is_some() { continue }
+        let m = metode.entry(nt.name.clone()).or_default();
+        for i in &im.items { if let ImplItem::Method(f) = i { m.insert(f.name.clone()); } }
+        match &im.trait_ref {
+            None => {}
+            Some(TypeExpr::Named(tr)) if tr.package.is_none() && tr.modul.is_none() && trait_.contains_key(tr.name.as_str()) =>
+                m.extend(trait_[tr.name.as_str()].iter().cloned()),
+            Some(_) => { tak_pasti.insert(nt.name.clone()); }
+        }
+    }
+    let mut hasil = HashMap::new();
+    'tipe: for nama in field.keys() {
+        let (mut f, mut m, mut kini, mut langkah) = (Vec::new(), HashSet::new(), Some(*nama), 0);
+        while let Some(t) = kini {
+            langkah += 1;
+            if langkah > 64 || tak_pasti.contains(t) || !field.contains_key(t) { continue 'tipe }
+            f.extend(field[t].iter().cloned());
+            if let Some(x) = metode.get(t) { m.extend(x.iter().cloned()); }
+            kini = induk[t];
+        }
+        f.sort();
+        f.dedup();
+        let mut m: Vec<String> = m.into_iter().collect();
+        m.sort();
+        hasil.insert(nama.to_string(), (f, m));
+    }
+    hasil
 }
 
 /// Panggilan fungsi tingkat atas berkas ini dengan jumlah argumen di luar batas (`--periksa`).

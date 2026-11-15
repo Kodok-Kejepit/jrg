@@ -18,7 +18,7 @@ enum Ikat {
 
 /// Satu nama di satu lingkup: aturannya, dan (untuk lokal ber-kata-kunci) tempat deklarasinya
 /// serta apakah ia pernah dibaca — bahan `jrgm lint`.
-struct Entri { ikat: Ikat, deklarasi: Option<Span>, dibaca: bool }
+struct Entri { ikat: Ikat, deklarasi: Option<Span>, dibaca: bool, tipe: Option<String> }
 
 pub struct Pemeriksa {
     /// Tumpukan lingkup. Nama yang sama di lingkup lebih dalam MENUTUPI yang
@@ -53,6 +53,12 @@ pub struct Pemeriksa {
     pub varian_ganda: HashMap<String, Vec<String>>,
     /// Tiap varian enum berkas ini dengan enum pertama yang memilikinya (aturan tingkat atas yang sama).
     pub varian_berkas: HashMap<String, String>,
+    /// Struct berkas ini yang anggotanya PASTI diketahui: field urut abjad (termasuk warisan) dan method (`impl`,
+    /// trait berkas ini, warisan). Yang punya `impl` atas trait modul lain atau induk dari luar tidak ada di sini.
+    pub struktur: HashMap<String, (Vec<String>, Vec<String>)>,
+    /// `x.hantu()`/`x.hantu` atas lokal `let x = T { .. }` yang tipenya pasti — cuma untuk `--periksa`, kalimatnya
+    /// sama dengan yang muncul saat baris itu dijalankan.
+    pub anggota_hilang: Vec<(String, Span)>,
 }
 
 impl Pemeriksa {
@@ -63,6 +69,7 @@ impl Pemeriksa {
             tipe_sendiri: std::collections::HashSet::new(),
             varian_unit: ["None".to_string()].into_iter().collect(),
             varian_ganda: HashMap::new(), varian_berkas: HashMap::new(),
+            struktur: HashMap::new(), anggota_hilang: Vec::new(),
         }
     }
 
@@ -108,7 +115,7 @@ impl Pemeriksa {
 
     fn ikat_di(&mut self, nama: &str, k: Ikat, deklarasi: Option<Span>) {
         let lama = self.lingkup.last_mut()
-            .and_then(|l| l.insert(nama.to_string(), Entri { ikat: k, deklarasi, dibaca: false }));
+            .and_then(|l| l.insert(nama.to_string(), Entri { ikat: k, deklarasi, dibaca: false, tipe: None }));
         if let Some(e) = lama { self.catat_tak_dibaca(nama.to_string(), &e) }
     }
 
@@ -310,6 +317,13 @@ impl Pemeriksa {
                 self.pola_lokal = true;
                 self.ikat_pola(&l.pattern, k);
                 self.pola_lokal = false;
+                // `let x = T { .. }` atas struct berkas ini: tipe `x` pasti selama namanya tidak dibayangi.
+                if let (false, Pattern::Ident { name, .. }, Expr::Struct { ty: super::TypeExpr::Named(nt), .. })
+                    = (l.is_mut, &l.pattern, &*l.init) {
+                    if nt.package.is_none() && nt.modul.is_none() && self.struktur.contains_key(&nt.name) {
+                        if let Some(e) = self.lingkup.last_mut().and_then(|l| l.get_mut(name)) { e.tipe = Some(nt.name.clone()); }
+                    }
+                }
             }
             Stmt::Var(v) => {
                 if let Some(i) = &v.init { self.ekspr(i) }
@@ -523,9 +537,40 @@ impl Pemeriksa {
         }
     }
 
+    /// `x.m(..)` atau `x.f` atas lokal bertipe struct pasti yang tidak punya anggota itu.
+    fn cek_anggota(&mut self, e: &Expr) {
+        let (obj, nama, panggil, span) = match e {
+            Expr::Method { obj, method, span, .. } => (obj, method, true, *span),
+            Expr::Field { obj, field, span } => (obj, field, false, *span),
+            _ => return,
+        };
+        let Expr::Ident(x, _) = obj.as_ref() else { return };
+        let Some(tipe) = self.lingkup.iter().rev().find_map(|l| l.get(x)).and_then(|e| e.tipe.clone()) else { return };
+        let Some((field, metode)) = self.struktur.get(&tipe) else { return };
+        let ada_field = field.iter().any(|f| f == nama);
+        let ada_metode = metode.iter().any(|m| m == nama) || (panggil && nama == "to_string");
+        let pesan = if panggil {
+            // Field bernama itu (isinya fungsi atau bukan) punya kalimatnya sendiri saat jalan: dilewati.
+            if ada_metode || ada_field { return }
+            None
+        } else if ada_field {
+            return
+        } else if ada_metode {
+            Some(crate::interpreter::galat_index::metode_tanpa_kurung(&tipe, nama))
+        } else { None };
+        let pesan = pesan.unwrap_or_else(|| {
+            let tambahan = if field.is_empty() { String::new() }
+                else { format!(" (kalau maksudnya field/key, yang ada: {})", field.join(", ")) };
+            let saran = crate::diag::saran_nama_terdekat(nama, metode.iter().map(|s| s.as_str()));
+            crate::interpreter::pesan_method_tak_ada(&format!("struct {}", tipe), nama, &tambahan, saran.as_deref())
+        });
+        self.anggota_hilang.push((pesan, span));
+    }
+
     fn ekspr(&mut self, e: &Expr) {
         self.cek_arity(e);
         self.cek_aritas_pemakai(e);
+        self.cek_anggota(e);
         match e {
             Expr::Closure { params, body, .. } => {
                 self.masuk();

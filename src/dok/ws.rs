@@ -109,6 +109,8 @@ pub fn origin_sah(headers: &[(String, String)]) -> bool {
 
 /// Jawab jabat tangannya di atas `stream`, lalu daftarkan koneksinya.
 pub fn terima(mut stream: TcpStream, kunci: &str) -> Result<u64, String> {
+    // Klien yang berhenti membaca tidak boleh menahan `ws_send` selamanya: tiap tulisan bertenggat 30 detik.
+    stream.set_write_timeout(Some(std::time::Duration::from_secs(30))).ok();
     let jawab = format!(
         "HTTP/1.1 101 Switching Protocols\r\n\
          Upgrade: websocket\r\n\

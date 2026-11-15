@@ -98,7 +98,7 @@ fn timpa(tempat: &mut VmValue, v: VmValue) {
 /// `Vec::truncate` untuk bingkai callee: skalar tanpa destruktor dilewati tanpa memanggil `drop_glue`. Panjangnya
 /// dipendekkan lebih dulu, jadi destruktor yang panik membocorkan sisanya, bukan melepasnya dua kali.
 #[inline(always)]
-fn potong(stack: &mut Vec<VmValue>, n: usize) {
+pub(super) fn potong(stack: &mut Vec<VmValue>, n: usize) {
     let len = stack.len();
     if n >= len { return; }
     unsafe {
@@ -512,15 +512,18 @@ pub extern "C" fn keluar(st: i64, hasil: i64, titip: *const [usize; 3]) -> i32 {
 /// posisi VM (diambil), hasilnya di posisi fungsinya (`Vm::panggil_native`). 0 = selesai, 2 = galat.
 pub extern "C" fn bawaan(ip: i64, jenis: *const Jenis, t: i64, argc: i64, nilai: *const i64, f: i64) -> i32 {
     let (vm, basis) = konteks();
-    let (t, argc) = (t as usize, argc as usize);
+    let tetap_polos = argc & BAWAAN_POLOS != 0;
+    let (t, argc) = (t as usize, (argc & !BAWAAN_POLOS) as usize);
     let jenis = unsafe { std::slice::from_raw_parts(jenis, t) };
     let nilai = unsafe { std::slice::from_raw_parts(nilai, t) };
     // Callee-nya fungsi bawaan maya (`Jenis::Bawaan`): alamatnya dari konstanta, bukan dari stack VM.
     let f: crate::vm::value::VmNativeFn = unsafe { std::mem::transmute(f as usize) };
-    if let Some(v) = bawaan_cepat(vm, basis, jenis, nilai, t, argc, f as usize) {
-        vm.catat_hasil(&v);
-        timpa(sediakan(vm, basis, t - argc - 1), v);
-        return 0;
+    if !tetap_polos {
+        if let Some(v) = bawaan_cepat(vm, basis, jenis, nilai, t, argc, f as usize) {
+            vm.catat_hasil(&v);
+            timpa(sediakan(vm, basis, t - argc - 1), v);
+            return 0;
+        }
     }
     let span = |vm: &mut Vm| {
         let fr = vm.frames.last_mut().expect("bingkai terluar");
@@ -530,9 +533,7 @@ pub extern "C" fn bawaan(ip: i64, jenis: *const Jenis, t: i64, argc: i64, nilai:
     // Bawaan murni (tanpa layanan khusus, bukan cetak) dengan jumlah argumen yang sah: dipanggil langsung atas
     // argumennya di stack VM, tanpa `Vec` per panggilan. Selebihnya — termasuk aritas salah, yang kalimatnya
     // lahir di `panggil_native` — lewat pintu umum.
-    let polos = crate::vm::info_native::info(f).is_none_or(|i| i.khusus.is_none() && !i.cetak
-        && i.maks.is_none_or(|m| argc <= m) && i.min.is_none_or(|m| argc >= m));
-    if polos {
+    if tetap_polos || polos_untuk(f, argc) {
         for i in t - argc..t {
             if let Some(v) = nilai_skalar(jenis[i], nilai[i]) { timpa(sediakan(vm, basis, i), v); }
         }
@@ -574,6 +575,31 @@ pub extern "C" fn bawaan(ip: i64, jenis: *const Jenis, t: i64, argc: i64, nilai:
             2
         }
     }
+}
+
+/// `str(n)` atas bulat native: posisi `p` (callee bawaan `str`) = teks desimalnya, sama dengan `bawaan_cepat`.
+pub extern "C" fn teks_bulat(p: i64, n: i64) {
+    let (vm, basis) = konteks();
+    timpa(sediakan(vm, basis, p as usize), VmValue::str(desimal(n)));
+}
+
+/// Bit di `argc` `bawaan`: situsnya sudah diputuskan polos saat kompilasi (`bawaan_polos`).
+pub const BAWAAN_POLOS: i64 = 1 << 32;
+
+/// Bawaan murni (tanpa layanan khusus, bukan cetak) dengan jumlah argumen yang sah.
+fn polos_untuk(f: crate::vm::value::VmNativeFn, argc: usize) -> bool {
+    crate::vm::info_native::info(f).is_none_or(|i| i.khusus.is_none() && !i.cetak
+        && i.maks.is_none_or(|m| argc <= m) && i.min.is_none_or(|m| argc >= m))
+}
+
+/// Situs `bawaan` atas `f` (alamat) dengan `argc` argumen yang selalu lewat jalur polos: bukan kandidat
+/// `bawaan_cepat`, dan polos menurut `info_native` (tabelnya tetap selama proses).
+pub fn bawaan_polos(f: i64, argc: usize) -> bool {
+    if f == 0 { return false; }
+    let g: crate::vm::value::VmNativeFn = unsafe { std::mem::transmute(f as usize) };
+    let cepat = ["str::char_at", "int", "uint", "str", "len"];
+    let nama = crate::vm::info_native::info(g).map(|i| i.kanonik.as_str());
+    nama.is_some_and(|n| !cepat.contains(&n)) && polos_untuk(g, argc)
 }
 
 /// Desimal sebuah bulat 64 bit, sama dengan `{}` atas `i128` (yang dipakai tampilan `VmValue::Int`), tanpa mesin
@@ -625,6 +651,31 @@ fn bawaan_cepat(vm: &Vm, basis: usize, jenis: &[Jenis], nilai: &[i64], t: usize,
             _ => None,
         },
         _ => None,
+    }
+}
+
+/// `+` (`biner`) atas dua posisi milik VM: dua teks disambung langsung lewat `VmValue::tambah_milik`, aturan
+/// `Vm::op_biner` untuk teks + teks (tanpa operator pemakai dan hook tampilan); selebihnya `biner`.
+pub extern "C" fn tambah_nilai(ip: i64, jenis: *const Jenis, t: i64, nilai: *const i64) -> i32 {
+    let (vm, basis) = konteks();
+    let p = t as usize;
+    let js = unsafe { std::slice::from_raw_parts(jenis, p) };
+    let i = basis + p - 2;
+    let teks = js[p - 2].di_vm() && js[p - 1].di_vm()
+        && matches!((vm.stack.get(i), vm.stack.get(i + 1)), (Some(VmValue::Str(_)), Some(VmValue::Str(_))));
+    if !teks { return biner(ip, jenis, t, nilai); }
+    let kanan = std::mem::replace(&mut vm.stack[i + 1], VmValue::Nil);
+    let kiri = std::mem::replace(&mut vm.stack[i], VmValue::Nil);
+    match kiri.tambah_milik(&kanan) {
+        Ok(v) => { timpa(&mut vm.stack[i], v); 0 }
+        Err(e) => {
+            let fr = vm.frames.last_mut().expect("bingkai terluar");
+            let ins = fr.func.chunk.code[ip as usize];
+            let sp = if ins.span == 0 { None } else { fr.func.chunk.spans.get(ins.span as usize).copied() };
+            fr.ip = ip as usize + 1;
+            GALAT.with(|g| *g.borrow_mut() = Some(VmError::at(e, sp)));
+            2
+        }
     }
 }
 

@@ -127,6 +127,8 @@ pub enum Cara {
     /// `len(x)` atas salinan maya lokal ini (`lambat::panjang_lokal`): bulat native; gagal = deopt di
     /// panggilannya, VM yang melapor.
     PanjangLokal(u32),
+    /// `str(n)` atas bulat native (`lambat::teks_bulat`): teks desimalnya ke posisi callee, tidak bisa gagal.
+    TeksBulat,
     /// `LoadLocal` yang hasilnya `Jenis::Salinan`: tidak ada yang ditulis.
     Salinan,
     /// `BuildStruct`/`BuildArray`/`BuildTuple` atas `n` posisi teratas (`lambat::bangun`): angka native
@@ -324,7 +326,7 @@ pub fn ringan(f: &VmFunction, r: &Rencana) -> bool {
             }
             Cara::Field => kode[ip].op == OpCode::GetField,
             Cara::Asli | Cara::Buka(_) | Cara::TipeLipat(_) | Cara::TipeSama(_) | Cara::Panjang | Cara::PanjangLokal(_)
-            | Cara::PayloadSama(..) | Cara::PayloadPanjang(_) | Cara::Salinan
+            | Cara::PayloadSama(..) | Cara::PayloadPanjang(_) | Cara::TeksBulat | Cara::Salinan
             | Cara::Bangun(_) | Cara::Geser | Cara::Indeks | Cara::Salin | Cara::Tukar | Cara::Muat
             | Cara::Konstanta | Cara::Ambil | Cara::Simpan | Cara::Pola | Cara::Payload | Cara::Benar
             | Cara::Buang | Cara::KembaliNilai | Cara::KembaliUnit => true,
@@ -474,7 +476,7 @@ fn analisis_sekali(
     // operand); kode yang kebanyakan langkah lebih lambat dari VM sendiri.
     let jalan = |ip: usize| r.keadaan[ip].is_some() && !r.keluar[ip];
     let asli = (0..n).filter(|&ip| jalan(ip) && matches!(r.cara[ip], Cara::Asli | Cara::Buka(_) | Cara::TipeLipat(_)
-        | Cara::TipeSama(_) | Cara::Panjang | Cara::PanjangLokal(_) | Cara::PayloadSama(..) | Cara::PayloadPanjang(_))).count();
+        | Cara::TipeSama(_) | Cara::Panjang | Cara::PanjangLokal(_) | Cara::PayloadSama(..) | Cara::PayloadPanjang(_) | Cara::TeksBulat)).count();
     // Pintu masuk bingkai callee (`Call` ke fungsi VM) dibayar VM juga; yang ditambah cuma langkahnya.
     let langkah_vm = (0..n).filter(|&ip| jalan(ip) && matches!(r.cara[ip], Cara::Langkah { .. } | Cara::Cabang { .. })).count();
     // Mode stres memaksa jalur native sebanyak mungkin, untung atau tidak.
@@ -490,7 +492,8 @@ fn analisis_sekali(
     // Panggilan native langsung (rekursi `fib`) membawa kerja sebanyak apa pun; badan yang murni angka
     // sudah untung walau pendek. Yang tersisa: badan pendek yang hidup dari pembantu nilai VM.
     let memanggil = (0..n).any(|ip| jalan(ip) && kode[ip].op == OpCode::Call && matches!(r.cara[ip], Cara::Asli | Cara::Langsung(_)));
-    let pembantu = (0..n).any(|ip| jalan(ip) && !matches!(r.cara[ip], Cara::Asli | Cara::Buka(_)));
+    // Membaca tangkapan closure (`MuatUpval`) murah; badan angka pendek di sekitarnya tetap untung.
+    let pembantu = (0..n).any(|ip| jalan(ip) && !matches!(r.cara[ip], Cara::Asli | Cara::Buka(_) | Cara::MuatUpval));
     if kembali == KEMBALI_SKALAR && !langsung && !berulang && !memanggil && pembantu && dikerjakan < 32 && !stres {
         return Err(format!("cuma {dikerjakan} instruksi tanpa loop, lebih murah di VM"));
     }
@@ -689,10 +692,13 @@ fn boleh_lewat_konst(f: &VmFunction, ip: usize, s: &[Jenis]) -> bool {
 }
 
 /// Fungsi bawaan maya `len`.
-fn bawaan_len(f: &VmFunction, j: Jenis) -> bool {
+fn bawaan_len(f: &VmFunction, j: Jenis) -> bool { bawaan_bernama(f, j, "len") }
+
+/// Fungsi bawaan maya bernama kanonik `nama`.
+fn bawaan_bernama(f: &VmFunction, j: Jenis, nama: &str) -> bool {
     let Jenis::Bawaan(i) = j else { return false };
     matches!(f.chunk.constants.get(i as usize), Some(VmValue::NativeFn(g))
-        if crate::vm::info_native::info(*g).is_some_and(|n| n.kanonik == "len"))
+        if crate::vm::info_native::info(*g).is_some_and(|n| n.kanonik == nama))
 }
 
 /// `LoadLocal` di `ip` tepat di atas callee `len` (`atas`) dan tepat sebelum `Call 1` yang bukan sasaran lompat:
@@ -1021,6 +1027,12 @@ fn langkah_lambat(
             s.push(Bulat);
             return Some((Cara::PanjangLokal(l), vec![(lanjut, s)]));
         }
+    }
+    // `str(n)` atas bulat native: teksnya ditulis langsung, tanpa pintu bawaan umum.
+    if ins.op == OpCode::Call && a == 1 && t >= 2 && s[t - 1] == Bulat && bawaan_bernama(f, s[t - 2], "str") {
+        s.truncate(t - 2);
+        s.push(Nilai);
+        return Some((Cara::TeksBulat, vec![(lanjut, s)]));
     }
     // Fungsi bawaan: tidak pernah mendorong bingkai, dipanggil langsung oleh pembantu.
     if ins.op == OpCode::Call && a < t && matches!(s[t - a - 1], Bawaan(_) | Bungkus(..)) && !s[t - a..].iter().any(|j| j.tetap()) {

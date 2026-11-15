@@ -2283,6 +2283,24 @@ mod sunting {
             assert!(baris.iter().any(|b| b.contains(berkas) && b.contains(isi)), "tidak ada {:?}:\n{}", berkas, g);
         }
 
+        // Fase PERIKSA-ANGGOTA: method/field yang tidak ada atas `let x = T { .. }` bertipe pasti, kalimatnya kalimat
+        // saat jalan; default trait, warisan, `to_string`, nama yang dibayangi dan `var` tidak dituduh.
+        std::fs::write(dir.join("anggota.jrg"),
+            "package main\ntrait B { fn sapa(self) -> string = \"hai\" }\nstruct I { pub n: int = 0 }\n\
+             impl I { fn milik(self) { return self.n } }\nstruct A: I { pub u: int = 1 }\nimpl B for A {}\n\
+             struct T { a: int, b: int }\npub fn main() {\n    let a = A {}\n    \
+             wok(a.sapa(), a.milik(), a.n, a.u, a.to_string())\n    let t = T { a: 1, b: 2 }\n    \
+             wok(t.adaa(), t.c, t.ada)\n    if true { let t = 5\n wok(t.abs()) }\n    var v = T { a: 1, b: 2 }\n    \
+             wok(v.zz())\n}\nimpl T { fn ada(self) { return self.a } }\n").unwrap();
+        let (sukses, g) = periksa("anggota.jrg");
+        assert!(!sukses);
+        let baris: Vec<&str> = g.lines().collect();
+        assert_eq!(baris.len(), 3, "jumlah galat:\n{}", g);
+        assert!(baris[0].contains("\t12\t9\t`struct T` tidak punya method atau field bernama `adaa` (kalau maksudnya \
+                                  field/key, yang ada: a, b) — maksudnya `ada`?")
+            && baris[1].contains("\t12\t19\t`struct T` tidak punya method atau field bernama `c`")
+            && baris[2].contains("\t12\t24\t`ada` itu method milik `T`, dan di sini ditulis tanpa `()`"), "{}", g);
+
         // Sasaran penugasan yang bukan variabel, juga di fungsi yang tidak pernah dipanggil.
         std::fs::write(dir.join("tugas.jrg"),
             "package main\nfn f() { 1 }\nfn sepi() {\n    jumlah = 5\n    f = 2\n    daftar[0] = 1\n    \

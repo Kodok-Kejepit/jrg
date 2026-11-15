@@ -34,6 +34,8 @@ struct Entri {
     mampat: u64,
     ukuran: u64,
     data: usize,
+    /// Bit eksekusi, cuma dipasang di sistem unix saat membongkar.
+    #[cfg_attr(not(unix), allow(dead_code))]
     exe: bool,
 }
 

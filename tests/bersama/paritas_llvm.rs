@@ -1,6 +1,33 @@
 // Tabel bersama `tests/llvm_parity.rs` dan `tests/jit_parity.rs`; disisipkan lewat `include!`.
 
 const PARITAS_LLVM: &[(&str, &str)] = &[
+    // Fase SEBAR-GENERIK: sebar di literal varian enum generik dari basis instans enum yang sama — dulu ditolak LLVM.
+    ("sebar varian enum generik dari varian sama dan lain", r#"package main
+enum E<T> { V { a: T, b: int }, W { a: T } }
+pub fn main() {
+    let x = E::V { a: "s", b: 1 }
+    wok(E::V { b: 9, ...x })
+    let w = E::W { a: "w" }
+    wok(E::V { b: 2, ...w })
+    let p = E::V { a: 2.5, b: 3 }
+    wok(E::V { a: 1.5, ...p })
+    match (E::V { b: 7, ...x }) {
+        E::V { a, b } => wok("cocok", a, b),
+        E::W { a } => wok("lain", a),
+    }
+}"#),
+    // Fase ISI-SISIP: `arr::insert` dengan nilai berjenis lain membuat larik campur bertag, seperti `push`.
+    ("arr::insert berjenis lain jadi larik campur", r#"package main
+pub fn main() {
+    let f = |x| x
+    wok(arr::insert([f], 0, 1), arr::insert([1, 2], 1, "a"), arr::insert([1, 2], -1, 9), arr::insert(["x"], 1, true))
+    let a = arr::insert([1, 2], 0, "z")
+    wok(len(a), typeof(a[0]), a[1] + 1)
+    wok(arr::insert([], 0, 5), arr::insert([1, 3], 1, 2), arr::insert(["a"], 0, "b"))
+    var xs = [1]
+    xs = arr::insert(xs, 1, 2)
+    wok(xs)
+}"#),
     // Fase LAPIS-SITUS: `==` lintas golongan `false` (juga fungsi lawan bilangan), `index_of`/`contains` dengan jarum
     // bertipe lain, `unique` atas satu fungsi — dulu ditolak LLVM saat kompilasi, sebagian di `<lapis>:baris`.
     ("banding lintas tipe, index_of/contains berjarum lain, unique satu fungsi", r#"package main

@@ -3177,3 +3177,204 @@ fn ringan_simpan_sama_dengan_vm() {
     let j = jalankan(RINGAN_SIMPAN, &["--jit"], &[STRES, ("JRG_JIT_STRES", "1"), ("JRG_JIT_LOG", "ringkas")]);
     assert!(j.stderr.contains("P::maju, besar, ganti, main"), "{}", j.stderr);
 }
+
+/// `str(n)` atas bulat native (`Cara::TeksBulat`) dan situs bawaan yang polosnya diputuskan saat kompilasi
+/// (`lambat::bawaan_polos`): bulat negatif dan `i64::MIN`, bawaan teks dan larik, dan galat bawaan seperti VM.
+const BAWAAN_SITUS: &str = r#"package main
+
+fn label(n: int) -> string {
+    return "n" + str(n) + ":" + str(n % 7 - 3)
+}
+
+pub fn main() {
+    var h = 0
+    var s = ""
+    for i in 0..4000 {
+        let k = i * 7919 - 20000
+        s = label(k)
+        h = (h * 31 + len(s) + len(str::upper(s)) + len(str::replace(s, "-", "_"))) % 1000003
+        if i % 999 == 0 { wok(s, str(-9223372036854775807 - 1), str(i), str::reverse(s)) }
+        h = h + len(str::repeat("ab", i % 3)) + len(arr::join(["a", s], "-"))
+    }
+    wok(h)
+    for i in 0..3000 {
+        if i == 2999 { wok(str::repeat("x", -1)) }
+        h = h + len(str::trim("  a  "))
+    }
+}
+"#;
+
+#[test]
+fn bawaan_situs_sama_dengan_vm() {
+    let v = jalankan(BAWAAN_SITUS, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.ends_with("16069"), "{}", v.stdout);
+    assert!(v.stderr.contains("sebanyak -1 kali"), "{}", v.stderr);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(BAWAAN_SITUS, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let j = jalankan(BAWAAN_SITUS, &["--jit"], &[STRES, ("JRG_JIT_STRES", "1"), ("JRG_JIT_LOG", "ringkas")]);
+    assert!(j.stderr.contains("dikompilasi: label, main"), "{}", j.stderr);
+}
+
+/// `+` atas dua teks milik VM (`lambat::tambah_nilai`): sambungan berantai, teks yang tumbuh di tempat dan yang
+/// dipegang dua nama, lalu yang lewat `biner` — teks + bulat, teks + struct ber-`to_string`, operator `add`.
+const TAMBAH_TEKS: &str = r#"package main
+
+struct V {
+    pub x: int,
+}
+
+impl V {
+    fn to_string(self) -> string { return "V" + str(self.x) }
+    fn add(self, o: V) -> V { return V { x: self.x + o.x } }
+}
+
+pub fn main() {
+    var s = ""
+    var h = 0
+    let v = V { x: 3 }
+    var w = V { x: 0 }
+    for i in 0..3000 {
+        let a = "k" + str(i % 13)
+        let b = a + "-" + a
+        let salin = s
+        s = s + b
+        if i % 500 == 0 { s = "" }
+        let c = "v=" + v
+        let d = "n:" + (i % 5)
+        w = w + v
+        h = (h * 31 + len(b) + len(c) + len(d) + len(salin)) % 1000003
+    }
+    wok(h, len(s), w.x, "akhir" + w)
+}
+"#;
+
+#[test]
+fn tambah_teks_sama_dengan_vm() {
+    let v = jalankan(TAMBAH_TEKS, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout == "393208 2723 9000 akhirV9000", "{}", v.stdout);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(TAMBAH_TEKS, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}
+
+/// Geser konstan atas bulat 128 bit di register (dua geser 64 bit): `>>` dan `<<` 1 sampai 63, bilangan negatif besar,
+/// dan `<<` yang membuang bit sampai `-1` — sama dengan VM.
+const GESER_LEBAR: &str = r#"package main
+
+fn geser(n: int) -> int {
+    var x: uint = 305419896
+    var y = -170141183460469231731687303715884105
+    var tot = 0
+    for i in 0..n {
+        x = math::wrap_add(math::wrap_mul(x, 1664525), 1013904223) ^ (x >> 13)
+        let a = (x >> 1) ^ (x >> 63) ^ (x << 3)
+        let b = (y >> 7) + (y >> 63) + (y >> 1)
+        y = y + 1
+        let c = (x << 63) >> 60
+        tot = (tot + (a % 1000) + (b % 1000) + (c % 1000)) % 1000000007
+    }
+    return tot
+}
+
+pub fn main() {
+    wok(geser(20000))
+    var z = 1
+    for i in 0..200 {
+        z = (z << 1) + 1
+        if i % 37 == 0 { wok(i, z >> 5) }
+    }
+}
+"#;
+
+#[test]
+fn geser_lebar_sama_dengan_vm() {
+    let v = jalankan(GESER_LEBAR, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.starts_with("9685561\n0 0\n37 17179869183"), "{}", v.stdout);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(GESER_LEBAR, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}
+
+/// Pintu VM ke kode native (`panggil::jalankan`): bingkai lebih dari 32 posisi (penyangga argumen di heap), hasil
+/// teks milik VM, luapan 64 bit di dalamnya (deopt), dan closure yang dipanggil `arr::map`.
+const PINTU_VM: &str = r#"package main
+
+fn banyak(a0, a1, a2, a3, a4, a5, a6, a7, a8, a9, a10, a11, a12, a13, a14, a15, a16, a17, a18, a19, a20, a21, a22, a23, a24, a25, a26, a27, a28, a29, a30, a31, a32, a33, a34, a35) -> int {
+    var t = 0
+    for i in 0..3 { t = t + a0 + a1 + a2 + a3 + a4 + a5 + a6 + a7 + a8 + a9 + a10 + a11 + a12 + a13 + a14 + a15 + a16 + a17 + a18 + a19 + a20 + a21 + a22 + a23 + a24 + a25 + a26 + a27 + a28 + a29 + a30 + a31 + a32 + a33 + a34 + a35 }
+    return t
+}
+
+fn teks(n: int) {
+    var s = ""
+    for i in 0..n { s = s + "x" }
+    return s
+}
+
+fn luap(n: int) -> int {
+    var x = n
+    for i in 0..2 { x = x * 4611686018427387 }
+    return x % 1000003
+}
+
+pub fn main() {
+    var tot = 0
+    for r in 0..3000 {
+        tot = (tot + banyak(r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r, r) + len(teks(r % 9)) + luap(r)) % 1000000007
+    }
+    let f = |x| x * 2 + tot % 5
+    wok(tot, arr::sum(arr::map(range(0, 2000), f)))
+}
+"#;
+
+#[test]
+fn pintu_vm_sama_dengan_vm() {
+    let v = jalankan(PINTU_VM, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout == "987727185 3998000", "{}", v.stdout);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(PINTU_VM, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}
+
+/// Closure pendek yang cuma membaca tangkapan (`MuatUpval`) ikut dikompilasi: tangkapan bulat, pecahan dan teks yang
+/// berubah di antara panggilan, `map`/`filter`/`reduce`, dan tangkapan yang berganti jenis (galat yang sama dengan VM).
+const UPVAL_PENDEK: &str = r#"package main
+
+pub fn main() {
+    var k = 3
+    var f = 0.5
+    var nama = "ab"
+    let tambah = |x| x * 2 + k
+    let kali = |x| x * f
+    let panjang = |x| x + len(nama)
+    let xs = range(0, 5000)
+    let ys = xs.map(|x| x * 2 + k).filter(|x| x % 3 == 0)
+    wok(ys.reduce(|a, b| a + b, 0))
+    var tot = 0
+    var tf = 0.0
+    for i in 0..30000 {
+        tot = (tot + tambah(i) + panjang(i)) % 1000000007
+        tf = tf + kali(i as float)
+        if i % 7000 == 0 { k = k + 1; f = f * 2.0; nama = nama + "c" }
+        if i == 20000 { k = "teks" }
+        if i == 20001 { k = 4 }
+    }
+    wok(tot, tf)
+}
+"#;
+
+#[test]
+fn upval_pendek_sama_dengan_vm() {
+    let v = jalankan(UPVAL_PENDEK, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout == "8336667", "{}", v.stdout);
+    assert!(v.stderr.contains("tidak bisa `%` antara `string` dan `int`"), "{}", v.stderr);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(UPVAL_PENDEK, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}

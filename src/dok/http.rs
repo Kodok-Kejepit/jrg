@@ -751,6 +751,10 @@ fn parse_request_dgn<R: BufRead>(reader: &mut R, hitung: &'static AtomicUsize, b
         }
     }
 
+    // RFC 9112 §3.2: permintaan HTTP/1.1 tanpa `Host` WAJIB dijawab 400 — dulu diterima, dan `dok::host_check`
+    // di belakang proxy berbasis host melihat permintaan tanpa host. HTTP/1.0 boleh tanpa.
+    if versi == "HTTP/1.1" && !headers.iter().any(|(n, _)| n == "host") { return Err(SALAH); }
+
     // Badan dibaca sebanyak yang DATANG, bukan dipesan dulu sebesar yang diaku klien.
     // Anggarannya dipesan per potongan yang datang, jadi klien yang diam tidak memegang lebih dari yang ia kirim.
     let mut buf = Vec::new();
@@ -806,7 +810,17 @@ fn write_response_bytes(stream: &mut TcpStream, status: i128, content_type: &str
     out.push_str("\r\n");
     let mut semua = out.into_bytes();
     semua.extend_from_slice(body);
-    let _ = stream.write_all(&semua);
+    tulis_bertenggat(stream, &semua, std::time::Duration::from_secs(30), std::time::Duration::from_secs(1));
+}
+
+/// Klien yang tidak membaca jawabannya (slow read, kelas CVE-2012-5568) dulu menahan utasnya selamanya — 512 unduhan
+/// berkas besar yang tak dibaca membekukan server. Tenggat total `dasar` + `per_16k` tiap 16 KiB, per potongan.
+fn tulis_bertenggat(stream: &mut TcpStream, data: &[u8], dasar: std::time::Duration, per_16k: std::time::Duration) {
+    let akhir = std::time::Instant::now() + dasar + per_16k * (data.len() / 16384) as u32;
+    for potong in data.chunks(16384) {
+        let sisa = akhir.saturating_duration_since(std::time::Instant::now());
+        if sisa.is_zero() || stream.set_write_timeout(Some(sisa)).is_err() || stream.write_all(potong).is_err() { return; }
+    }
     let _ = stream.flush();
 }
 
@@ -1202,6 +1216,17 @@ impl Drop for Sambungan {
 
 #[cfg(test)]
 mod tes_permintaan {
+    /// Pembaca yang tidak pernah membaca dilepas sesudah tenggatnya, bukan menahan utas penulis.
+    #[test]
+    fn penulis_tidak_tertahan_pembaca_yang_diam() {
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let _klien = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut s, _) = l.accept().unwrap();
+        let t = std::time::Instant::now();
+        super::tulis_bertenggat(&mut s, &vec![0u8; 64 << 20], std::time::Duration::from_millis(300), std::time::Duration::ZERO);
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "penulis tertahan {:?}", t.elapsed());
+    }
+
     #[test]
     fn berkas_bertitik_tidak_disajikan() {
         for r in [".env", ".git/config", "sub/.htpasswd", "a/.ssh/id_rsa", ".well-known/../.env"] {
@@ -1267,6 +1292,7 @@ mod tes_permintaan {
             assert_eq!(kode(b), 400, "{:?}", String::from_utf8_lossy(b));
         }
         assert_eq!(kode(b"GET / HTTP/2.0\r\n\r\n"), 505);
+        assert_eq!(kode(b"GET / HTTP/1.1\r\nX: a\r\n\r\n"), 400, "HTTP/1.1 tanpa Host");
         for b in [&b"GET / HTTP/1.0\r\n\r\n"[..], b"GET /a?b HTTP/1.1\r\nHost: Contoh.ID.:8080\r\n\r\n",
                   b"GET / HTTP/1.1\r\nHost: [::1]:80\r\nX:\tnilai\t\r\n\r\n"] {
             assert_eq!(kode(b), 200, "{:?}", String::from_utf8_lossy(b));
@@ -1276,11 +1302,11 @@ mod tes_permintaan {
     #[test]
     fn kepala_permintaan_yang_dibaca_lain_oleh_proxy_ditolak() {
         // Badan berpotongan dulu dibaca kosong; tiga bentuk kepala cacat dulu diterima atau dibuang diam-diam.
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhalo!\r\n0\r\n\r\n"), 501);
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nContent-Length : 5\r\n\r\nhalo!"), 400);
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nSampah\r\nContent-Length: 5\r\n\r\nhalo!"), 400);
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nX-A: 1\r\n  lanjut\r\n\r\n"), 400);
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nX-A:1\r\nContent-Length: 5\r\n\r\nhalo!"), 200);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhalo!\r\n0\r\n\r\n"), 501);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length : 5\r\n\r\nhalo!"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nSampah\r\nContent-Length: 5\r\n\r\nhalo!"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nX-A: 1\r\n  lanjut\r\n\r\n"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nX-A:1\r\nContent-Length: 5\r\n\r\nhalo!"), 200);
     }
 
     #[test]
@@ -1294,28 +1320,28 @@ mod tes_permintaan {
 
     #[test]
     fn panjang_badan_dari_klien_tidak_dipercaya() {
-        let p = urai(b"POST /a?x=1 HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabcSISA").unwrap();
+        let p = urai(b"POST /a?x=1 HTTP/1.1\r\nHost: a\r\nContent-Length: 3\r\nContent-Length: 3\r\n\r\nabcSISA").unwrap();
         assert_eq!((p.method.as_str(), p.path.as_str(), p.query_string.as_str(), p.body.as_slice()), ("POST", "/a", "x=1", &b"abc"[..]));
         for cl in ["9223372036854775813", "1099511627776", "67108865"] {
-            assert_eq!(kode(format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\nabc", cl).as_bytes()), 413, "{}", cl);
+            assert_eq!(kode(format!("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\nabc", cl).as_bytes()), 413, "{}", cl);
         }
         for cl in ["abc", "-1", "+3", "", "3 3", "0x3"] {
-            assert_eq!(kode(format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\nabc", cl).as_bytes()), 400, "{:?}", cl);
+            assert_eq!(kode(format!("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\nabc", cl).as_bytes()), 400, "{:?}", cl);
         }
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nContent-Length: 1\r\nContent-Length: 3\r\n\r\nabc"), 400);
-        assert_eq!(kode(b"POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc"), 400, "badan kurang dari yang diaku");
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 1\r\nContent-Length: 3\r\n\r\nabc"), 400);
+        assert_eq!(kode(b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 10\r\n\r\nabc"), 400, "badan kurang dari yang diaku");
         assert_eq!(kode(b""), 400);
         assert_eq!(kode(b"GET /\xff HTTP/1.1\r\n\r\n"), 400);
     }
 
     #[test]
     fn baris_dan_jumlah_header_berbatas() {
-        let baris = |n: usize| format!("GET /{} HTTP/1.1\r\n\r\n", "a".repeat(n - 16));
+        let baris = |n: usize| format!("GET /{} HTTP/1.0\r\n\r\n", "a".repeat(n - 16));
         assert_eq!(kode(baris(MAKS_BARIS).as_bytes()), 200);
         assert_eq!(kode(baris(MAKS_BARIS + 1).as_bytes()), 414);
         assert_eq!(kode(format!("GET /{}", "a".repeat(1 << 20)).as_bytes()), 414, "tanpa akhir baris");
-        assert_eq!(kode(format!("GET / HTTP/1.1\r\nX: {}\r\n\r\n", "a".repeat(MAKS_BARIS)).as_bytes()), 431);
-        let banyak = |n: usize| format!("GET / HTTP/1.1\r\n{}\r\n", "X: 1\r\n".repeat(n));
+        assert_eq!(kode(format!("GET / HTTP/1.1\r\nHost: a\r\nX: {}\r\n\r\n", "a".repeat(MAKS_BARIS)).as_bytes()), 431);
+        let banyak = |n: usize| format!("GET / HTTP/1.0\r\n{}\r\n", "X: 1\r\n".repeat(n));
         assert_eq!(urai(banyak(MAKS_HEADER).as_bytes()).unwrap().headers.len(), MAKS_HEADER);
         assert_eq!(kode(banyak(MAKS_HEADER + 1).as_bytes()), 431);
     }
@@ -1324,7 +1350,7 @@ mod tes_permintaan {
     fn badan_serentak_berbatas_dan_dikembalikan() {
         static HITUNG: AtomicUsize = AtomicUsize::new(0);
         let urai_b = |b: &[u8]| parse_request_dgn(&mut std::io::Cursor::new(b.to_vec()), &HITUNG, 10);
-        let enam = b"POST / HTTP/1.1\r\nContent-Length: 6\r\n\r\nabcdef";
+        let enam = b"POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 6\r\n\r\nabcdef";
         let pertama = urai_b(enam).unwrap();
         assert_eq!(HITUNG.load(Ordering::Acquire), 6);
         assert_eq!(urai_b(enam).err(), Some(PENUH), "anggaran sudah terpakai");
@@ -1333,7 +1359,7 @@ mod tes_permintaan {
         assert_eq!(HITUNG.load(Ordering::Acquire), 0);
         assert_eq!(urai_b(enam).unwrap().body, b"abcdef");
         assert_eq!(HITUNG.load(Ordering::Acquire), 0);
-        let biner = |n: usize| [format!("POST / HTTP/1.1\r\nContent-Length: {}\r\n\r\n", n).into_bytes(), vec![0xff; n]].concat();
+        let biner = |n: usize| [format!("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: {}\r\n\r\n", n).into_bytes(), vec![0xff; n]].concat();
         let muat = 1000 / (1 + std::mem::size_of::<Value>());
         let p = parse_request_dgn(&mut std::io::Cursor::new(biner(muat)), &HITUNG, 1000).unwrap();
         assert_eq!(HITUNG.load(Ordering::Acquire), muat * (1 + std::mem::size_of::<Value>()), "biner dihitung seharga array-nya");

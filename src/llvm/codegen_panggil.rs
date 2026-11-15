@@ -327,6 +327,30 @@ impl Codegen {
                         segments: vec![String::new(), "str".into()], span }), args: vec![a.clone()], span },
                     _ => a.clone(),
                 }).collect();
+                // `arr::insert(a, i, v)` dengan `v` berjenis lain dari isinya: larik campur bertag, seperti `push` —
+                // dulu `v` dipaksa ke tipe elemen dan ditolak. Argumen dihitung urut tulis ke lokal sementara; tipenya
+                // dari nilainya (`peek_expr_type` tidak mengenal literal larik). `[]` mengambil tipe dari `v`.
+                if ns == "arr" && item == "insert" && args.len() == 3
+                    && !matches!(&args[0], Expr::Array { elems, .. } if elems.is_empty()) {
+                    let a = self.codegen_expr(&args[0], None)?;
+                    if let JrgType::Array(e, _) | JrgType::Slice(e) = a.ty.clone() {
+                        let i = self.codegen_expr(&args[1], Some(&JrgType::I64))?;
+                        let v = self.codegen_expr(&args[2], Some(&e))?;
+                        let (a, v) = if super::codegen_any::ganti_jenis_isi(&e, &v.ty) {
+                            (self.coerce(&a, &JrgType::Slice(Box::new(JrgType::Any))), self.coerce(&v, &JrgType::Any))
+                        } else { (a, v) };
+                        let mut baru = Vec::new();
+                        for x in [a, i, v] {
+                            let ty = x.ty.clone();
+                            let ptr = self.spill_to_place(&x);
+                            baru.push(self.lokal_sementara(ptr, ty, span));
+                        }
+                        let t0 = self.lookup_local(match &baru[0] { Expr::Ident(n, _) => n, _ => unreachable!() }).map(|(_, t)| t);
+                        let kunci = self.kunci_lapis_menurut(ns, item, t0.as_ref()).unwrap_or(kunci);
+                        return self.call_named_function(&kunci, &baru, expected, span);
+                    }
+                    return Err(crate::llvm::galat::tandai(span, crate::interpreter::pesan_arg_harus_array("arr::insert", 1, &a.ty.display_name())));
+                }
                 return self.call_named_function(&kunci, &args, expected, span);
             }
             // Builtin yang implementasinya milik `jrgc`: lewat jembatan pustaka dinamis.

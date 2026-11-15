@@ -105,21 +105,22 @@ fn jalankan(vm: &mut Vm, kembali: u8) -> Result<i64, VmError> {
     let basis = fr.slot + 1;
     if vm.stack.len() < basis || vm.stack.len() - basis > MAKS_POSISI { return Ok(ULANG); }
     let Some(kode) = kode_untuk(vm, &fr.func, fr.ip, kembali, basis) else { return Ok(ULANG) };
-    // Bingkai kecil (hampir semua panggilan) tidak membayar alokasi.
+    // Bingkai kecil (hampir semua panggilan) tidak membayar alokasi; penyangganya tidak dinolkan dulu, karena
+    // tiap posisi yang dipakai ditulis di bawah.
     let isi = &vm.stack[basis..];
-    let mut kecil = [0i64; 32];
+    let mut kecil = [std::mem::MaybeUninit::<i64>::uninit(); 32];
     let mut besar = Vec::new();
-    let args: &mut [i64] = if isi.len() <= kecil.len() { &mut kecil[..isi.len()] } else {
-        besar.resize(isi.len(), 0);
+    let args: &mut [std::mem::MaybeUninit<i64>] = if isi.len() <= kecil.len() { &mut kecil[..isi.len()] } else {
+        besar.resize(isi.len(), std::mem::MaybeUninit::new(0));
         &mut besar
     };
     for (a, v) in args.iter_mut().zip(isi) {
-        *a = match v {
+        a.write(match v {
             VmValue::Int(n) => *n as i64,
             VmValue::Bool(b) => *b as i64,
             VmValue::Float(f) => f.to_bits() as i64,
             _ => 0,
-        };
+        });
     }
     // Panggilan native ke-k sama dengan bingkai VM ke-(F+k): yang akan ditolak `periksa_kedalaman`
     // tidak dijalankan native, tapi diserahkan ke VM lewat deopt di instruksi `Call`-nya.
@@ -132,7 +133,7 @@ fn jalankan(vm: &mut Vm, kembali: u8) -> Result<i64, VmError> {
     // Kode ini dibangkitkan `turun.rs` dengan tanda tangan `KodeJit::masuk` persis.
     let pvm: *mut Vm = vm;
     let st = super::lambat::dengan_konteks(pvm, basis, || unsafe {
-        (kode.masuk)(args.as_ptr(), (KEDALAMAN_MAKS - boleh) as i32, &mut keluar)
+        (kode.masuk)(args.as_ptr() as *const i64, (KEDALAMAN_MAKS - boleh) as i32, &mut keluar)
     }) as i64;
     match st {
         BERHASIL | BERHASIL_BOOL | BERHASIL_PECAHAN | BERHASIL_NILAI | BERHASIL_UNIT => {
@@ -146,7 +147,8 @@ fn jalankan(vm: &mut Vm, kembali: u8) -> Result<i64, VmError> {
                 _ => VmValue::Unit,
             };
             // `Return` native: bingkainya tanpa `defer` (`DeferPush` selalu titik keluar).
-            if let Some(fr) = vm.ambil_bingkai() { vm.stack.truncate(fr.slot); }
+            // Posisi skalar bingkainya dilepas tanpa `drop_glue` (`lambat::potong`).
+            if let Some(fr) = vm.ambil_bingkai() { super::lambat::potong(&mut vm.stack, fr.slot); }
             vm.catat_hasil(&hasil);
             vm.stack.push(hasil);
         }

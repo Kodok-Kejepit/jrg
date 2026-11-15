@@ -2760,7 +2760,7 @@ pub fn main() {
             let status = |kepala: &str| -> String {
                 let mut s = TcpStream::connect(("127.0.0.1", port)).expect("server sudah mati");
                 s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
-                write!(s, "POST /gema HTTP/1.1\r\n{}\r\nabc", kepala).unwrap();
+                write!(s, "POST /gema HTTP/1.1\r\nHost: x\r\n{}\r\nabc", kepala).unwrap();
                 let mut buf = String::new();
                 let _ = s.read_to_string(&mut buf);
                 let badan = buf.split("\r\n\r\n").nth(1).unwrap_or("").to_string();

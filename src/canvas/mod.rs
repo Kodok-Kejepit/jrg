@@ -691,8 +691,12 @@ pub fn canvas_update(handle: &CanvasHandle) -> CanvasResult<bool> {
     inner.keys.pressed.clear();
 
     // Tiap mode lapisan tampilan atas framebuffer yang SAMA; masukannya digabung.
+    // Di wasm tanpa jendela kedua sumber masukan di bawah tidak ada, jadi ketiganya tidak pernah diubah.
+    #[cfg_attr(all(target_arch = "wasm32", not(feature = "canvas")), allow(unused_mut))]
     let mut ditahan: HashSet<String> = HashSet::new();
+    #[cfg_attr(all(target_arch = "wasm32", not(feature = "canvas")), allow(unused_mut))]
     let mut ada_masukan = false;
+    #[cfg_attr(all(target_arch = "wasm32", not(feature = "canvas")), allow(unused_mut))]
     let mut jari: Option<Vec<(f32, f32)>> = None;
     #[cfg(feature = "canvas")]
     if inner.window.is_some() {

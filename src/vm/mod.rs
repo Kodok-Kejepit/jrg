@@ -21,6 +21,7 @@ pub mod vm;
 // impl inheren dipecah lintas modul dalam satu crate, dan itu yang
 // membuat `vm.rs` bisa tinggal jadi rangkanya saja.
 mod jalankan;
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
 pub(crate) use jalankan::{cocok_enum, larik_milik_tunggal};
 mod panggil;
 pub(crate) mod info_native;
@@ -268,6 +269,7 @@ pub fn periksa_dengan_paths(file: &ParsedFile, search_paths: Vec<PathBuf>) -> Re
     pemuat.periksa_saja = true;
     // Jumlah argumen ikut dilaporkan walau modulnya gagal dimuat (cuma untuk berkas utama).
     let aritas_utama = || crate::parser::aritas_fungsi_pemakai(file).into_iter()
+        .chain(crate::parser::anggota_tak_ada(file))
         .map(|(pesan, span)| VmError::at(pesan, Some(span)));
     let (impor, salinan) = match pemuat.muat_utama(&mut vm, file, &search_paths) {
         Ok(h) => h,
@@ -280,6 +282,7 @@ pub fn periksa_dengan_paths(file: &ParsedFile, search_paths: Vec<PathBuf>) -> Re
     pemuat.unit_periksa.push(utama);
     let mut galat = nama_tak_dideklarasikan(&vm, &pemuat.unit_periksa);
     galat.extend(pemuat.aritas.drain(..).map(|(pesan, span)| VmError::at(pesan, Some(span))));
+    galat.extend(crate::parser::anggota_tak_ada(file).into_iter().map(|(pesan, span)| VmError::at(pesan, Some(span))));
     if galat.is_empty() { Ok(()) } else { Err(galat) }
 }
 

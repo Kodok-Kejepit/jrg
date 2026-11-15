@@ -470,13 +470,21 @@ impl Codegen {
             return Err(tandai(format!("varian `{}::{}` tidak punya field bernama — tulis `{}::{}(..)` atau `{}::{}`", en, varian, en, varian, en, varian)));
         }
         if let Some(basis) = sebar {
+            // Basis yang sudah instans enum generik ini (`let x = E::V { a: "s", .. }`): tata letak instansnya
+            // konkret, jadi sebarnya lewat jalur biasa; kalimatnya tetap menyebut `E::V`.
             if generik {
+                if let Some(JrgType::Enum(i)) = self.peek_expr_type(basis) {
+                    if self.enum_instans.get(&i).map_or(false, |(d, _)| d == en) {
+                        self.harapan_ktor = harap;
+                        return self.literal_varian_sebar(&i, varian, fields, basis, span, en);
+                    }
+                }
                 return Err(tandai(format!(
                     "spread (`...x`) di literal varian enum generik `{}::{}` belum didukung backend `--emit-llvm`\n\
                      bantuan: tulis tiap field-nya, atau jalankan tanpa `--emit-llvm`", en, varian)));
             }
             self.harapan_ktor = harap;
-            return self.literal_varian_sebar(en, varian, fields, basis, span);
+            return self.literal_varian_sebar(en, varian, fields, basis, span, en);
         }
         let tipe: Vec<JrgType> = v.payload.field_types().iter().map(|t| t.tanpa_kotak()).collect();
         let mut tempat: HashMap<String, Expr> = HashMap::new();
@@ -501,13 +509,14 @@ impl Codegen {
 
     /// `E::V { a: 1, ...b }`: basis dulu, lalu field tertulis; field basis di luar `V` dan field `V` yang
     /// tidak terisi gagal SAAT JALAN dengan kalimat acuan. Basis enum yang sama dipilih variannya saat jalan.
-    fn literal_varian_sebar(&mut self, en: &str, varian: &str, fields: &[FieldInit], basis: &Expr, span: Span) -> Result<Val, String> {
+    fn literal_varian_sebar(&mut self, en: &str, varian: &str, fields: &[FieldInit], basis: &Expr, span: Span, tampil: &str)
+                            -> Result<Val, String> {
         use crate::interpreter::galat_index as gi;
         let tandai = |m: String| super::galat::tandai(span, m);
         let layout = self.types.enums.get(en).cloned().ok_or_else(|| tandai(format!("enum `{}` tidak dikenal", en)))?;
         let v = layout.variant(varian).cloned().ok_or_else(|| tandai(format!("enum `{}` tidak punya varian `{}`", en, varian)))?;
         let milik = v.payload.field_names();
-        let sebutan = format!("varian `{}::{}`", super::modul::tampil(en), varian);
+        let sebutan = format!("varian `{}::{}`", super::modul::tampil(tampil), varian);
         let b = self.codegen_expr(basis, None)?;
         let bty = b.ty.clone();
         let tempat_b = self.spill_to_place(&b);
@@ -522,7 +531,7 @@ impl Codegen {
             let mut isi: HashMap<String, Expr> = dari_basis.iter().cloned().collect();
             for fi in fields {
                 let i = v.payload.field_index_by_name(&fi.name).ok_or_else(|| tandai(format!(
-                    "varian `{}::{}` tidak punya field `{}` (yang ada: {})", en, varian, fi.name, milik.join(", "))))?;
+                    "varian `{}::{}` tidak punya field `{}` (yang ada: {})", tampil, varian, fi.name, milik.join(", "))))?;
                 let x = cg.codegen_expr(&fi.value, Some(&tipe[i]))?;
                 let x = cg.coerce(&x, &tipe[i]);
                 let ty = x.ty.clone();
@@ -534,7 +543,7 @@ impl Codegen {
                 match isi.remove(n) {
                     Some(e) => urut.push(e),
                     None => {
-                        cg.panik(&gi::field_wajib_varian(&format!("{}::{}", super::modul::tampil(en), varian), n));
+                        cg.panik(&gi::field_wajib_varian(&format!("{}::{}", super::modul::tampil(tampil), varian), n));
                         return Ok(Val::unit());
                     }
                 }
@@ -577,7 +586,7 @@ impl Codegen {
                     self.start_block(l);
                     let nama = w.payload.field_names();
                     let r = if nama.is_empty() {
-                        self.panik(&crate::interpreter::pesan_sebar_bukan_wadah(&format!("enum:{}", super::modul::tampil(en))));
+                        self.panik(&crate::interpreter::pesan_sebar_bukan_wadah(&format!("enum:{}", super::modul::tampil(tampil))));
                         Val::unit()
                     } else {
                         let sl = w.payload.as_llvm_struct();
@@ -604,7 +613,7 @@ impl Codegen {
             _ => Err(tandai(format!(
                 "spread (`...x`) di literal varian `{}::{}` dari `{}` belum didukung backend `--emit-llvm` — yang bisa: \
                  struct, atau varian enum `{}` yang sama\nbantuan: tulis tiap field-nya, atau jalankan tanpa `--emit-llvm`",
-                en, varian, bty.display_name(), en))),
+                tampil, varian, bty.display_name(), tampil))),
         }
     }
 

@@ -1,7 +1,7 @@
 # Membangun biner untuk tiap platform, lalu melampirkannya ke sebuah GitHub
 # Release berikut manifes dan checksum-nya.
 #
-# Dijalankan dengan mendorong tag `v*` (mis. `v0.4.0`), atau manual dari tab
+# Dijalankan dengan mendorong tag `v*` (mis. `v0.5.0`), atau manual dari tab
 # Actions. Tidak ada yang terbit tanpa tag — sebuah rilis yang terjadi karena
 # seseorang men-push ke main adalah rilis yang tidak diputuskan siapa pun.
 #
@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       versi:
-        description: "Versi tanpa awalan v (mis. 0.4.0)"
+        description: "Versi tanpa awalan v (mis. 0.5.0)"
         required: true
 
 permissions:

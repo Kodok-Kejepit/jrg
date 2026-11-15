@@ -98,7 +98,8 @@ pub struct ImporLambat {
     pub langkah: FuncId, pub muat: FuncId, pub buang: FuncId, pub benar: FuncId, pub buka: FuncId,
     pub taruh: FuncId, pub ambil: FuncId, pub simpan: FuncId, pub pola: FuncId, pub payload: FuncId,
     pub pola_lokal: FuncId, pub payload_lokal: FuncId, pub payload_angka: FuncId, pub pola_pilih: FuncId, pub buka_lokal: FuncId, pub field_lokal: FuncId, pub field_banyak: FuncId, pub metode_tukar: FuncId, pub metode_lokal: FuncId, pub karakter_lokal: FuncId, pub konteks_mentah: FuncId, pub masuk_ringan: FuncId, pub keluar_ringan: FuncId, pub karakter: FuncId, pub bangun: FuncId, pub baca_pecahan: FuncId, pub jenis_sama: FuncId, pub panjang: FuncId, pub panjang_lokal: FuncId,
-    pub payload_jenis_sama: FuncId, pub payload_panjang: FuncId, pub keluar_ringan_angka: FuncId,
+    pub payload_jenis_sama: FuncId, pub payload_panjang: FuncId, pub keluar_ringan_angka: FuncId, pub teks_bulat: FuncId,
+    pub tambah_nilai: FuncId,
     pub iter_ada: FuncId, pub maju: FuncId, pub langkah_cabang: FuncId, pub sebar: FuncId,
     pub pindah: FuncId, pub muat_global: FuncId, pub simpan_global: FuncId, pub indeks: FuncId, pub field: FuncId,
     pub masuk: FuncId, pub keluar: FuncId, pub salin: FuncId, pub tukar: FuncId, pub cek_metode: FuncId,
@@ -682,6 +683,16 @@ fn isi_tepi(
     }
 }
 
+/// Nilai `iconst` yang mendefinisikan `v` (di blok yang sama), kalau memang konstanta.
+fn konstanta_iconst(b: &FunctionBuilder, v: Value) -> Option<i64> {
+    use cranelift_codegen::ir::{InstructionData, Opcode, ValueDef};
+    let ValueDef::Result(i, _) = b.func.dfg.value_def(v) else { return None };
+    match b.func.dfg.insts[i] {
+        InstructionData::UnaryImm { opcode: Opcode::Iconst, imm } => Some(imm.bits()),
+        _ => None,
+    }
+}
+
 /// Operasi atas `Jenis::Lebar`; `false` = bukan bentuk `Lebar` (lowering biasa yang menanganinya).
 #[allow(clippy::too_many_arguments)]
 fn turun_lebar(
@@ -766,6 +777,20 @@ fn turun_lebar(
         // Geseran 0-127 atas 128 bit (bit yang keluar dibuang, seperti `checked_shl` VM); selain itu VM melapor.
         OpCode::Shl | OpCode::Shr if t >= 2 && s[t - 2] == Lebar && s[t - 1] == Bulat => {
             let (x, y) = (b.use_var(v128[t - 2]), b.use_var(var[t - 1]));
+            // Jumlah geser konstan 1-63: dua geser 64 bit, bukan geser 128 bit generik (yang tidak dilipat Cranelift).
+            if let Some(kk @ 1..=63) = konstanta_iconst(b, y) {
+                let (lo, hi) = b.ins().isplit(x);
+                let (nlo, nhi) = if op == OpCode::Shl {
+                    let (a1, a2) = (b.ins().ishl_imm_u(hi, kk), b.ins().ushr_imm_u(lo, 64 - kk));
+                    (b.ins().ishl_imm_u(lo, kk), b.ins().bor(a1, a2))
+                } else {
+                    let (a1, a2) = (b.ins().ushr_imm_u(lo, kk), b.ins().ishl_imm_u(hi, 64 - kk));
+                    (b.ins().bor(a1, a2), b.ins().sshr_imm_u(hi, kk))
+                };
+                let h = b.ins().iconcat(nlo, nhi);
+                b.def_var(v128[t - 2], h);
+                return true;
+            }
             let salah = b.ins().icmp_imm_u(IntCC::UnsignedGreaterThan, y, 127);
             jaga(b, k, var, salah, ip, s);
             let h = if op == OpCode::Shl { b.ins().ishl(x, y) } else { b.ins().sshr(x, y) };
@@ -912,8 +937,9 @@ pub fn turunkan(
     let [f_muat_upval, f_simpan_upval, f_tulis_vm, f_field_lokal, f_karakter, f_bangun, f_baca_pecahan, f_jenis_sama, f_panjang, f_field_banyak, f_metode_tukar, f_metode_lokal, f_karakter_lokal, f_masuk_ringan, f_keluar_ringan] =
         [il.muat_upval, il.simpan_upval, il.tulis_vm, il.field_lokal, il.karakter, il.bangun, il.baca_pecahan, il.jenis_sama, il.panjang, il.field_banyak, il.metode_tukar, il.metode_lokal, il.karakter_lokal, il.masuk_ringan, il.keluar_ringan]
         .map(|id| m.declare_func_in_func(id, b.func));
-    let [f_panjang_lokal, f_payload_jenis_sama, f_payload_panjang, f_keluar_ringan_angka] =
-        [il.panjang_lokal, il.payload_jenis_sama, il.payload_panjang, il.keluar_ringan_angka].map(|id| m.declare_func_in_func(id, b.func));
+    let [f_panjang_lokal, f_payload_jenis_sama, f_payload_panjang, f_keluar_ringan_angka, f_teks_bulat, f_tambah_nilai] =
+        [il.panjang_lokal, il.payload_jenis_sama, il.payload_panjang, il.keluar_ringan_angka, il.teks_bulat, il.tambah_nilai]
+        .map(|id| m.declare_func_in_func(id, b.func));
     let dalam = b.create_block();
     b.set_cold_block(dalam);
     // Kedalaman native dijaga di pintu masuk; parameter dimuat dari penyangga argumen.
@@ -1464,6 +1490,11 @@ pub fn turunkan(
                 b.def_var(var[t - 1], v);
                 continue;
             }
+            Cara::TeksBulat => {
+                let (p, n) = (i64c(&mut b, t as i64 - 2), b.use_var(var[t - 1]));
+                b.ins().call(f_teks_bulat, &[p, n]);
+                continue;
+            }
             Cara::PanjangLokal(l) => {
                 let (lv, pk) = (i64c(&mut b, *l as i64), b.ins().stack_addr(ptr, wadah, 0));
                 let c = b.ins().call(f_panjang_lokal, &[lv, pk]);
@@ -1657,9 +1688,12 @@ pub fn turunkan(
             }
             Cara::Bawaan => {
                 tumpahkan(&mut b, &k, &var, s, t - a..t, slot, ptr, f_taruh, &r.callee_nilai);
+                let fb = fungsi_bawaan(f, s[t - a - 1]);
+                // Bawaan polos yang bukan kandidat `bawaan_cepat`: diputuskan sekali di sini, bukan tiap panggilan.
+                let polos = if super::lambat::bawaan_polos(fb, a) { super::lambat::BAWAAN_POLOS } else { 0 };
                 let args = [
                     i64c(&mut b, ip as i64), i64c(&mut b, s.as_ptr() as i64), i64c(&mut b, t as i64),
-                    i64c(&mut b, a as i64), b.ins().stack_addr(ptr, slot, 0), i64c(&mut b, fungsi_bawaan(f, s[t - a - 1])),
+                    i64c(&mut b, a as i64 | polos), b.ins().stack_addr(ptr, slot, 0), i64c(&mut b, fb),
                 ];
                 let c = b.ins().call(f_bawaan, &args);
                 let st = b.inst_results(c)[0];
@@ -1675,7 +1709,8 @@ pub fn turunkan(
             Cara::Biner => {
                 tumpahkan(&mut b, &k, &var, s, t - 2..t, slot, ptr, f_taruh, &r.callee_nilai);
                 let args = [i64c(&mut b, ip as i64), i64c(&mut b, s.as_ptr() as i64), i64c(&mut b, t as i64), b.ins().stack_addr(ptr, slot, 0)];
-                let c = b.ins().call(f_biner, &args);
+                // `+`: dua teks milik VM disambung langsung (`lambat::tambah_nilai`), selebihnya `biner`.
+                let c = b.ins().call(if ins.op == OpCode::Add { f_tambah_nilai } else { f_biner }, &args);
                 let st = b.inst_results(c)[0];
                 let (gagal, terus) = (b.create_block(), b.create_block());
                 b.set_cold_block(gagal);

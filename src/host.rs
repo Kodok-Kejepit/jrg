@@ -234,6 +234,7 @@ pub fn dir_sementara(awalan: &str) -> io::Result<std::path::PathBuf> {
         h.write_u128(sejak_epoch().unwrap_or_default().as_nanos());
         h.write_u64(URUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed));
         let p = std::env::temp_dir().join(format!("{}-{}-{:016x}", awalan, std::process::id(), h.finish()));
+        #[cfg_attr(not(unix), allow(unused_mut))]
         let mut b = std::fs::DirBuilder::new();
         #[cfg(unix)]
         { use std::os::unix::fs::DirBuilderExt; b.mode(0o700); }
