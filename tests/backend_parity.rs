@@ -175,6 +175,12 @@ fn konformans_semantik_nilai_jalan_di_dua_backend() {
 
 /// Program yang WAJIB ditolak oleh KEDUA backend, dengan alasan yang sama.
 const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
+    // Fase AMAN-52 (#1041): broadcast dan `matmul` berbatas seperti pembangun — dua masukan 800 KB dulu minta 80 GB.
+    ("wokwok broadcast kegedean", "wok(wokwok::mul(wokwok::ones([100000, 1]), wokwok::ones([1, 100000])))\n", "wokwok `*`: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)", "wokwok `*`: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)"),
+    ("wokwok::matmul kegedean", "wok(wokwok::matmul(wokwok::ones([100000, 1]), wokwok::ones([1, 100000])))\n", "wokwok::matmul: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)", "wokwok::matmul: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)"),
+    // Fase AMAN-51 (#1040): pegangan pustaka berwujud struct tidak jadi `{"id":1}` di JSON — ditolak seperti `Mutex`.
+    ("json::stringify atas Ptr di larik", "let p = ptr::new(1)\n wok(json::stringify([p]))\n", "`Ptr` tidak punya padanan di JSON, jadi ia tidak bisa disandikan", "`Ptr` tidak punya padanan di JSON, jadi ia tidak bisa disandikan"),
+    ("dok::json_encode atas Future", "let f = Future::new(|| 1)\n wok(dok::json_encode([f]))\n", "`Future` tidak punya padanan di JSON, jadi ia tidak bisa disandikan", "`Future` tidak punya padanan di JSON, jadi ia tidak bisa disandikan"),
     // Fase AMAN-44 (#1021): kunci JSON kembar ditolak — dulu yang terakhir menang diam-diam.
     ("json::parse: kunci kembar", "wok(json::parse(\"{\\\"a\\\": 1, \\\"a\\\": 2}\"))\n", "json::parse: kunci `a` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama", "json::parse: kunci `a` muncul dua kali di satu objek — pengurai lain bisa memilih yang pertama"),
     ("json::parse: kunci kembar lewat escape", "wok(json::parse(\"{\\\"admin\\\": false, \\\"adm\\\\u0069n\\\": true}\"))\n", "json::parse: kunci `admin` muncul dua kali di satu objek", "json::parse: kunci `admin` muncul dua kali di satu objek"),
@@ -3725,6 +3731,57 @@ pub fn main() {
             drop(anak);
             let _ = std::fs::remove_dir_all(&dir);
             assert_eq!(tik, ["tik 0", "tik 1", "tik 2", "tik 3", "tik 4"], "vm={}: pengirim tertahan pembaca", vm);
+        }
+    }
+
+    /// Pesan setengah jadi memakai anggaran byte klien yang sama dengan badan HTTP (Fase AMAN-57): dulu
+    /// 512 sambungan masing-masing memegang 16 MiB, dan 30 saja sudah 477 MB di server.
+    #[test]
+    fn pesan_websocket_setengah_jadi_berbatas() {
+        for vm in [false, true] {
+            let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+            let dir = std::env::temp_dir().join(format!("jrg-ws3-{}-{}", port, std::process::id()));
+            std::fs::create_dir_all(&dir).unwrap();
+            let berkas = dir.join("ws.jrg");
+            std::fs::write(&berkas, PROGRAM.replace("PORT", &port.to_string())).unwrap();
+            let mut cmd = Command::new(jrgc());
+            cmd.arg(&berkas).env("JRG_SOPAN", "1").stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+            if vm { cmd.arg("--vm"); }
+            let anak = Server(cmd.spawn().unwrap());
+            let batas = Instant::now() + Duration::from_secs(20);
+            while TcpStream::connect(("127.0.0.1", port)).is_err() {
+                assert!(Instant::now() < batas, "server ws tidak menjawab");
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            let isi = vec![0u8; 16 * 1024 * 1024 - 2];
+            let mut kode = Vec::new();
+            let mut ss = Vec::new();
+            for _ in 0..18 {
+                let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+                s.set_read_timeout(Some(Duration::from_secs(10))).unwrap();
+                s.write_all(b"GET /gema HTTP/1.1\r\nHost: x\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\
+                    Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\nSec-WebSocket-Version: 13\r\n\r\n").unwrap();
+                let mut kepala = Vec::new();
+                let mut satu = [0u8; 1];
+                while !kepala.ends_with(b"\r\n\r\n") { s.read_exact(&mut satu).unwrap(); kepala.push(satu[0]); }
+                let n = (16u64 * 1024 * 1024 - 1).to_be_bytes();
+                let mut f = vec![0x82, 0xFF];
+                f.extend_from_slice(&n);
+                f.extend_from_slice(&[0, 0, 0, 0]);
+                if s.write_all(&f).and_then(|_| s.write_all(&isi)).is_err() { kode.push("putus".to_string()); continue; }
+                ss.push(s);
+            }
+            // Server yang menolak menutup sambungan itu dengan frame tutup 1013; yang lain tetap menunggu.
+            for s in ss.iter_mut() {
+                s.set_read_timeout(Some(Duration::from_millis(300))).unwrap();
+                let mut h = [0u8; 4];
+                if s.read_exact(&mut h).is_ok() && h[0] == 0x88 { kode.push(format!("tutup-{}", u16::from_be_bytes([h[2], h[3]]))); }
+            }
+            drop(anak);
+            let _ = std::fs::remove_dir_all(&dir);
+            // Penolakan kadang sampai sebagai sambungan yang diputus sebelum frame tutupnya terbaca.
+            assert!(kode.iter().any(|k| k == "tutup-1013" || k == "putus"), "vm={}: tidak ada yang ditolak: {:?}", vm, kode);
+            assert!(kode.len() <= 3, "vm={}: yang ditolak lebih dari sisa anggaran: {:?}", vm, kode);
         }
     }
 

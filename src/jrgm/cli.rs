@@ -141,6 +141,9 @@ pub(crate) enum JrgmCommand {
         /// Gunakan Bytecode VM
         #[arg(long = "vm")]
         use_vm: bool,
+        /// Gunakan JRGJIT: VM yang mengompilasi bagian panas jadi kode mesin saat jalan
+        #[arg(long = "jit")]
+        use_jit: bool,
         /// Emit bytecode disassembly (butuh --vm)
         #[arg(long = "emit-bc")]
         emit_bc: bool,
@@ -173,6 +176,9 @@ pub(crate) enum JrgmCommand {
         /// Gunakan Bytecode VM
         #[arg(long = "vm")]
         use_vm: bool,
+        /// Gunakan JRGJIT: VM yang mengompilasi bagian panas jadi kode mesin saat jalan
+        #[arg(long = "jit")]
+        use_jit: bool,
         /// Emit bytecode disassembly (butuh --vm)
         #[arg(long = "emit-bc")]
         emit_bc: bool,
@@ -192,6 +198,9 @@ pub(crate) enum JrgmCommand {
         /// Jalankan lewat bytecode VM
         #[arg(long = "vm")]
         use_vm: bool,
+        /// Gunakan JRGJIT: VM yang mengompilasi bagian panas jadi kode mesin saat jalan
+        #[arg(long = "jit")]
+        use_jit: bool,
         /// Batas waktu per berkas, dalam detik (0 = tanpa batas)
         #[arg(long = "timeout", default_value_t = 60)]
         timeout: u64,

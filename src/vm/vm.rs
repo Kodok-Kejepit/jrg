@@ -90,6 +90,61 @@ pub(crate) type VmResult<T> = Result<T, VmError>;
 
 // ─── CallFrame ───────────────────────────────────────────────────────────
 
+/// Callback yang dipanggil berulang oleh satu HOF: lewat sesi JIT (`jit::panggil::SesiHof`, bingkainya didorong
+/// sekali) selama kodenya native untuk jenis argumennya, selain itu `call_value_immediate_n`. Galat dari
+/// `panggil` sudah menutup sesinya; jalan keluar lain wajib memanggil `tutup`.
+pub(crate) struct Panggil {
+    f: VmValue,
+    /// `--jit` (diputuskan sekali per HOF).
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    jit: bool,
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    sesi: Option<crate::jit::panggil::SesiHof>,
+}
+
+impl Panggil {
+    pub(crate) fn baru(vm: &Vm, f: &VmValue) -> Self {
+        #[cfg(not(all(feature = "jit", not(target_arch = "wasm32"))))]
+        let _ = vm;
+        Panggil {
+            f: f.clone(),
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            jit: vm.profil_jit,
+            #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+            sesi: None,
+        }
+    }
+
+    #[inline(always)]
+    pub(crate) fn panggil<const N: usize>(&mut self, vm: &mut Vm, args: [VmValue; N]) -> VmResult<VmValue> {
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if self.jit { return self.panggil_jit(vm, args); }
+        vm.call_value_immediate_n(&self.f, args)
+    }
+
+    /// Jalur `--jit` `panggil`, terpisah supaya jalur VM tetap sama dengan `call_value_immediate_n`.
+    #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+    #[inline(never)]
+    fn panggil_jit<const N: usize>(&mut self, vm: &mut Vm, args: [VmValue; N]) -> VmResult<VmValue> {
+        if self.sesi.is_none() { self.sesi = crate::jit::panggil::sesi_buka(vm, &self.f, &args); }
+        if let Some(s) = &mut self.sesi {
+            return match crate::jit::panggil::sesi_panggil(vm, s, args) {
+                Ok(h) => { if !s.terbuka { self.sesi = None; } h }
+                Err(args) => {
+                    if let Some(s) = self.sesi.take() { crate::jit::panggil::sesi_tutup(vm, s); }
+                    vm.call_value_immediate_n(&self.f, args)
+                }
+            };
+        }
+        vm.call_value_immediate_n(&self.f, args)
+    }
+
+    pub(crate) fn tutup(self, _vm: &mut Vm) {
+        #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+        if let Some(s) = self.sesi { crate::jit::panggil::sesi_tutup(_vm, s); }
+    }
+}
+
 pub(crate) struct CallFrame {
     pub(crate) func:   Arc<VmFunction>,
     pub(crate) ip:     usize,
@@ -206,6 +261,9 @@ impl Vm {
     }
 
     /// `call_value_immediate` dengan argumen tetap, tanpa `Vec` per panggilan (pemanggilan balik HOF).
+    /// Pemanggil callback berulang untuk satu HOF (`Panggil::panggil`, lalu `tutup` sesudah loopnya).
+    pub(crate) fn panggil_ulang(&self, f: &VmValue) -> Panggil { Panggil::baru(self, f) }
+
     pub(crate) fn call_value_immediate_n<const N: usize>(&mut self, fn_val: &VmValue, args: [VmValue; N]) -> VmResult<VmValue> {
         let (dasar, tinggi) = (self.frames.len(), self.stack.len());
         self.push(fn_val.clone());
@@ -218,8 +276,14 @@ impl Vm {
     fn selesaikan_panggilan(&mut self, argc: usize, dasar: usize, tinggi: usize) -> VmResult<VmValue> {
         // Native dan `extern "C"` selesai di dalam `call_value_at` tanpa bingkai baru. Menjalankan
         // `run_until` untuk mereka melanjutkan bingkai PEMANGGIL dari tengah instruksinya.
-        let hasil = self.call_value_at(argc, None, false)
-            .and_then(|_| if self.frames.len() > dasar { self.run_until(dasar) } else { Ok(()) });
+        let hasil = self.call_value_at(argc, None, false);
+        self.selesaikan_dari(hasil, dasar, tinggi)
+    }
+
+    /// Bingkai yang sudah didorong di atas `dasar` dijalankan VM sampai kembali; nilainya (`unit` kalau tidak ada).
+    #[inline(always)]
+    pub(crate) fn selesaikan_dari(&mut self, hasil: VmResult<()>, dasar: usize, tinggi: usize) -> VmResult<VmValue> {
+        let hasil = hasil.and_then(|_| if self.frames.len() > dasar { self.run_until(dasar) } else { Ok(()) });
         if let Err(e) = hasil {
             // Bingkainya sudah dilepas `run_until`, kecuali galat dari kode JIT yang dimasuki `call_value_at`.
             let e = if self.frames.len() > dasar { self.galat_keluar(dasar, e) } else { e };
@@ -425,38 +489,46 @@ impl Vm {
             match method {
                 "map" => {
                     let mut out = Vec::with_capacity(items.len());
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        out.push(self.call_value_immediate_n(&a0, [item])?);
+                        out.push(p.panggil(self, [item])?);
                     }
+                    p.tutup(self);
                     self.push(VmValue::array(out));
                 }
                 "filter" => {
                     let mut out = Vec::new();
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        if self.call_value_immediate_n(&a0, [item.clone()])?.is_truthy() {
+                        if p.panggil(self, [item.clone()])?.is_truthy() {
                             out.push(item);
                         }
                     }
+                    p.tutup(self);
                     self.push(VmValue::array(out));
                 }
                 "any" => {
                     let mut found = false;
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        if self.call_value_immediate_n(&a0, [item])?.is_truthy() {
+                        if p.panggil(self, [item])?.is_truthy() {
                             found = true;
                             break;
                         }
                     }
+                    p.tutup(self);
                     self.push(VmValue::Bool(found));
                 }
                 "all" => {
                     let mut all = true;
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        if !self.call_value_immediate_n(&a0, [item])?.is_truthy() {
+                        if !p.panggil(self, [item])?.is_truthy() {
                             all = false;
                             break;
                         }
                     }
+                    p.tutup(self);
                     self.push(VmValue::Bool(all));
                 }
                 // `Option`, sama seperti `.first()`/`.last()`/`.get()`.
@@ -486,18 +558,22 @@ impl Vm {
                 // Dulu bentuk method ini menjawab array aslinya "biar bisa
                 // dirangkai", dan yang dirangkai justru hasil yang dibuang.
                 "each" => {
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        self.call_value_immediate_n(&a0, [item])?;
+                        p.panggil(self, [item])?;
                     }
+                    p.tutup(self);
                     self.push(VmValue::Unit);
                 }
                 "count_if" => {
                     let mut n: i128 = 0;
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        if self.call_value_immediate_n(&a0, [item])?.is_truthy() {
+                        if p.panggil(self, [item])?.is_truthy() {
                             n += 1;
                         }
                     }
+                    p.tutup(self);
                     self.push(VmValue::Int(n));
                 }
                 // `Option`, sama seperti `find`: `-1` adalah indeks yang SAH di JRG.
@@ -546,17 +622,21 @@ impl Vm {
                 }
                 "reduce" => {
                     let mut acc = a1;
+                    let mut p = self.panggil_ulang(&a0);
                     for item in items {
-                        acc = self.call_value_immediate_n(&a0, [acc, item])?;
+                        acc = p.panggil(self, [acc, item])?;
                     }
+                    p.tutup(self);
                     self.push(acc);
                 }
                 // `a.fold(awal, f)` — nilai awal di DEPAN, kebalikan `reduce(f, awal)`.
                 "fold" => {
                     let mut acc = a0;
+                    let mut p = self.panggil_ulang(&a1);
                     for item in items {
-                        acc = self.call_value_immediate_n(&a1, [acc, item])?;
+                        acc = p.panggil(self, [acc, item])?;
                     }
+                    p.tutup(self);
                     self.push(acc);
                 }
                 "zip_with" => {

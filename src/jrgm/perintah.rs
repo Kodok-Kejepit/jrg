@@ -91,10 +91,10 @@ pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip
 }
 
 pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
-           use_vm: bool, emit_bc: bool, watch: bool, clear: bool, skip_python_deps: bool) -> Result<(), String> {
+           use_vm: bool, use_jit: bool, emit_bc: bool, watch: bool, clear: bool, skip_python_deps: bool) -> Result<(), String> {
     if let Some((m, r, akar)) = super::bahasa::proyek_kini()? {
-        if use_vm || prof || emit_bc {
-            return Err(format!("`--vm`, `--profile` dan `--emit-bc` cuma untuk proyek JRG; ini proyek {}", r.nama));
+        if use_vm || use_jit || prof || emit_bc {
+            return Err(format!("`--vm`, `--jit`, `--profile` dan `--emit-bc` cuma untuk proyek JRG; ini proyek {}", r.nama));
         }
         if watch { return super::bahasa::awasi(&m, r, &akar, args, clear); }
         let kode = super::bahasa::jalan(&m, r, &akar, args)?;
@@ -103,11 +103,13 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
     }
     let cwd = std::env::current_dir().map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let manifest = Manifest::load(&cwd)?;
+    // `--jit` = VM plus kode mesin, persis seperti `jrgc --jit`.
+    let use_vm = jalur_vm(use_vm, use_jit);
 
     if verbose {
         eprintln!("[jrgm] run: {} v{} [{}{}]",
             manifest.name, manifest.version,
-            if use_vm { "VM" } else { "interpreter" },
+            if use_jit { "JIT" } else if use_vm { "VM" } else { "interpreter" },
             if watch { "+watch" } else { "" });
     }
 
@@ -120,6 +122,7 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
             .unwrap_or(cwd.clone());
         let mut config = crate::hotreload::ReloadConfig::new(manifest.entry);
         config.use_vm       = use_vm;
+        config.use_jit      = use_jit;
         config.profiling    = prof;
         config.emit_bc      = emit_bc;
         config.clear_screen = clear;
@@ -135,16 +138,17 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
 }
 
 pub(crate) fn cmd_exec(file: &Path, args: &[String], verbose: bool, prof: bool,
-            use_vm: bool, emit_bc: bool, watch: bool, clear: bool) -> Result<(), String> {
+            use_vm: bool, use_jit: bool, emit_bc: bool, watch: bool, clear: bool) -> Result<(), String> {
     if let Some(r) = super::bahasa::resep_berkas(file) {
-        if use_vm || prof || emit_bc || watch {
-            return Err(format!("`--vm`, `--profile`, `--emit-bc` dan `--watch` cuma untuk berkas .jrg; ini berkas {}", r.nama));
+        if use_vm || use_jit || prof || emit_bc || watch {
+            return Err(format!("`--vm`, `--jit`, `--profile`, `--emit-bc` dan `--watch` cuma untuk berkas .jrg; ini berkas {}", r.nama));
         }
         let kode = super::bahasa::exec(file, r, args)?;
         if kode != 0 { process::exit(kode); }
         return Ok(());
     }
     if verbose { eprintln!("[jrgm] exec: {}", file.display()); }
+    let use_vm = jalur_vm(use_vm, use_jit);
 
     if watch {
         let watch_dir = file.parent()
@@ -153,6 +157,7 @@ pub(crate) fn cmd_exec(file: &Path, args: &[String], verbose: bool, prof: bool,
         let cwd = std::env::current_dir().unwrap_or_else(|_| watch_dir.clone());
         let mut config = crate::hotreload::ReloadConfig::new(file.to_path_buf());
         config.use_vm       = use_vm;
+        config.use_jit      = use_jit;
         config.profiling    = prof;
         config.emit_bc      = emit_bc;
         config.clear_screen = clear;
@@ -167,10 +172,16 @@ pub(crate) fn cmd_exec(file: &Path, args: &[String], verbose: bool, prof: bool,
     run_jrg_file(file, verbose, prof, use_vm, emit_bc)
 }
 
+/// `--jit` berarti jalur VM dengan JIT menyala (`jit::aktifkan`), satu aturan dengan `jrgc --jit`.
+fn jalur_vm(use_vm: bool, use_jit: bool) -> bool {
+    if use_jit { crate::jit::aktifkan(); }
+    use_vm || use_jit
+}
+
 /// Jalankan test proyek ini.
-pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> Result<(), String> {
+pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, use_jit: bool, batas_detik: u64) -> Result<(), String> {
     if let Some((m, r, akar)) = super::bahasa::proyek_kini()? {
-        if use_vm { return Err(format!("`--vm` cuma untuk proyek JRG; ini proyek {}", r.nama)); }
+        if use_vm || use_jit { return Err(format!("`--vm` dan `--jit` cuma untuk proyek JRG; ini proyek {}", r.nama)); }
         return super::bahasa::uji(&m, r, &akar, filter);
     }
     let akar = std::env::current_dir().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?;
@@ -233,7 +244,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
 
     let jrgc = crate::hotreload::biner_jrgc();
     eprintln!("[jrgm] {} test di {} berkas{}", total, rencana.len(),
-        if use_vm { " (VM)" } else { "" });
+        if use_jit { " (JIT)" } else if use_vm { " (VM)" } else { "" });
 
     // Path ditulis relatif terhadap akar proyek. Yang absolut benar tapi
     // lebarnya bisa melebihi terminal, dan bagian yang menarik — nama
@@ -245,7 +256,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, batas_detik: u64) -> 
         eprintln!("\n== {} ({} test)", pendek(f), uji.len());
         let mut cmd = std::process::Command::new(&jrgc);
         cmd.arg("--uji").arg(f);
-        if use_vm { cmd.arg("--vm"); }
+        if use_jit { cmd.arg("--jit"); } else if use_vm { cmd.arg("--vm"); }
         if let Some(s) = filter { cmd.arg("--uji-filter").arg(s); }
         for d in &inc { cmd.arg("-I").arg(d); }
         cmd.current_dir(&akar);

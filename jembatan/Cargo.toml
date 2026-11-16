@@ -3,7 +3,7 @@
 # dan dua pustaka statis Rust dalam satu biner saling menimpa simbol alokator dan panik.
 [package]
 name = "jrg_jembatan"
-version     = "0.5.0"
+version     = "0.6.0"
 edition = "2021"
 publish = false
 

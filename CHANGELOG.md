@@ -6,6 +6,39 @@ mungkin terjadi; semuanya dicatat di bagian **Memutus**.
 
 ## [Belum dirilis]
 
+## [0.6.0] — 2026-11-16
+
+### Memutus
+
+- **`json::stringify`, `json::pretty` dan `dok::json_encode` menolak pegangan pustaka** (`Ptr`, `Future`, `DokDb`, …),
+  seperti `Mutex` — dulu tertulis `{"id":1}`.
+- **WebSocket `dok::serve` melepas klien yang diam dan tidak menjawab `ping`** (60 + 30 detik), menutup pesan yang
+  tidak utuh dalam 30 detik ditambah 1 detik per 16 KiB, dan menghitung pesan setengah jadi di anggaran 256 MiB yang
+  sama dengan badan HTTP.
+- **`wokwok::` menolak hasil broadcast dan `matmul` di atas 256 MiB**, seperti pembangun lariknya — dulu dua larik
+  kecil bisa meminta puluhan GB dan mematikan prosesnya.
+
+### Baru
+
+- **`jrgm run --jit`, `jrgm exec --jit` dan `jrgm test --jit`**: proyek bisa dijalankan dan diuji lewat mesin keempat
+  (VM yang mengompilasi bagian panas jadi kode mesin), sama dengan `jrgc --jit`; `--watch` ikut meneruskannya.
+
+### Kinerja
+
+- **`--jit` menghitung method berumus di tempat**: `x = x.m(dt)` dengan `m` yang membangun `Self` dari rumus pecahan
+  atas field-nya tidak lagi memanggil method dan membangun struct baru — field dibaca, dihitung di register, lalu
+  ditulis ke struct yang sama; method yang cuma mengembalikan rumus pecahan atas field-nya (`rec.score()`) juga
+  dihitung di tempat. `struct_particles` 12,9 → 3,3 s, `mixed_report` 2,2 → 1,4 s.
+- **`--jit` memanggil callback `map`/`filter`/`reduce` dan kawan-kawannya langsung**: bingkai callback disiapkan sekali
+  untuk seluruh larik, bukan per elemen. `hof_closure` 0,66 → 0,44 s.
+- **`--jit` tidak lagi jatuh ke nilai VM di loop sesudah titik masuknya**: panggilan di loop yang belum pernah dijalankan
+  saat fungsi pemanggilnya dikompilasi meminjam jenis hasil panggilan lain ke fungsi yang sama. `string_scan`
+  0,44 → 0,32 s.
+
+### Diperbaiki
+
+- **`jrgm siapkan android` melewati entri katalog yang nama berkas atau foldernya bukan nama polos** (`..`, `/`).
+
 ## [0.5.0] — 2026-11-16
 
 ### Memutus

@@ -79,6 +79,9 @@ pub(crate) fn urai_katalog(xml: &str, os: &str, arch: &str) -> Vec<Paket> {
             let arch_ok = isi_tag(satu, "host-arch").map_or(true, |x| x == arch);
             if !(os_ok && arch_ok) { continue; }
             let (Some(url), Some(sha1)) = (isi_tag(satu, "url"), isi_tag(satu, "checksum")) else { continue };
+            // `url` jadi nama berkas tembolok dan `jalur` folder tujuan yang lebih dulu DIHAPUS (`remove_dir_all`):
+            // cuma nama polos — `../x` dari katalog yang dimanipulasi dulu menulis dan menghapus di luar SDK.
+            if !nama_berkas_polos(url) || !jalur.split(';').all(nama_berkas_polos) { continue; }
             let ukuran = isi_tag(satu, "size").and_then(|v| v.parse().ok()).unwrap_or(0);
             hasil.push(Paket { jalur: jalur.clone(), versi: versi.clone(), stabil, url: url.to_string(), sha1: sha1.to_string(), ukuran });
             break;
@@ -139,6 +142,10 @@ fn unduh(url: &str, ke: &Path, judul: &str) -> Result<(), String> {
         return Err(format!("unduhan {} gagal: {}", url, String::from_utf8_lossy(&o.stderr).lines().last().unwrap_or("")));
     }
     Ok(())
+}
+
+fn nama_berkas_polos(n: &str) -> bool {
+    !n.is_empty() && n.len() <= 255 && !n.starts_with('.') && n.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
 }
 
 fn sha1_berkas(p: &Path) -> Result<String, String> {
@@ -302,6 +309,10 @@ mod tes {
         assert_eq!(terbaru(&p, "platforms;").unwrap().url, "p35.zip", "arsip tanpa host-os berlaku di mana pun");
         assert!(urai_katalog(CONTOH, "linux", "aarch64").iter().all(|x| x.jalur != "ndk;26.3.11579264"), "tidak ada NDK aarch64");
         assert_eq!(tujuan(Path::new("/s"), ndk), PathBuf::from("/s/ndk/26.3.11579264"));
+        // Nama dari katalog yang keluar dari tembolok atau SDK dilewati, bukan dipakai.
+        let jahat = CONTOH.replace("ndk-linux.zip", "../../x.zip").replace("ndk;26.3.11579264", "ndk;../../../rumah");
+        assert!(urai_katalog(&jahat, "linux", "x64").iter().all(|x| !x.url.contains("..") && !x.jalur.contains("..")));
+        assert!(super::nama_berkas_polos("ndk-linux.zip") && !super::nama_berkas_polos("..") && !super::nama_berkas_polos("a/b"));
         let xml = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/jrgm/main.rs")).unwrap();
         assert!(urai_katalog(&xml, "linux", "x64").is_empty(), "bukan katalog: kosong, bukan panik");
     }

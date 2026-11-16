@@ -7,7 +7,7 @@ use cranelift_codegen::isa::CallConv;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_module::{FuncId, Module};
 
-use super::layak::{Cara, Jenis, Rencana};
+use super::layak::{Cara, Jenis, Rencana, Simpul};
 use crate::vm::opcode::OpCode;
 use crate::vm::value::VmFunction;
 
@@ -99,7 +99,7 @@ pub struct ImporLambat {
     pub taruh: FuncId, pub ambil: FuncId, pub simpan: FuncId, pub pola: FuncId, pub payload: FuncId,
     pub pola_lokal: FuncId, pub payload_lokal: FuncId, pub payload_angka: FuncId, pub pola_pilih: FuncId, pub buka_lokal: FuncId, pub field_lokal: FuncId, pub field_banyak: FuncId, pub metode_tukar: FuncId, pub metode_lokal: FuncId, pub karakter_lokal: FuncId, pub konteks_mentah: FuncId, pub masuk_ringan: FuncId, pub keluar_ringan: FuncId, pub karakter: FuncId, pub bangun: FuncId, pub baca_pecahan: FuncId, pub jenis_sama: FuncId, pub panjang: FuncId, pub panjang_lokal: FuncId,
     pub payload_jenis_sama: FuncId, pub payload_panjang: FuncId, pub keluar_ringan_angka: FuncId, pub teks_bulat: FuncId,
-    pub tambah_nilai: FuncId,
+    pub tambah_nilai: FuncId, pub keluar_ringan_nilai: FuncId, pub ubah_baca: FuncId, pub ubah_tulis: FuncId, pub ubah_tulis_lokal: FuncId, pub ubah_siap: FuncId,
     pub iter_ada: FuncId, pub maju: FuncId, pub langkah_cabang: FuncId, pub sebar: FuncId,
     pub pindah: FuncId, pub muat_global: FuncId, pub simpan_global: FuncId, pub indeks: FuncId, pub field: FuncId,
     pub masuk: FuncId, pub keluar: FuncId, pub salin: FuncId, pub tukar: FuncId, pub cek_metode: FuncId,
@@ -873,6 +873,71 @@ fn tumpahkan(
     }
 }
 
+/// `Cara::Ubah`/`UbahLokal`: penerima di posisi atau lokal `p` diperiksa dan field bacaannya ke penyangga
+/// (`lambat::ubah_baca`); gagal = deopt spekulasi di `ip`. Hasil: penyangga, `p` dan situs sebagai konstanta.
+#[allow(clippy::too_many_arguments)]
+fn rumus_baca(
+    b: &mut FunctionBuilder, k: &Keluar, var: &[Variable], f_baca: FuncRef, rm: &super::layak::Rumus,
+    situs: &'static super::lambat::SitusUbah, p: usize, ip: usize, s: &[Jenis],
+) -> (StackSlot, Value, Value) {
+    let lebar = (rm.baca.len().max(rm.tulis.len()).max(1) * 8) as u32;
+    let wb = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, lebar, 3));
+    let (pv, sv, pk) = (b.ins().iconst(types::I64, p as i64), b.ins().iconst(types::I64, situs as *const _ as i64), b.ins().stack_addr(k.ptr, wb, 0));
+    let c = b.ins().call(f_baca, &[pv, sv, pk]);
+    let st = b.inst_results(c)[0];
+    jaga_spek(b, k, var, st, ip, s);
+    (wb, pv, sv)
+}
+
+/// Simpul rumus yang dipakai dihitung sekali, berurutan (operandnya selalu simpul sebelumnya); nilai field
+/// yang berubah ke penyangga `wb` (bit pecahan), argumen ke-`j` dari `arg`; hasil rumus nilai sebagai bit pecahan.
+fn rumus_hitung(
+    b: &mut FunctionBuilder, rm: &super::layak::Rumus, wb: StackSlot, ptr: Type,
+    arg: impl Fn(&mut FunctionBuilder, usize) -> Value,
+) -> Option<Value> {
+    let mut perlu = vec![false; rm.simpul.len()];
+    for &(_, v) in &rm.tulis { perlu[v] = true; }
+    if let Some(v) = rm.hasil { perlu[v] = true; }
+    for v in (0..rm.simpul.len()).rev() {
+        if !perlu[v] { continue; }
+        match rm.simpul[v] {
+            Simpul::Biner(_, l, r) => { perlu[l] = true; perlu[r] = true; }
+            Simpul::Neg(x) | Simpul::KeF64(x) => perlu[x] = true,
+            _ => {}
+        }
+    }
+    let mut nilai: Vec<Option<Value>> = vec![None; rm.simpul.len()];
+    for v in 0..rm.simpul.len() {
+        if !perlu[v] { continue; }
+        let h = match rm.simpul[v] {
+            // Field bulat tetap `I64` (selalu dibungkus `KeF64`), pecahan dibaca bitnya.
+            Simpul::Field(i) => {
+                let x = b.ins().stack_load(ptr, types::I64, wb, (i * 8) as i32);
+                if rm.baca[i].1 == 5 { b.ins().bitcast(types::F64, MemFlagsData::new(), x) } else { x }
+            }
+            Simpul::KeF64(x) => b.ins().fcvt_from_sint(types::F64, nilai[x].expect("simpul sebelumnya")),
+            Simpul::Arg(j) => arg(b, j),
+            Simpul::Konst(x) => b.ins().f64const(x),
+            Simpul::Neg(x) => b.ins().fneg(nilai[x].expect("simpul sebelumnya")),
+            Simpul::Biner(op, l, r) => {
+                let (x, y) = (nilai[l].expect("simpul sebelumnya"), nilai[r].expect("simpul sebelumnya"));
+                match op {
+                    OpCode::Add => b.ins().fadd(x, y),
+                    OpCode::Sub => b.ins().fsub(x, y),
+                    OpCode::Mul => b.ins().fmul(x, y),
+                    _ => b.ins().fdiv(x, y),
+                }
+            }
+        };
+        nilai[v] = Some(h);
+    }
+    for (j, &(_, v)) in rm.tulis.iter().enumerate() {
+        let x = dari_f64(b, nilai[v].expect("simpul tulis dihitung"));
+        b.ins().stack_store(ptr, x, wb, (j * 8) as i32);
+    }
+    rm.hasil.map(|v| dari_f64(b, nilai[v].expect("simpul hasil dihitung")))
+}
+
 pub fn turunkan(
     m: &mut impl Module,
     fungsi: &mut cranelift_codegen::ir::Function,
@@ -937,8 +1002,8 @@ pub fn turunkan(
     let [f_muat_upval, f_simpan_upval, f_tulis_vm, f_field_lokal, f_karakter, f_bangun, f_baca_pecahan, f_jenis_sama, f_panjang, f_field_banyak, f_metode_tukar, f_metode_lokal, f_karakter_lokal, f_masuk_ringan, f_keluar_ringan] =
         [il.muat_upval, il.simpan_upval, il.tulis_vm, il.field_lokal, il.karakter, il.bangun, il.baca_pecahan, il.jenis_sama, il.panjang, il.field_banyak, il.metode_tukar, il.metode_lokal, il.karakter_lokal, il.masuk_ringan, il.keluar_ringan]
         .map(|id| m.declare_func_in_func(id, b.func));
-    let [f_panjang_lokal, f_payload_jenis_sama, f_payload_panjang, f_keluar_ringan_angka, f_teks_bulat, f_tambah_nilai] =
-        [il.panjang_lokal, il.payload_jenis_sama, il.payload_panjang, il.keluar_ringan_angka, il.teks_bulat, il.tambah_nilai]
+    let [f_panjang_lokal, f_payload_jenis_sama, f_payload_panjang, f_keluar_ringan_angka, f_teks_bulat, f_tambah_nilai, f_keluar_ringan_nilai, f_ubah_baca, f_ubah_tulis, f_ubah_tulis_lokal, f_ubah_siap] =
+        [il.panjang_lokal, il.payload_jenis_sama, il.payload_panjang, il.keluar_ringan_angka, il.teks_bulat, il.tambah_nilai, il.keluar_ringan_nilai, il.ubah_baca, il.ubah_tulis, il.ubah_tulis_lokal, il.ubah_siap]
         .map(|id| m.declare_func_in_func(id, b.func));
     let dalam = b.create_block();
     b.set_cold_block(dalam);
@@ -1495,6 +1560,64 @@ pub fn turunkan(
                 b.ins().call(f_teks_bulat, &[p, n]);
                 continue;
             }
+            Cara::Ubah(u) => {
+                let rm = &r.ubah[*u];
+                let p = t - a;
+                let situs = super::lambat::SitusUbah::bocor(rm);
+                let (wb, pv, sv) = rumus_baca(&mut b, &k, &var, f_ubah_baca, rm, situs, p, ip, s);
+                rumus_hitung(&mut b, rm, wb, ptr, |b, j| { let x = b.use_var(var[p + j]); b.ins().bitcast(types::F64, MemFlagsData::new(), x) });
+                let pk = b.ins().stack_addr(ptr, wb, 0);
+                b.ins().call(f_ubah_tulis, &[pv, sv, pk]);
+                continue;
+            }
+            Cara::UbahLokal { rumus, lebar } => {
+                let rm = &r.ubah[*rumus];
+                let situs = super::lambat::SitusUbah::bocor(rm);
+                let arg = |b: &mut FunctionBuilder, j: usize| match rm.sumber[j - 1] {
+                    super::layak::Sumber::Lokal(x) => { let v = b.use_var(var[x]); b.ins().bitcast(types::F64, MemFlagsData::new(), v) }
+                    super::layak::Sumber::Konst(x) => b.ins().f64const(x),
+                };
+                if let Some(tl) = super::tata_letak::tata_letak() {
+                    // Struct milik tunggal disiapkan pembantu; pecahan ditulis langsung ke isi field-nya.
+                    let lebar_b = (rm.baca.len().max(rm.tulis.len()).max(1) * 8) as u32;
+                    let wb = b.create_sized_stack_slot(StackSlotData::new(StackSlotKind::ExplicitSlot, lebar_b, 3));
+                    let (lv, sv, pk) = (i64c(&mut b, a as i64), i64c(&mut b, situs as *const _ as i64), b.ins().stack_addr(ptr, wb, 0));
+                    let c = b.ins().call(f_ubah_siap, &[lv, sv, pk]);
+                    let isi = b.inst_results(c)[0];
+                    let gagal = b.ins().icmp_imm_u(IntCC::Equal, isi, 0);
+                    jaga_spek(&mut b, &k, &var, gagal, ip, s);
+                    rumus_hitung(&mut b, rm, wb, ptr, arg);
+                    for (j, &(q, _)) in rm.tulis.iter().enumerate() {
+                        let x = b.ins().stack_load(ptr, types::I64, wb, (j * 8) as i32);
+                        b.ins().store(fl, x, isi, (q * tl.ukuran + tl.isi_float) as i32);
+                    }
+                } else {
+                    let (wb, lv, sv) = rumus_baca(&mut b, &k, &var, f_ubah_baca, rm, situs, a, ip, s);
+                    rumus_hitung(&mut b, rm, wb, ptr, arg);
+                    let pk = b.ins().stack_addr(ptr, wb, 0);
+                    b.ins().call(f_ubah_tulis_lokal, &[lv, sv, pk]);
+                }
+                let ke = tepi(&mut b, r, &blok, ip, ip + lebar, &mut tunda);
+                b.ins().jump(ke, &[]);
+                isi_tepi(&mut b, &k, r, &blok, &var, &mut tunda, f_tulis_vm, f_taruh);
+                terbuka = false;
+                continue;
+            }
+            Cara::RumusLokal { rumus, lebar } => {
+                let rm = &r.ubah[*rumus];
+                let situs = super::lambat::SitusUbah::bocor(rm);
+                let (wb, _, _) = rumus_baca(&mut b, &k, &var, f_ubah_baca, rm, situs, a, ip, s);
+                let h = rumus_hitung(&mut b, rm, wb, ptr, |b, j| match rm.sumber[j - 1] {
+                    super::layak::Sumber::Lokal(x) => { let v = b.use_var(var[x]); b.ins().bitcast(types::F64, MemFlagsData::new(), v) }
+                    super::layak::Sumber::Konst(x) => b.ins().f64const(x),
+                }).expect("rumus nilai");
+                b.def_var(var[t], h);
+                let ke = tepi(&mut b, r, &blok, ip, ip + lebar, &mut tunda);
+                b.ins().jump(ke, &[]);
+                isi_tepi(&mut b, &k, r, &blok, &var, &mut tunda, f_tulis_vm, f_taruh);
+                terbuka = false;
+                continue;
+            }
             Cara::PanjangLokal(l) => {
                 let (lv, pk) = (i64c(&mut b, *l as i64), b.ins().stack_addr(ptr, wadah, 0));
                 let c = b.ins().call(f_panjang_lokal, &[lv, pk]);
@@ -1650,6 +1773,7 @@ pub fn turunkan(
                 let tp = b.ins().stack_addr(ptr, titip, 0);
                 let c = match angka {
                     Some(kode) => { let kv = i64c(&mut b, kode); b.ins().call(f_keluar_ringan_angka, &[st, h, tp, kv]) }
+                    None if ringan && r.spek[ip].is_none() => b.ins().call(f_keluar_ringan_nilai, &[st, h, tp]),
                     None => b.ins().call(if ringan { f_keluar_ringan } else { f_keluar }, &[st, h, tp]),
                 };
                 let r0 = b.inst_results(c)[0];

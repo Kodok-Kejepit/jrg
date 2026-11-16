@@ -29,7 +29,7 @@ dikompilasi paralel.
 ```sh
 cargo test --release -j 1 --no-fail-fast   # seluruh tes
 cargo test --test backend_parity           # satu berkas tes
-sh rilis/uji_asap.sh target/release 0.5.0  # uji asap atas biner jadi
+sh rilis/uji_asap.sh target/release 0.6.0  # uji asap atas biner jadi
 ```
 
 `--no-fail-fast` penting: tanpanya `cargo test` berhenti di berkas tes pertama yang gagal. Tes yang memakai Python, Node,

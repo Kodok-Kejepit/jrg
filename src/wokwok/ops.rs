@@ -157,11 +157,19 @@ fn i_op(op: Biner, x: i64, y: i64) -> Hasil<i64> {
     })
 }
 
+/// Jumlah elemen hasil broadcast, jenuh (perkalian `usize` biasa membungkus di build rilis: `[2^32, 1]` × `[1, 2^32]`
+/// jadi 0) dan diperiksa batas pembangun — dua masukan 800 KB dulu meminta 80 GB dan mematikan prosesnya.
+fn total_broadcast(shape: &[usize], konteks: &str) -> Hasil<usize> {
+    let total = shape.iter().fold(1usize, |t, &d| t.saturating_mul(d));
+    super::daftar::periksa_ukuran(total, konteks)?;
+    Ok(total)
+}
+
 /// Operasi biner dengan broadcasting.
 pub fn biner(a: &Nd, b: &Nd, op: Biner) -> Hasil<Nd> {
     let shape = bentuk_broadcast(&a.shape, &b.shape)
         .map_err(|e| format!("wokwok `{}`: {}", op.simbol(), e))?;
-    let total: usize = shape.iter().product();
+    let total = total_broadcast(&shape, &format!("wokwok `{}`", op.simbol()))?;
 
     if op.logika() {
         let (x, y) = (bool_data(a), bool_data(b));
@@ -468,7 +476,7 @@ pub fn pilih(k: &Nd, a: &Nd, b: &Nd) -> Hasil<Nd> {
         .map_err(|e| format!("wokwok::pilih: {}", e))?;
     let shape = bentuk_broadcast(&s1, &b.shape)
         .map_err(|e| format!("wokwok::pilih: {}", e))?;
-    let total: usize = shape.iter().product();
+    let total = total_broadcast(&shape, "wokwok::pilih")?;
     let kb = bool_data(k);
     let ambil = |nd: &Nd, i: usize| -> usize {
         if nd.size() == 1 { 0 } else { i.min(nd.size() - 1) }
@@ -505,5 +513,18 @@ pub fn jepit(a: &Nd, lo: f64, hi: f64) -> Hasil<Nd> {
             let v = a.f64_data();
             Nd::baru(Buf::F64(v.iter().map(|&x| x.clamp(lo, hi)).collect()), a.shape.clone())
         }
+    }
+}
+
+#[cfg(test)]
+mod uji_broadcast {
+    /// Hasil kali bentuk broadcast tidak membungkus dan berbatas seperti pembangun.
+    #[test]
+    fn total_broadcast_jenuh_dan_berbatas() {
+        let besar = 1usize << 32;
+        assert!(super::total_broadcast(&[besar, besar], "uji").is_err(), "2^64 tidak boleh membungkus jadi 0");
+        assert!(super::total_broadcast(&[100000, 100000], "uji").unwrap_err().contains("minta 10000000000 elemen"));
+        assert_eq!(super::total_broadcast(&[5000, 5000], "uji").unwrap(), 25_000_000);
+        assert_eq!(super::total_broadcast(&[], "uji").unwrap(), 1);
     }
 }

@@ -3378,3 +3378,192 @@ fn upval_pendek_sama_dengan_vm() {
         assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
     }
 }
+
+/// Method berumus sebaris (`Cara::UbahLokal`/`Ubah`/`RumusLokal`, langkah 81–82): pembaruan biasa, salinan yang
+/// dibagi, field bulat yang dibaca rumus (deopt) atau cuma ditulis, lokal yang ditangkap closure, hasil ke lokal
+/// lain, rumus nilai dengan field bulat dan field yang jenisnya berganti.
+const UBAH: &str = r#"struct P { pub x: f64, pub v: f64, pub nama: string, pub n: int }
+
+impl P {
+    fn maju(self, dt: f64) -> P {
+        return P { x: self.x + self.v * dt, v: self.v - self.x * 0.5, nama: self.nama, n: self.n }
+    }
+    fn setel(self, k: f64) -> P {
+        return P { x: -self.x, v: k / 4.0, nama: self.nama, n: self.n }
+    }
+}
+
+// Pembaruan biasa di loop panas.
+fn biasa() {
+    var p = P { x: 1.0, v: 0.5, nama: "a", n: 3 }
+    for i in 0..3000 { p = p.maju(0.01) }
+    wok(p.x, p.v, p.nama, p.n)
+}
+
+// Salinan yang dibagi tidak ikut berubah.
+fn dibagi() {
+    var q = P { x: 2.0, v: 1.0, nama: "b", n: 4 }
+    var simpan = []
+    for i in 0..3000 {
+        if i % 1000 == 0 { simpan = simpan + [q] }
+        q = q.maju(0.02)
+    }
+    wok(q.x, simpan[0].x, simpan[1].x, simpan[2].x)
+}
+
+// Field bulat yang dibaca rumus: spekulasinya gagal di tengah jalan.
+fn bulat(x0) {
+    var r = P { x: 1.0, v: 2.0, nama: "c", n: 5 }
+    for i in 0..3000 {
+        if i == 2000 { r = P { x: x0, v: 2.0, nama: "c", n: 5 } }
+        r = r.maju(0.001)
+    }
+    wok(r.x, r.v)
+}
+
+// Field bulat yang cuma ditulis: diganti pecahan.
+fn tulis_saja() {
+    var w = P { x: 1.5, v: 7.0, nama: "d", n: 6 }
+    for i in 0..3000 {
+        if i == 2000 { w = P { x: 1.5, v: 7, nama: "d", n: 6 } }
+        w = w.setel(1.0)
+    }
+    wok(w.x, w.v, typeof(w.v))
+}
+
+// Lokal yang ditangkap closure: lewat sel, closure melihat pembaruannya.
+fn tangkap() {
+    var c = P { x: 3.0, v: 1.0, nama: "e", n: 7 }
+    let lihat = || c.x
+    for i in 0..3000 { c = c.maju(0.0001) }
+    wok(lihat(), c.x)
+}
+
+// Hasil ke lokal lain: penerimanya disalin, asalnya tetap.
+fn lain() {
+    let a = P { x: 1.0, v: 1.0, nama: "f", n: 8 }
+    var t = 0.0
+    for i in 0..3000 { let b = a.maju(0.1); t = t + b.x }
+    wok(a.x, t)
+}
+
+// Rumus nilai (`Cara::RumusLokal`): field bulat lewat `as f64`; field berjenis lain di tengah jalan.
+struct R { pub a: f64, pub w: int }
+
+impl R {
+    fn skor(self) -> f64 { return self.a * (1.0 + (self.w as f64) * 0.01) - 0.5 }
+}
+
+fn nilai_rumus(x) {
+    var t = 0.0
+    for i in 0..3000 {
+        var r = R { a: (i as f64) * 0.5, w: i % 7 }
+        if i == 2000 { r = R { a: x, w: 3 } }
+        t = t + r.skor()
+    }
+    wok(t)
+}
+
+fn main() {
+    biasa()
+    dibagi()
+    bulat(1)
+    tulis_saja()
+    tangkap()
+    lain()
+    nilai_rumus(2)
+}
+"#;
+
+#[test]
+fn ubah_sama_dengan_vm() {
+    let v = jalankan(UBAH, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.lines().count() == 7, "{}{}", v.stdout, v.stderr);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(UBAH, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    // Kelima pembaruan di tempat dan satu ke lokal lain memang lewat rumus (bukan panggilan biasa).
+    let r = jalankan(UBAH, &["--jit"], &[("JRG_JIT_LOG", "rencana")]);
+    assert!(r.stderr.matches("UbahLokal").count() >= 5 && r.stderr.contains(" Ubah(") && r.stderr.contains("RumusLokal"),
+        "{}", r.stderr);
+}
+
+/// Situs `Call` yang belum dijalankan VM (loop sesudah titik OSR) meminjam jenis hasil situs lain ke callee yang
+/// sama (langkah 83): `hash` tetap bilangan native di loop kedua; pinjaman yang salah (hasil di luar 64 bit) deopt.
+const PINJAM_SPEK: &str = r#"fn fnv(h: uint, s: str) -> uint {
+    var acc: uint = h
+    for i in 0..len(s) {
+        acc = math::wrap_mul(acc ^ (str::char_at(s, i) as uint), 1099511628211)
+    }
+    return acc
+}
+
+fn kali(x, k) { return x * k }
+
+fn main() {
+    var hash: uint = 1469598103934665603
+    for r in 0..3000 { hash = fnv(hash, "abcdefgh") }
+    for r in 0..3000 { hash = fnv(hash, "héllo ☃ 𝔘") }
+    wok(hash)
+    // Situs kedua meminjam jenis hasil bulat dari situs pertama, lalu hasilnya di luar 64 bit.
+    var a = 0
+    for r in 0..3000 { a = a + kali(r, 3) }
+    var b = 0
+    for r in 0..3000 { b = b + kali(r, 9223372036854775807) }
+    wok(a, b)
+}
+"#;
+
+#[test]
+fn pinjam_spek_sama_dengan_vm() {
+    let v = jalankan(PINJAM_SPEK, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.lines().count() == 2, "{}{}", v.stdout, v.stderr);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(PINJAM_SPEK, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    // Tanpa pinjaman, `fnv` dari loop kedua dikompilasi dengan `h` milik VM.
+    let r = jalankan(PINJAM_SPEK, &["--jit"], &[("JRG_JIT_LOG", "rencana")]);
+    assert!(r.stderr.contains("rencana fnv") && !r.stderr.contains("LoadLocal 0 Muat [Nilai, Nilai]"), "{}", r.stderr);
+}
+
+/// Sesi panggilan HOF (`jit::panggil::SesiHof`, langkah 84): jenis elemen yang berganti di tengah larik, closure yang
+/// menulis tangkapannya, HOF bersarang, callback rekursif dan berhasil struct, bentuk method dan namespace, galat di
+/// tengah larik (kalimat dan jejaknya).
+const SESI_HOF: &str = r#"struct T { pub a: int }
+
+fn fakt(n) { if n < 2 { return 1 } return n * fakt(n - 1) }
+
+fn main() {
+    let xs = range(0, 3000)
+    // Jenis elemen berganti di tengah: sesinya ditutup, panggilan biasa, lalu dibuka lagi.
+    var campur = []
+    for i in 0..3000 { campur = campur + [(i % 500 == 0) $ (i as float) : i] }
+    wok(campur.map(|x| x * 2).reduce(|a, b| a + b, 0))
+    // Closure yang menulis tangkapannya.
+    var n = 0
+    xs.each(|x| { n = n + x })
+    wok(n)
+    // HOF bersarang di dalam callback.
+    wok(range(0, 300).map(|i| range(0, i % 7).map(|j| j * i).reduce(|a, b| a + b, 0)).reduce(|a, b| a + b, 0))
+    // Callback rekursif dan hasil struct.
+    wok(range(0, 2000).map(|i| fakt(i % 10)).reduce(|a, b| a + b, 0))
+    wok(xs.map(|i| T { a: i }).filter(|t| t.a % 999 == 0).map(|t| t.a))
+    // any/all/count/fold/find.
+    wok(xs.any(|x| x == 2999), xs.all(|x| x < 2999), xs.count_if(|x| x % 7 == 0), xs.fold(1, |a, b| (a + b) % 1000003))
+    wok(arr::map(xs, |x| x + 1)[2999], arr::filter(xs, |x| x % 1000 == 0), arr::reduce(xs, |a, b| a + b, 0))
+    // Galat di tengah larik: keluaran sebelumnya tetap, kalimat dan jejaknya sama.
+    wok(xs.map(|x| 10 / (2500 - x)).reduce(|a, b| a + b, 0))
+}
+"#;
+
+#[test]
+fn sesi_hof_sama_dengan_vm() {
+    let v = jalankan(SESI_HOF, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 7 && v.stderr.contains("jejak"), "{}{}", v.stdout, v.stderr);
+    for env in [&[STRES][..], &[STRES, ACAK][..], &[][..]] {
+        let j = jalankan(SESI_HOF, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}

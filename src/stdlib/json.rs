@@ -156,6 +156,21 @@ fn parse_json(s: &str) -> Result<VmValue, String> {
 
 // ─── Serializer ───────────────────────────────────────────────────────────
 
+/// Pegangan pustaka berwujud struct (`Ptr`, `Future`, `DokDb`, …) dulu tertulis `{"id":1}` — dict yang kehilangan sifat
+/// pegangannya dan tidak bisa dibaca kembali, padahal `Mutex` ditolak. Struct program bernama sama tidak terkena.
+fn pegangan_pustaka(v: &VmValue) -> Option<String> {
+    let VmValue::Map(m) = v else { return None };
+    let crate::vm::value::Label::Struct(t) = &m.label else { return None };
+    if !crate::interpreter::galat_index::HANDLE_PUSTAKA.contains(&t.as_ref())
+        || crate::vm::visibilitas::field_dideklarasikan(t).is_some() { return None; }
+    let jalan = match t.as_ref() {
+        "Ptr" => "kirim nilai yang ditunjuknya (`ptr::get(p)`), bukan pointernya",
+        "Future" | "Task" => "kirim hasilnya (`future::await`, `task::join`), bukan tugasnya",
+        _ => "kirim datanya, bukan handle-nya",
+    };
+    Some(crate::interpreter::galat_index::tidak_bisa_jadi_json(t, jalan))
+}
+
 /// Nilai yang tidak punya padanan JSON DITOLAK, bukan dipalsukan jadi teks:
 /// `NaN`/`inf` menghasilkan keluaran yang bukan JSON, dan `"<function>"`
 /// tampak seperti data di program yang membacanya.
@@ -198,6 +213,7 @@ fn tulis_json(v: &VmValue, out: &mut String) -> Result<(), String> {
             out.push(']');
         }
         VmValue::Map(m)       => {
+            if let Some(e) = pegangan_pustaka(v) { return Err(e); }
             if let Some(j) = enum_ke_json_hasil(v)? { out.push_str(&j); return Ok(()); }
             out.push('{');
             for (i, (k, x)) in bagian_json(m).iter().enumerate() {
@@ -250,6 +266,7 @@ fn stringify_pretty(v: &VmValue, depth: usize, indent: usize) -> Result<String, 
             Ok(format!("[\n{}\n{}]", items.join(",\n"), pad))
         }
         VmValue::Map(m) => {
+            if let Some(e) = pegangan_pustaka(v) { return Err(e); }
             // Enum ditulis dengan indentasi yang sama dengan objek lain; memakai
             // `enum_ke_json` di sini akan menaruh pembungkusnya di satu baris
             // sementara isinya multi-baris.

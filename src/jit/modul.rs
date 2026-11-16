@@ -116,6 +116,11 @@ fn modul() -> &'static Mutex<Option<ModulJit>> {
             jb.symbol("jrg_jit_keluar_ringan_angka", lambat::keluar_ringan_angka as *const u8);
             jb.symbol("jrg_jit_teks_bulat", lambat::teks_bulat as *const u8);
             jb.symbol("jrg_jit_tambah_nilai", lambat::tambah_nilai as *const u8);
+            jb.symbol("jrg_jit_keluar_ringan_nilai", lambat::keluar_ringan_nilai as *const u8);
+            jb.symbol("jrg_jit_ubah_baca", lambat::ubah_baca as *const u8);
+            jb.symbol("jrg_jit_ubah_tulis", lambat::ubah_tulis as *const u8);
+            jb.symbol("jrg_jit_ubah_tulis_lokal", lambat::ubah_tulis_lokal as *const u8);
+            jb.symbol("jrg_jit_ubah_siap", lambat::ubah_siap as *const u8);
             jb.symbol("jrg_jit_buka_lokal", lambat::buka_lokal as *const u8);
             jb.symbol("jrg_jit_iter_ada", lambat::iter_ada as *const u8);
             jb.symbol("jrg_jit_maju", lambat::maju as *const u8);
@@ -182,6 +187,11 @@ fn modul() -> &'static Mutex<Option<ModulJit>> {
                 keluar_ringan_angka: impor("jrg_jit_keluar_ringan_angka", &[I64, I64, p, I64], Some(I32))?,
                 teks_bulat: impor("jrg_jit_teks_bulat", &[I64, I64], None)?,
                 tambah_nilai: impor("jrg_jit_tambah_nilai", &[I64, p, I64, p], Some(I32))?,
+                keluar_ringan_nilai: impor("jrg_jit_keluar_ringan_nilai", &[I64, I64, p], Some(I32))?,
+                ubah_baca: impor("jrg_jit_ubah_baca", &[I64, I64, p], Some(I32))?,
+                ubah_tulis: impor("jrg_jit_ubah_tulis", &[I64, I64, p], None)?,
+                ubah_tulis_lokal: impor("jrg_jit_ubah_tulis_lokal", &[I64, I64, p], None)?,
+                ubah_siap: impor("jrg_jit_ubah_siap", &[I64, I64, p], Some(p))?,
                 buka_lokal: impor("jrg_jit_buka_lokal", &[I64, I32, p], Some(I32))?,
                 iter_ada: impor("jrg_jit_iter_ada", &[I64], Some(I32))?,
                 maju: impor("jrg_jit_maju", &[I64], Some(I32))?,

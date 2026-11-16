@@ -36,6 +36,8 @@ pub fn matmul(a: &Nd, b: &Nd) -> Hasil<Nd> {
             a.shape, b.shape, k1, k2
         ));
     }
+    // Hasilnya `m × n` dari dua masukan `m × k` dan `k × n`: `[100000, 1] · [1, 100000]` dulu meminta 80 GB.
+    super::daftar::periksa_ukuran(m.saturating_mul(n), "wokwok::matmul")?;
     let x = ka.f64_data();
     let y = kb.f64_data();
     let mut c = vec![0.0f64; m * n];

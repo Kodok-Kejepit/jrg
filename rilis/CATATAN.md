@@ -1,29 +1,43 @@
-JRG 0.5.0 membuat `--jit` lebih cepat di teks dan bilangan besar, memperketat `dok::serve`, dan menambal beberapa
-celah di `--emit-llvm` dan pemeriksa. Dua perubahan bisa membuat program lama berperilaku lain; daftarnya di bawah.
+JRG 0.6.0 membuat `--jit` jauh lebih cepat untuk kode yang hidup dari struct dan `map`/`filter`/`reduce`, membawa
+`--jit` ke `jrgm`, dan memperketat beberapa batas sumber daya. Tiga perubahan bisa membuat program lama berperilaku
+lain; daftarnya di bawah.
 
 ## Lebih cepat
 
-`--jit`, jam penuh lawan 0.4.0: `numeric_kernel` 0,62 → 0,47 detik (setara biner `--emit-llvm`), `string_ops`
-0,66 → 0,61, `mixed_report` 2,18 → 2,10. Yang tidak lagi lewat jalur umum: `teks + teks`, `str(n)`, geser bit konstan
-atas bilangan di atas 64 bit, dan closure pendek yang membaca tangkapannya.
+`--jit` sekarang menghitung method kecil berumus langsung di tempat pemanggilnya. `x = x.m(dt)` yang membangun `Self`
+baru dari rumus pecahan atas field-nya tidak lagi memanggil method dan membuat struct baru: field dibaca, dihitung di
+register, lalu ditulis ke struct yang sama. Method yang cuma mengembalikan rumus pecahan atas field-nya
+(`rec.score()`) juga dihitung di tempat. Callback `map`/`filter`/`reduce` dan kawan-kawannya dipanggil tanpa
+menyiapkan bingkai baru tiap elemen. Jam penuh lawan 0.5.0:
 
-## Lebih aman
+| program | 0.5.0 | 0.6.0 |
+|---|---|---|
+| `struct_particles` | 12,9 s | 3,3 s |
+| `mixed_report` | 2,2 s | 1,4 s |
+| `hof_closure` | 0,66 s | 0,44 s |
+| `string_scan` | 0,44 s | 0,32 s |
 
-- `dok::serve` melepas klien yang tidak membaca jawabannya (tenggat tulis 30 detik ditambah 1 detik per 16 KiB), jadi
-  satu klien lambat tidak bisa menahan pekerja server.
-- Permintaan HTTP/1.1 tanpa kepala `Host` dijawab 400 (RFC 9112).
+Jawabannya tetap sama persis dengan interpreter dan VM, termasuk saat struct-nya dibagi dengan variabel lain, field-nya
+berganti jenis, atau callback-nya gagal di tengah larik.
+
+## Baru
+
+- `jrgm run --jit`, `jrgm exec --jit` dan `jrgm test --jit`: proyek bisa dijalankan dan diuji lewat mesin keempat, sama
+  dengan `jrgc --jit`. `--watch` ikut meneruskannya.
 
 ## Bisa memutus program lama
 
-- Klien HTTP/1.1 yang tidak mengirim `Host` ke `dok::serve` sekarang ditolak; HTTP/1.0 tetap boleh.
-- Klien yang membaca jawaban sangat lambat diputus sesudah tenggat tulisnya habis.
+- `json::stringify`, `json::pretty` dan `dok::json_encode` menolak pegangan pustaka (`Ptr`, `Future`, `DokDb`, …),
+  seperti `Mutex`. Dulu hasilnya `{"id":1}`.
+- WebSocket `dok::serve` melepas klien yang diam dan tidak menjawab `ping` (60 + 30 detik), menutup pesan yang tidak
+  utuh dalam 30 detik ditambah 1 detik per 16 KiB, dan menghitung pesan setengah jadi di anggaran 256 MiB yang sama
+  dengan badan HTTP.
+- `wokwok::` menolak hasil broadcast dan `matmul` di atas 256 MiB, seperti pembangun lariknya. Dulu dua larik kecil
+  bisa meminta puluhan GB dan mematikan prosesnya.
 
-## Lainnya
+## Diperbaiki
 
-- `jrgc --periksa` dan `jrgm lint` melaporkan method dan field yang tidak ada atas `let x = T { .. }`, dengan
-  kalimat yang sama seperti saat baris itu dijalankan.
-- `--emit-llvm`: `arr::insert` dengan nilai berjenis lain membuat larik campur seperti interpreter, dan sebar `...x`
-  di literal varian enum generik jalan.
+- `jrgm siapkan android` melewati entri katalog yang nama berkas atau foldernya bukan nama polos (`..`, `/`).
 
 Rincian lengkapnya di [CHANGELOG.md](https://github.com/Kodok-Kejepit/jrg/blob/main/CHANGELOG.md).
 

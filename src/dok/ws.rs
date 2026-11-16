@@ -5,6 +5,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use super::crypto::{base64_encode_bytes, sha1};
 
@@ -14,6 +15,15 @@ const GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
 
 /// Batas ukuran satu pesan (termasuk hasil penggabungan fragmen).
 const MAKS_PESAN: usize = 16 * 1024 * 1024;
+/// Klien yang diam selama `DIAM` ditanya `ping`; yang tidak menjawab dalam `JAWAB_PING` dilepas. Satu pesan
+/// harus utuh dalam `TENGGAT_PESAN` ditambah 1 detik per `LAJU_MIN` byte — dulu sambungan mati atau yang
+/// menetes memegang utas dan slot `MAKS_SAMBUNGAN` selamanya.
+const DIAM: Duration = Duration::from_secs(60);
+const JAWAB_PING: Duration = Duration::from_secs(30);
+const TENGGAT_PESAN: Duration = Duration::from_secs(30);
+const LAJU_MIN: u64 = 16 * 1024;
+
+fn tenggat_pesan(diterima: usize) -> Duration { TENGGAT_PESAN + Duration::from_secs(diterima as u64 / LAJU_MIN) }
 
 // ─────────────────────────────────────────────────────────────────────────
 // Registri koneksi
@@ -23,11 +33,14 @@ const MAKS_PESAN: usize = 16 * 1024 * 1024;
 /// pegangan: dulu `ws_recv` yang menunggu memegang satu kunci untuk semua koneksi, jadi
 /// `ws_send` dari goroutine lain (dan koneksi lain) tertahan sampai klien mengirim sesuatu.
 struct Koneksi {
-    /// Aliran untuk membaca, dan sisa byte yang sudah terbaca tapi belum jadi frame utuh.
-    baca: Mutex<(TcpStream, Vec<u8>)>,
+    baca: Mutex<Baca>,
     tulis: Mutex<TcpStream>,
     tutup: std::sync::atomic::AtomicBool,
 }
+
+/// Aliran untuk membaca, sisa byte yang belum jadi pesan, dan bagiannya di anggaran byte klien yang sama dengan
+/// badan HTTP (`MAKS_BADAN_SERENTAK`): dulu 512 sambungan masing-masing memegang pesan setengah jadi 16 MiB (8 GiB).
+struct Baca { aliran: TcpStream, sisa: Vec<u8>, pesanan: super::http::Pesanan }
 
 impl Koneksi {
     fn tertutup(&self) -> bool { self.tutup.load(std::sync::atomic::Ordering::SeqCst) }
@@ -122,7 +135,8 @@ pub fn terima(mut stream: TcpStream, kunci: &str) -> Result<u64, String> {
     let id = URUT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     let tulis = stream.try_clone().map_err(|e| format!("ws: gagal menyiapkan koneksi: {}", crate::host::galat_io(&e)))?;
     koneksi().lock().unwrap_or_else(|p| p.into_inner()).insert(id, std::sync::Arc::new(Koneksi {
-        baca: Mutex::new((stream, Vec::new())), tulis: Mutex::new(tulis), tutup: Default::default() }));
+        baca: Mutex::new(Baca { aliran: stream, sisa: Vec::new(),
+            pesanan: super::http::Pesanan::baru(&super::http::BADAN_TERPAKAI) }), tulis: Mutex::new(tulis), tutup: Default::default() }));
     Ok(id)
 }
 
@@ -254,22 +268,37 @@ pub fn ws_recv(args: &[Value]) -> Result<Value, String> {
     };
     if k.tertutup() { return Ok(none()); }
     let mut baca = k.baca.lock().unwrap_or_else(|p| p.into_inner());
-    let (aliran, sisa) = &mut *baca;
+    let Baca { aliran, sisa, pesanan } = &mut *baca;
+    let hasil = terima_pesan(&k, aliran, sisa, pesanan);
+    pesanan.sisakan(sisa.len());
+    hasil
+}
 
+fn tutup_dengan(k: &Koneksi, kode: u16) {
+    let _ = k.kirim(&tulis_frame(Jenis::Tutup, &kode.to_be_bytes()));
+    k.tandai_tutup();
+}
+
+fn terima_pesan(k: &Koneksi, aliran: &mut TcpStream, sisa: &mut Vec<u8>, pesanan: &mut super::http::Pesanan)
+    -> Result<Value, String> {
     let mut gabung: Vec<u8> = Vec::new();
     let mut jenis_awal: Option<Jenis> = None;
     let mut buf = [0u8; 8192];
+    // Tenggat pesan berjalan sejak byte pertamanya ada; sebelum itu klien boleh diam, tapi ditanya `ping`.
+    let mut mulai: Option<Instant> = (!sisa.is_empty()).then(Instant::now);
+    let mut diterima = sisa.len();
+    let mut ping_sejak: Option<Instant> = None;
     loop {
         match baca_frame(sisa) {
             Err(e) => { k.tandai_tutup(); return Err(e); }
             Ok(Some((f, n))) => {
                 sisa.drain(..n);
                 match f.jenis {
-                    Jenis::Ping => {
-                        let _ = k.kirim(&tulis_frame(Jenis::Pong, &f.muatan));
+                    Jenis::Ping | Jenis::Pong => {
+                        if f.jenis == Jenis::Ping { let _ = k.kirim(&tulis_frame(Jenis::Pong, &f.muatan)); }
+                        if sisa.is_empty() && gabung.is_empty() { mulai = None; diterima = 0; }
                         continue;
                     }
-                    Jenis::Pong => continue,
                     Jenis::Tutup => {
                         let _ = k.kirim(&tulis_frame(Jenis::Tutup, &[]));
                         k.tandai_tutup();
@@ -277,11 +306,7 @@ pub fn ws_recv(args: &[Value]) -> Result<Value, String> {
                     }
                     _ => {
                         match gabung_fragmen(&mut jenis_awal, &mut gabung, f) {
-                            Err((kode, pesan)) => {
-                                let _ = k.kirim(&tulis_frame(Jenis::Tutup, &kode.to_be_bytes()));
-                                k.tandai_tutup();
-                                return Err(pesan);
-                            }
+                            Err((kode, pesan)) => { tutup_dengan(k, kode); return Err(pesan); }
                             Ok(None) => continue,
                             Ok(Some((Jenis::Biner, isi))) => {
                                 return Ok(some(super::crypto::byte_ke_array(isi)));
@@ -289,8 +314,7 @@ pub fn ws_recv(args: &[Value]) -> Result<Value, String> {
                             Ok(Some((_, isi))) => {
                                 // RFC 6455 §8.1: pesan teks yang bukan UTF-8 menutup koneksi (1007).
                                 let Ok(teks) = String::from_utf8(isi) else {
-                                    let _ = k.kirim(&tulis_frame(Jenis::Tutup, &[0x03, 0xEF]));
-                                    k.tandai_tutup();
+                                    tutup_dengan(k, 1007);
                                     return Err("ws: pesan teks dari klien bukan UTF-8 yang sah; koneksinya ditutup (kode 1007)".to_string());
                                 };
                                 return Ok(some(Value::Str(std::sync::Arc::new(teks))));
@@ -301,9 +325,42 @@ pub fn ws_recv(args: &[Value]) -> Result<Value, String> {
             }
             Ok(None) => {}
         }
+        let tunggu = match (mulai, ping_sejak) {
+            (Some(m), _) => match tenggat_pesan(diterima).checked_sub(m.elapsed()) {
+                Some(t) if !t.is_zero() => t,
+                _ => {
+                    tutup_dengan(k, 1008);
+                    return Err(format!("ws: pesan dari klien tidak utuh dalam {} detik; koneksinya ditutup (kode 1008)",
+                        tenggat_pesan(diterima).as_secs()));
+                }
+            },
+            (None, None) => DIAM,
+            (None, Some(p)) => match JAWAB_PING.checked_sub(p.elapsed()) {
+                Some(t) if !t.is_zero() => t,
+                // Klien yang tidak menjawab `ping` dianggap pergi, sama dengan sambungan yang ditutup.
+                _ => { tutup_dengan(k, 1001); return Ok(none()); }
+            },
+        };
+        aliran.set_read_timeout(Some(tunggu)).ok();
         match aliran.read(&mut buf) {
             Ok(0) => { k.tandai_tutup(); return Ok(none()); }
-            Ok(n) => sisa.extend_from_slice(&buf[..n]),
+            Ok(n) => {
+                if !pesanan.tambah(n, super::http::MAKS_BADAN_SERENTAK) {
+                    tutup_dengan(k, 1013);
+                    return Err(format!("ws: server sedang memegang {} MiB data dari klien; koneksinya ditutup (kode 1013)",
+                        super::http::MAKS_BADAN_SERENTAK >> 20));
+                }
+                sisa.extend_from_slice(&buf[..n]);
+                diterima += n;
+                ping_sejak = None;
+                if mulai.is_none() { mulai = Some(Instant::now()); }
+            }
+            Err(e) if matches!(e.kind(), std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut) => {
+                if mulai.is_none() && ping_sejak.is_none() {
+                    let _ = k.kirim(&tulis_frame(Jenis::Ping, &[]));
+                    ping_sejak = Some(Instant::now());
+                }
+            }
             Err(e) => { k.tandai_tutup(); return Err(format!("ws: gagal baca: {}", crate::host::galat_io(&e))); }
         }
     }

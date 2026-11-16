@@ -43,9 +43,11 @@ impl Vm {
                 let arr = self.pop(sp)?;
                 let items = self.expect_array(&arr, "arr::map", sp)?;
                 let mut result = Vec::with_capacity(items.len());
+                let mut p = self.panggil_ulang(&f);
                 for item in items {
-                    result.push(self.call_value_immediate_n(&f, [item])?);
+                    result.push(p.panggil(self, [item])?);
                 }
+                p.tutup(self);
                 self.push(VmValue::array(result));
             }
             "arr::filter" => {
@@ -53,10 +55,12 @@ impl Vm {
                 let arr = self.pop(sp)?;
                 let items = self.expect_array(&arr, "arr::filter", sp)?;
                 let mut result = Vec::new();
+                let mut p = self.panggil_ulang(&f);
                 for item in items {
-                    let keep = self.call_value_immediate_n(&f, [item.clone()])?;
+                    let keep = p.panggil(self, [item.clone()])?;
                     if keep.is_truthy() { result.push(item); }
                 }
+                p.tutup(self);
                 self.push(VmValue::array(result));
             }
             "arr::reduce" => {
@@ -65,9 +69,11 @@ impl Vm {
                 let arr = self.pop(sp)?;
                 let items = self.expect_array(&arr, "arr::reduce", sp)?;
                 let mut acc = init;
+                let mut p = self.panggil_ulang(&f);
                 for item in items {
-                    acc = self.call_value_immediate_n(&f, [acc, item])?;
+                    acc = p.panggil(self, [acc, item])?;
                 }
+                p.tutup(self);
                 self.push(acc);
             }
             // Pasangan namespace `a.fold(awal, f)`: nilai awal di DEPAN.
@@ -77,9 +83,11 @@ impl Vm {
                 let arr = self.pop(sp)?;
                 let items = self.expect_array(&arr, "arr::fold", sp)?;
                 let mut acc = init;
+                let mut p = self.panggil_ulang(&f);
                 for item in items {
-                    acc = self.call_value_immediate_n(&f, [acc, item])?;
+                    acc = p.panggil(self, [acc, item])?;
                 }
+                p.tutup(self);
                 self.push(acc);
             }
             "arr::any" => {

@@ -255,7 +255,7 @@ pub(crate) fn cmd_publish(dry_run: bool) -> Result<(), String> {
              `git remote add origin <url>`, atau `repositori = \"<url>\"` di [package]".to_string())?,
     };
     super::perintah::cmd_build("dev", None, false, true)?;
-    if akar.join("tests").is_dir() { super::perintah::cmd_test(None, false, 120)?; }
+    if akar.join("tests").is_dir() { super::perintah::cmd_test(None, false, false, 120)?; }
     let commit = git(&["rev-parse", "HEAD"], Some(&akar))?;
     if dry_run {
         println!("akan menandai commit {} sebagai `{}` dan mendorongnya ke {}", &commit[..12], tag, tujuan);

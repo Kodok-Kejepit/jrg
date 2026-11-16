@@ -606,7 +606,7 @@ struct ParsedRequest {
 }
 
 /// Byte badan yang sedang dipegang semua koneksi; anggarannya `MAKS_BADAN_SERENTAK`.
-static BADAN_TERPAKAI: AtomicUsize = AtomicUsize::new(0);
+pub(super) static BADAN_TERPAKAI: AtomicUsize = AtomicUsize::new(0);
 /// N badan sebesar `MAKS_BADAN` sekaligus dulu menghabiskan memori, dan alokasi yang gagal menghentikan server.
 pub const MAKS_BADAN_SERENTAK: usize = 256 * 1024 * 1024;
 /// Koneksi hidup paling banyak; sisanya dijawab 503 tanpa membuat utas.
@@ -614,12 +614,16 @@ pub const MAKS_SAMBUNGAN: usize = 512;
 const PENUH: Tolak = (503, "Service Unavailable");
 
 /// Potongan anggaran yang dikembalikan saat dilepas.
-struct Pesanan { hitung: &'static AtomicUsize, n: usize }
+pub(super) struct Pesanan { hitung: &'static AtomicUsize, n: usize }
 
 impl Pesanan {
-    fn baru(hitung: &'static AtomicUsize) -> Self { Pesanan { hitung, n: 0 } }
+    pub(super) fn baru(hitung: &'static AtomicUsize) -> Self { Pesanan { hitung, n: 0 } }
+    /// Mengembalikan bagian di atas `k` byte (yang sudah tidak dipegang lagi).
+    pub(super) fn sisakan(&mut self, k: usize) {
+        if k < self.n { self.hitung.fetch_sub(self.n - k, Ordering::AcqRel); self.n = k; }
+    }
     /// Menambah `k` byte kalau totalnya tetap di bawah `batas`.
-    fn tambah(&mut self, k: usize, batas: usize) -> bool {
+    pub(super) fn tambah(&mut self, k: usize, batas: usize) -> bool {
         let ok = self.hitung
             .fetch_update(Ordering::AcqRel, Ordering::Acquire, |t| t.checked_add(k).filter(|b| *b <= batas))
             .is_ok();

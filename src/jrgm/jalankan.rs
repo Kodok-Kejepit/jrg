@@ -47,6 +47,7 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
     // ── Bytecode VM path ─────────────────────────────────────────────────
     if use_vm {
         let result = crate::vm::run_file_with_paths(&ast, search_paths.clone(), emit_bc, prof);
+        crate::jit::laporan::cetak_bila_diminta();
         if prof { crate::profiler::report(); }
         if verbose { eprintln!("[jrgm] selesai (VM)"); }
         return match result {

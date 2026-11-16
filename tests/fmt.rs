@@ -623,7 +623,7 @@ mod dependensi {
               &[("main.jrg", "package main\nimport \"matematika\"\n\
                               pub fn main() { wok(matematika::tambah(20, 22)) }\n")]);
 
-        for arg in [&[][..], &["--vm"][..]] {
+        for arg in [&[][..], &["--vm"][..], &["--jit"][..]] {
             let mut a = vec!["run"]; a.extend_from_slice(arg);
             let (ok, teks) = jalankan(&a, &d.join("app"));
             assert!(ok && teks.contains("42"),
@@ -920,7 +920,7 @@ mod uji {
         let (kode, _) = jalankan(jrgc(), &["--uji", "tests/a.jrg"], &d);
         assert_ne!(kode, Some(0), "modul `src/` ketemu tanpa -I?");
 
-        for arg in [&[][..], &["--vm"][..]] {
+        for arg in [&[][..], &["--vm"][..], &["--jit"][..]] {
             let mut a = vec!["test"]; a.extend_from_slice(arg);
             let (kode, teks) = jalankan(jrgm(), &a, &d);
             assert_eq!(kode, Some(0), "`jrgm test {}` gagal:\n{}", arg.join(" "), teks);

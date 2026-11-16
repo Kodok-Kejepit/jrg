@@ -105,6 +105,44 @@ fn jalankan(vm: &mut Vm, kembali: u8) -> Result<i64, VmError> {
     let basis = fr.slot + 1;
     if vm.stack.len() < basis || vm.stack.len() - basis > MAKS_POSISI { return Ok(ULANG); }
     let Some(kode) = kode_untuk(vm, &fr.func, fr.ip, kembali, basis) else { return Ok(ULANG) };
+    jalankan_kode(vm, kode, basis, terpakai)
+}
+
+/// HOF VM memanggil fungsi atau closure biasa (bukan method, tanpa variadic dan default) yang titik masuk terakhirnya
+/// sudah dikompilasi untuk jenis argumen ini: kodenya dan kode jenis titik masuknya, tanpa kunci dan tanpa kompilasi.
+/// `None` = lewat `call_value` umum (yang juga mengompilasi).
+#[inline]
+fn hof_masuk(vm: &Vm, f: &VmValue, args: &[VmValue]) -> Option<(KodeJit, &'static [u8])> {
+    if vm.profiling { return None; }
+    let func = match f { VmValue::Function(g) => g, VmValue::Closure(c) => &c.func, _ => return None };
+    if func.arity as usize != args.len() || func.arity_min != func.arity || func.variadic || func.chunk.tipe_self.is_some() {
+        return None;
+    }
+    let pj = &func.chunk.kode_jit;
+    if pj.panggilan_mati.load(Ordering::Relaxed) { return None; }
+    let m: &'static Masuk = unsafe { pj.cepat.load(Ordering::Acquire).as_ref() }?;
+    let cocok = m.ip == 0 && m.kembali == KEMBALI_SKALAR && m.versi == pj.versi.load(Ordering::Relaxed)
+        && (m.epoch == super::EPOCH_SPEK.load(Ordering::Relaxed) || !m.kode.is_some_and(|k| k.langsung))
+        && m.jenis.len() == args.len() && m.jenis.iter().zip(args).all(|(k, v)| *k == kode_nilai(v));
+    if cocok { m.kode.map(|k| (k, &m.jenis[..])) } else { None }
+}
+
+/// Kode native bingkai teratas (basis `basis`) dijalankan dari argumen di stack VM-nya; statusnya. Yang berhasil
+/// melepas bingkainya dan mendorong hasilnya seperti `Return` VM.
+fn jalankan_kode(vm: &mut Vm, kode: KodeJit, basis: usize, terpakai: Option<usize>) -> Result<i64, VmError> {
+    let (st, hasil) = jalankan_mentah(vm, kode, basis, terpakai)?;
+    if let Some(hasil) = hasil {
+        // `Return` native: bingkainya tanpa `defer` (`DeferPush` selalu titik keluar).
+        // Posisi skalar bingkainya dilepas tanpa `drop_glue` (`lambat::potong`).
+        if let Some(fr) = vm.ambil_bingkai() { super::lambat::potong(&mut vm.stack, fr.slot); }
+        vm.catat_hasil(&hasil);
+        vm.stack.push(hasil);
+    }
+    Ok(st)
+}
+
+/// Inti `jalankan_kode`: status dan hasilnya kalau berhasil (bingkainya masih ada); deopt sudah dipulihkan.
+fn jalankan_mentah(vm: &mut Vm, kode: KodeJit, basis: usize, terpakai: Option<usize>) -> Result<(i64, Option<VmValue>), VmError> {
     // Bingkai kecil (hampir semua panggilan) tidak membayar alokasi; penyangganya tidak dinolkan dulu, karena
     // tiap posisi yang dipakai ditulis di bawah.
     let isi = &vm.stack[basis..];
@@ -135,27 +173,84 @@ fn jalankan(vm: &mut Vm, kembali: u8) -> Result<i64, VmError> {
     let st = super::lambat::dengan_konteks(pvm, basis, || unsafe {
         (kode.masuk)(args.as_ptr() as *const i64, (KEDALAMAN_MAKS - boleh) as i32, &mut keluar)
     }) as i64;
-    match st {
-        BERHASIL | BERHASIL_BOOL | BERHASIL_PECAHAN | BERHASIL_NILAI | BERHASIL_UNIT => {
-            let hasil = match st {
-                BERHASIL => VmValue::Int(keluar as i128),
-                BERHASIL_BOOL => VmValue::Bool(keluar != 0),
-                BERHASIL_PECAHAN => VmValue::Float(f64::from_bits(keluar as u64)),
-                // Posisi `keluar` bingkai ini, di stack VM.
-                BERHASIL_NILAI => vm.stack.get_mut(basis + keluar as usize).map(|v| std::mem::replace(v, VmValue::Nil))
-                    .expect("bug di jrgc: hasil JIT di luar stack VM"),
-                _ => VmValue::Unit,
-            };
-            // `Return` native: bingkainya tanpa `defer` (`DeferPush` selalu titik keluar).
-            // Posisi skalar bingkainya dilepas tanpa `drop_glue` (`lambat::potong`).
-            if let Some(fr) = vm.ambil_bingkai() { super::lambat::potong(&mut vm.stack, fr.slot); }
-            vm.catat_hasil(&hasil);
-            vm.stack.push(hasil);
-        }
-        DEOPT => deopt::pulihkan(vm, deopt::ambil()),
+    let hasil = match st {
+        BERHASIL => Some(VmValue::Int(keluar as i128)),
+        BERHASIL_BOOL => Some(VmValue::Bool(keluar != 0)),
+        BERHASIL_PECAHAN => Some(VmValue::Float(f64::from_bits(keluar as u64))),
+        // Posisi `keluar` bingkai ini, di stack VM.
+        BERHASIL_NILAI => Some(vm.stack.get_mut(basis + keluar as usize).map(|v| std::mem::replace(v, VmValue::Nil))
+            .expect("bug di jrgc: hasil JIT di luar stack VM")),
+        BERHASIL_UNIT => Some(VmValue::Unit),
+        DEOPT => { deopt::pulihkan(vm, deopt::ambil()); None }
         GAGAL => return Err(super::lambat::ambil_galat()),
         // ULANG: belum ada yang dijalankan; VM melanjutkan bingkainya dari `ip` yang sama.
-        _ => {}
+        _ => None,
+    };
+    Ok((st, hasil))
+}
+
+/// Sesi panggilan berulang dari HOF VM (`Vm::Panggil`): bingkai callback didorong sekali, tiap panggilan cuma
+/// menulis argumennya dan menjalankan kodenya. Bingkainya hidup cuma di antara panggilan sesi itu.
+pub(crate) struct SesiHof {
+    kode: KodeJit,
+    jenis: &'static [u8],
+    slot: usize,
+    pub(crate) terbuka: bool,
+}
+
+/// Sesi untuk `f` atas argumen sejenis `args` (`hof_siap`), atau `None` (belum ada yang berubah).
+pub(crate) fn sesi_buka(vm: &mut Vm, f: &VmValue, args: &[VmValue]) -> Option<SesiHof> {
+    let (kode, jenis) = hof_masuk(vm, f, args)?;
+    let (func, closure) = match f {
+        VmValue::Function(g) => (Arc::clone(g), None),
+        VmValue::Closure(c) => (Arc::clone(&c.func), Some(Arc::clone(c))),
+        _ => return None,
+    };
+    vm.periksa_kedalaman(&func.name, None).ok()?;
+    let slot = vm.stack.len();
+    vm.stack.push(f.clone());
+    for _ in 0..args.len() { vm.stack.push(VmValue::Nil); }
+    let argc = func.arity as u8;
+    vm.dorong_bingkai(crate::vm::vm::CallFrame { func, ip: 0, slot, defers: Vec::new(), argc, closure });
+    Some(SesiHof { kode, jenis, slot, terbuka: true })
+}
+
+/// Satu panggilan sesi. `Err(args)` = argumen berjenis lain dari sesinya (belum ada yang berubah); selain itu
+/// hasilnya — kalau kodenya tidak selesai (deopt, galat), VM menyelesaikan bingkainya dan sesinya tertutup.
+pub(crate) fn sesi_panggil<const N: usize>(vm: &mut Vm, s: &mut SesiHof, args: [VmValue; N]) -> Result<Result<VmValue, VmError>, [VmValue; N]> {
+    let terpakai = crate::interpreter::stack_terpakai();
+    if s.jenis.len() != N || !s.jenis.iter().zip(&args).all(|(k, v)| *k == kode_nilai(v))
+        || terpakai.is_some_and(|t| t > crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE / 2) {
+        return Err(args);
     }
-    Ok(st)
+    let basis = s.slot + 1;
+    for (i, a) in args.into_iter().enumerate() { super::lambat::timpa(&mut vm.stack[basis + i], a); }
+    let fr = vm.frames.last().expect("bingkai sesi");
+    if let Some(p) = &fr.func.chunk.profil {
+        p.catat_panggilan();
+        p.jit_masuk.store(p.jit_masuk.load(Ordering::Relaxed).wrapping_add(1), Ordering::Relaxed);
+    }
+    let dasar = vm.frames.len() - 1;
+    match jalankan_mentah(vm, s.kode, basis, terpakai) {
+        Ok((_, Some(v))) => {
+            // Sisa posisi yang dipakai kodenya dilepas; argumen ditimpa panggilan berikutnya.
+            super::lambat::potong(&mut vm.stack, basis + N);
+            Ok(Ok(v))
+        }
+        Ok((st, None)) => {
+            if st == DEOPT {
+                if let Some(p) = vm.frames.last().and_then(|f| f.func.chunk.profil.as_ref()) { p.jit_deopt.fetch_add(1, Ordering::Relaxed); }
+            }
+            s.terbuka = false;
+            Ok(vm.selesaikan_dari(Ok(()), dasar, s.slot))
+        }
+        Err(e) => { s.terbuka = false; Ok(vm.selesaikan_dari(Err(e), dasar, s.slot)) }
+    }
+}
+
+/// Bingkai sesi dilepas seperti `Return`.
+pub(crate) fn sesi_tutup(vm: &mut Vm, s: SesiHof) {
+    if !s.terbuka { return; }
+    vm.ambil_bingkai();
+    super::lambat::potong(&mut vm.stack, s.slot);
 }

@@ -95,6 +95,8 @@ pub struct ReloadConfig {
     pub entry:        PathBuf,
     pub watch_dir:    PathBuf,
     pub use_vm:       bool,
+    /// `--jit` (VM plus kode mesin) untuk tiap jalan ulang.
+    pub use_jit:      bool,
     pub profiling:    bool,
     pub emit_bc:      bool,
     pub clear_screen: bool,
@@ -111,6 +113,7 @@ impl ReloadConfig {
             search_paths: vec![dir],
             entry,
             use_vm:       false,
+            use_jit:      false,
             profiling:    false,
             emit_bc:      false,
             clear_screen: false,
@@ -202,7 +205,7 @@ impl HotReloader {
 
         let mut cmd = std::process::Command::new(biner_jrgc());
         cmd.arg(&self.cfg.entry);
-        if self.cfg.use_vm    { cmd.arg("--vm"); }
+        if self.cfg.use_jit   { cmd.arg("--jit"); } else if self.cfg.use_vm { cmd.arg("--vm"); }
         if self.cfg.profiling { cmd.arg("--profile"); }
         if self.cfg.emit_bc   { cmd.arg("--emit-bc"); }
 

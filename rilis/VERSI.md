@@ -3,7 +3,7 @@
 JRG mengikuti [Semantic Versioning 2.0.0](https://semver.org/lang/id/).
 
 ```
-MAYOR.MINOR.TAMBALAN        contoh: 0.5.0
+MAYOR.MINOR.TAMBALAN        contoh: 0.6.0
 ```
 
 ## Apa yang dihitung "memutus"

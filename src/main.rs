@@ -79,7 +79,7 @@ struct Cli {
     #[arg(long = "vm")]
     use_vm: bool,
 
-    /// Mesin keempat (JRGJIT); fase J1: VM yang merekam profil (`JRG_JIT_LOG=ringkas`)
+    /// Mesin keempat (JRGJIT): VM yang mengompilasi bagian panas jadi kode mesin saat jalan (`JRG_JIT_LOG=ringkas`)
     #[arg(long = "jit", conflicts_with = "emit_llvm")]
     jit: bool,
 

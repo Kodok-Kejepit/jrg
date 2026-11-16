@@ -78,14 +78,14 @@ pub fn utama(argumen: Vec<String>) {
         JrgmCommand::Build  { profile, target, verbose, skip_python_deps }
             => cmd_build(&profile, target.as_deref(), verbose, skip_python_deps),
 
-        JrgmCommand::Run    { build_profile, args, verbose, prof, use_vm, emit_bc, watch, clear, skip_python_deps, .. }
-            => cmd_run(&build_profile, &args, verbose, prof, use_vm, emit_bc, watch, clear, skip_python_deps),
+        JrgmCommand::Run    { build_profile, args, verbose, prof, use_vm, use_jit, emit_bc, watch, clear, skip_python_deps, .. }
+            => cmd_run(&build_profile, &args, verbose, prof, use_vm, use_jit, emit_bc, watch, clear, skip_python_deps),
 
-        JrgmCommand::Exec   { file, args, verbose, prof, use_vm, emit_bc, watch, clear }
-            => cmd_exec(&file, &args, verbose, prof, use_vm, emit_bc, watch, clear),
+        JrgmCommand::Exec   { file, args, verbose, prof, use_vm, use_jit, emit_bc, watch, clear }
+            => cmd_exec(&file, &args, verbose, prof, use_vm, use_jit, emit_bc, watch, clear),
 
-        JrgmCommand::Test   { filter, use_vm, timeout }
-            => cmd_test(filter.as_deref(), use_vm, if timeout == 0 { u64::MAX } else { timeout }),
+        JrgmCommand::Test   { filter, use_vm, use_jit, timeout }
+            => cmd_test(filter.as_deref(), use_vm, use_jit, if timeout == 0 { u64::MAX } else { timeout }),
 
         JrgmCommand::Check
             => cmd_check(),

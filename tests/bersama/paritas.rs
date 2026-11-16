@@ -704,6 +704,8 @@ pub fn main() {
     wok(dok::json_decode(t + "\"k3\": 0}"))
     wok(dok::json_decode(t + "\"k20\": 0}").is_ok(), dok::json_decode("{\"a\": 1, \"A\": 2}"))
 }"#),
+    // Fase AMAN-51 (#1040): struct PROGRAM bernama `Ptr` bukan pegangan pustaka — tetap jadi objek JSON.
+    ("struct program bernama Ptr tetap tersandikan JSON", "package main\nstruct Ptr { pub id: int }\npub fn main() { wok(json::stringify(Ptr { id: 3 }), json::pretty([Ptr { id: 4 }])) }"),
     // Fase AMAN-44: bacaan berkas utuh berbatas 256 MiB; `/dev/zero` dulu dibaca sampai memori mesin habis.
     ("bacaan utuh berbatas: perangkat tanpa ujung jadi Err", r#"package main
 pub fn main() {
