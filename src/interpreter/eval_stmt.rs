@@ -156,6 +156,7 @@ impl Interpreter {
         let nol = || s.ty.as_ref().and_then(|t| crate::parser::nilai_nol(t, s.span));
         let v = if let Some(init) = &s.init { self.eval_expr(init, env)? }
                 else if let Some(e) = nol() { self.eval_expr(&e, env)? }
+                else if let Some(t) = &s.ty { crate::interpreter::nilai_belum_diisi(&crate::parser::nama_tipe(t)) }
                 else { Value::Nil };
         env.define(&s.name, v);
         Ok(Value::Unit)

@@ -192,14 +192,37 @@ impl Codegen {
         let merge_lbl = self.fresh_label("match.end.");
         let n = arms.len();
 
+        // `match` bulat berlengan literal/rentang jadi satu `switch`: rantai `icmp` berurutan yang dulu dipancarkan
+        // tidak bisa dijadikan tabel oleh LLVM, dan nilai acak salah tebak di tiap cabangnya (`match_dispatch`).
+        let rencana = Self::rencana_switch(arms, &sty);
+        let tak_lbl = self.fresh_label("match.tak.");
+        let mut arm_lbl: Vec<String> = Vec::new();
+        if let Some((kasus, liar)) = &rencana {
+            arm_lbl = (0..n).map(|_| self.fresh_label("match.arm.")).collect();
+            let v = self.load_place(&splace, &sty);
+            let bawaan = if *liar { arm_lbl[n - 1].clone() } else { tak_lbl.clone() };
+            let mut sw = format!("switch i64 {}, label %{} [", v.text, bawaan);
+            for (i, nilai) in kasus.iter().enumerate() {
+                for x in nilai { sw.push_str(&format!(" i64 {}, label %{}", x, arm_lbl[i])); }
+            }
+            sw.push_str(" ]");
+            self.terminate(sw);
+        }
+
         for (i, arm) in arms.iter().enumerate() {
-            let next_lbl = self.fresh_label("match.next.");
+            let next_lbl = if rencana.is_some() && i + 1 == n { tak_lbl.clone() } else { self.fresh_label("match.next.") };
             self.push_scope();
             // Lengan yang PASTI tidak cocok (`Some(n)` atas dict) tidak diturunkan: pengikatnya tidak pernah ada.
-            if !arm.patterns.is_empty() && arm.patterns.iter().all(|p| Self::pola_varian_mustahil(p, &sty)) {
+            if rencana.is_none() && !arm.patterns.is_empty() && arm.patterns.iter().all(|p| Self::pola_varian_mustahil(p, &sty)) {
                 self.terminate(format!("br label %{}", next_lbl));
             } else {
-                self.try_arm(arm, &splace, &sty, &next_lbl)?;
+                if rencana.is_some() {
+                    // Blok `match.next` lengan sebelumnya tidak punya pendahulu dalam bentuk `switch`.
+                    if i > 0 { self.terminate("unreachable".to_string()); }
+                    self.start_block(arm_lbl[i].clone());
+                } else {
+                    self.try_arm(arm, &splace, &sty, &next_lbl)?;
+                }
                 let bv = match &arm.body {
                     MatchBody::Expr(e) => self.codegen_expr(e, if need_result { Some(&result_ty) } else { None })?,
                     MatchBody::Block(b) => self.codegen_block_expr(b, if need_result { Some(&result_ty) } else { None })?,
@@ -251,6 +274,48 @@ impl Codegen {
         } else {
             Ok(Val::unit())
         }
+    }
+
+    /// Nilai kasus per lengan kalau `match` atas `int` bisa jadi satu `switch`: tiap lengan tanpa guard berpola literal
+    /// bulat tak negatif, rentang literal paling lebar 256, atau alternatifnya; `_` cuma di lengan terakhir. Nilai yang
+    /// sudah dimiliki lengan sebelumnya dibuang (lengan pertama yang cocok menang). `bool` kedua: lengan terakhir `_`.
+    fn rencana_switch(arms: &[MatchArm], sty: &JrgType) -> Option<(Vec<Vec<i64>>, bool)> {
+        if *sty != JrgType::I64 || arms.len() < 2 { return None; }
+        fn kumpul(p: &Pattern, keluar: &mut Vec<i64>) -> Option<()> {
+            let bulat = |p: &Pattern| match p {
+                Pattern::Literal { lit: LitKind::Int(n), .. } if *n <= i64::MAX as u128 => Some(*n as i64),
+                _ => None,
+            };
+            match p {
+                Pattern::Literal { .. } => keluar.push(bulat(p)?),
+                Pattern::Range { lo: Some(lo), hi: Some(hi), inclusive, .. } => {
+                    let (a, b) = (bulat(lo)?, bulat(hi)?);
+                    let b = if *inclusive { b } else { b.checked_sub(1)? };
+                    if b >= a && b - a >= 256 { return None; }
+                    keluar.extend(a..=b);
+                }
+                Pattern::Or { pats, .. } => for q in pats { kumpul(q, keluar)?; },
+                _ => return None,
+            }
+            Some(())
+        }
+        let mut kasus = Vec::new();
+        let mut lihat = std::collections::HashSet::new();
+        let mut jumlah = 0usize;
+        for (i, arm) in arms.iter().enumerate() {
+            if arm.guard.is_some() { return None; }
+            if i + 1 == arms.len() && matches!(arm.patterns.as_slice(), [Pattern::Wildcard(_)]) {
+                kasus.push(Vec::new());
+                return Some((kasus, true));
+            }
+            let mut nilai = Vec::new();
+            for p in &arm.patterns { kumpul(p, &mut nilai)?; }
+            nilai.retain(|v| lihat.insert(*v));
+            jumlah += nilai.len();
+            if jumlah > 1024 { return None; }
+            kasus.push(nilai);
+        }
+        Some((kasus, false))
     }
 
     /// Pola array: `[]`, `[a, b]`, `[k, ...sisa]`, `[k, ...]`, `[a, ..., z]`.

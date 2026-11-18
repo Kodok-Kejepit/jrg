@@ -73,6 +73,8 @@ struct Unit {
     impor: PetaImpor,
     /// Nama asli → alias untuk import ber-`as` milik unit ini.
     beralias: HashMap<String, String>,
+    /// Nama `var x: T` tanpa nilai awal dan tanpa nilai nol: bacaannya diperiksa (`PeriksaIsi`).
+    belum_isi: std::collections::HashSet<String>,
 }
 
 fn nama_global(awalan: Option<&str>, nama: &str) -> String {
@@ -81,6 +83,17 @@ fn nama_global(awalan: Option<&str>, nama: &str) -> String {
         None => nama.to_string(),
     }
 }
+
+/// `var x: T` tanpa nilai awal untuk `T` tanpa nilai nol: isinya penanda belum-diisi (sama dengan interpreter).
+pub(crate) fn penanda_belum_isi(ty: Option<&crate::parser::TypeExpr>, span: crate::lexer::Span) -> Option<VmValue> {
+    let t = ty?;
+    if crate::parser::nilai_nol(t, span).is_some() { return None; }
+    Some(VmValue::varian(crate::interpreter::TIPE_BELUM_DIISI, &crate::parser::nama_tipe(t), None))
+}
+
+pub(crate) fn catat_belum_isi(nama: &str) { UNIT.with(|u| { u.borrow_mut().belum_isi.insert(nama.to_string()); }); }
+
+pub(crate) fn belum_isi(nama: &str) -> bool { UNIT.with(|u| u.borrow().belum_isi.contains(nama)) }
 
 /// Nama telanjang milik unit yang sedang dikompilasi: nama globalnya dan jenisnya.
 /// Di VM semua unit berbagi satu tabel global, jadi nama milik modul diterjemahkan DI
@@ -673,11 +686,17 @@ impl Compiler {
             let asli = crate::module::ModuleResolver::module_name(&i.path);
             (asli != alias && impor.contains_key(&alias)).then_some((asli, alias))
         }).collect();
+        // `var` tingkat modul tanpa nilai awal: bacaannya di fungsi mana pun diperiksa.
+        let belum_isi = file.items.iter().filter_map(|it| match it {
+            Item::Var(vd) if vd.value.is_none() && penanda_belum_isi(vd.ty.as_ref(), vd.span).is_some() => Some(vd.name.clone()),
+            _ => None,
+        }).collect();
         UNIT.with(|u| *u.borrow_mut() = Unit {
             awalan: namespace.map(|a| a.to_string()),
             milik,
             impor: impor.clone(),
             beralias,
+            belum_isi,
         });
         // Pass 0: kumpulkan semua enum + variant Option/Result bawaan SEBELUM apa
         // pun lain dikompilasi, karena Pass 1/1b (di bawah) sudah langsung …
@@ -948,7 +967,10 @@ impl Compiler {
                 Item::Var(vd) => {
                     let nol = vd.ty.as_ref().and_then(|t| crate::parser::nilai_nol(t, vd.span));
                     if let Some(init) = vd.value.as_deref().or(nol.as_ref()) { c.compile_expr(init)?; }
-                    else { c.chunk.emit(OpCode::Nil); }
+                    else if let Some(p) = penanda_belum_isi(vd.ty.as_ref(), vd.span) {
+                        let ci = c.chunk.add_constant(p);
+                        c.chunk.emit_arg(OpCode::Const, ci);
+                    } else { c.chunk.emit(OpCode::Nil); }
                     let ni = c.chunk.add_name(&nama_global(namespace, &vd.name));
                     c.chunk.emit_arg(OpCode::DefVar, ni);
                     c.chunk.emit(OpCode::Pop);

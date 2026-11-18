@@ -23,6 +23,8 @@ pub fn cetak_bila_diminta() {
         for (nama, alasan) in super::modul::ditolak() {
             eprintln!("[jit] ditolak: {}: {alasan}", crate::ruang_tipe::bersih(&nama));
         }
+        let jir = super::jir::UNIT.load(Ordering::Relaxed);
+        if jir > 0 { eprintln!("[jit] jir: {jir} unit"); }
         let d = super::deopt::jumlah();
         if d > 0 { eprintln!("[jit] deopt: {d}"); }
         for (sebab, n) in super::deopt::sebab().iter().take(12) { eprintln!("[jit]   {sebab}: {n}"); }

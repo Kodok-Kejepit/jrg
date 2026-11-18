@@ -311,6 +311,17 @@ pub(crate) const LAWAK: TabelNada = TabelNada {
 };
 
 pub(crate) fn tabel_nada(n: Nada) -> Option<&'static TabelNada> {
+    if crate::terjemah::aktif() == crate::terjemah::Bahasa::En {
+        use super::nada_en as en;
+        return match n {
+            Nada::Sopan => None,
+            Nada::Galak => Some(&en::GALAK),
+            Nada::Judes => Some(&en::JUDES),
+            Nada::Hangat => Some(&en::HANGAT),
+            Nada::Cool => Some(&en::COOL),
+            Nada::Lawak => Some(&en::LAWAK),
+        };
+    }
     match n {
         Nada::Sopan => None,
         Nada::Galak => Some(&GALAK),
@@ -333,7 +344,8 @@ pub(crate) fn bantuan_tambahan(kunci: u64) -> &'static str {
         "tanda `^` di bawah nunjuk TEPAT ke bagian yang bermasalah. mulai dari situ, \
          jangan dari awal baris.",
     ];
-    SARAN[(kunci % SARAN.len() as u64) as usize]
+    let saran = if crate::terjemah::aktif() == crate::terjemah::Bahasa::En { super::nada_en::BANTUAN_TAMBAHAN } else { SARAN };
+    saran[(kunci % saran.len() as u64) as usize]
 }
 
 /// Satu baris sapaan untuk nada galak.
@@ -354,10 +366,11 @@ pub(crate) fn kunci_error(kode: Option<&str>, pesan: &str) -> u64 {
 /// Sapaan lengkap: tingkat dipilih dari hitungan, varian di-gacha dari
 /// (identitas error, hitungan).
 pub(crate) fn omelan(nada: Nada, fase: Fase, baris: Option<usize>, kunci: u64, hitungan: u32) -> String {
+    let en = crate::terjemah::aktif() == crate::terjemah::Bahasa::En;
     let di_baris = match baris {
-        Some(n) => format!("di baris {}", n),
+        Some(n) => format!("{} {}", if en { "on line" } else { "di baris" }, n),
         // Tanpa lokasi, tidak mengarang nomor — cukup menunjuk kabur.
-        None => "di situ".to_string(),
+        None => (if en { "around there" } else { "di situ" }).to_string(),
     };
     let Some(tabel) = tabel_nada(nada) else { return String::new() };
     let per_fase = match fase {

@@ -282,8 +282,10 @@ pub unsafe extern "C" fn jrg_jembatan_panggil(
     nama: *const u8, nl: i64, args: *const KotakAny, n: i64, out: *mut KotakAny, kait: *const Kait,
 ) -> i32 {
     let k = &*kait;
+    #[cfg(target_os = "wasi")]
+    let _jaga = JagaWasi::masuk();
     let nama = teks(nama as u64, nl as u64);
-    let gagal = |pesan: String| { let (p, l) = bocorkan(&pesan); kotak(5, p, l) };
+    let gagal = |pesan: String| { let (p, l) = bocorkan(&jrgc::terjemah::t(&pesan)); kotak(5, p, l) };
     // `::tampil` dan `::typeof`: tampilan dan nama tipe sebuah nilai titipan.
     // `::field`: `x.f` atas nilai titipan (struct milik `jrgc`, mis. `MousePos`).
     if nama == "::field" {
@@ -341,7 +343,8 @@ pub unsafe extern "C" fn jrg_jembatan_panggil(
     // Selama ada goroutine lain atau yang melayani (server), panggilan apa pun bisa menunggu
     // sesuatu yang harus jalan di korutin lain: `proses::`, `http::`, `dok::http_get` ke server sendiri.
     let ramai = AKTIF.load(std::sync::atomic::Ordering::SeqCst) > 0 || (k.lain)() > 0;
-    if pemblokir(nama) || (ramai && !nama.starts_with("::")) {
+    // WASI tanpa thread (`--emit-wasm`): semuanya di thread biner; yang memblokir ditolak builtinnya sendiri.
+    if !cfg!(target_os = "wasi") && (pemblokir(nama) || (ramai && !nama.starts_with("::"))) {
         let hasil = layani(nama, masuk, k);
         return tulis_hasil(nama, hasil, out, k);
     }
@@ -361,7 +364,7 @@ pub unsafe extern "C" fn jrg_jembatan_panggil(
 }
 
 unsafe fn tulis_hasil(nama: &str, hasil: Hasil, out: *mut KotakAny, k: &Kait) -> i32 {
-    let gagal = |pesan: String| { let (p, l) = bocorkan(&pesan); kotak(5, p, l) };
+    let gagal = |pesan: String| { let (p, l) = bocorkan(&jrgc::terjemah::t(&pesan)); kotak(5, p, l) };
     match hasil {
         Err(_) => { out.write(gagal(format!("`{}` panik di dalam jrgc — ini bug di jrgc, bukan di programmu", nama))); -1 }
         Ok(None) => { out.write(gagal(format!("`{}` tidak ada di pustaka standar", nama))); -1 }
@@ -384,3 +387,24 @@ unsafe fn tulis_hasil(nama: &str, hasil: Hasil, out: *mut KotakAny, k: &Kait) ->
 pub unsafe extern "C" fn jrg_android_pasang(t: *const jrgc::canvas::jendela::TabelAndroid) {
     jrgc::canvas::jendela::pasang(t)
 }
+
+/// WASI (`--emit-wasm`): kedalaman panggilan jembatan. Bingkai `jrgc` tidak diinstrumentasi Asyncify, jadi korutin
+/// yang berganti di bawahnya ditolak keras (`korutin_wasm.c`, `jrg_wasm_cek_jembatan`).
+#[cfg(target_os = "wasi")]
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static mut jrg_wasm_di_jembatan: i32 = 0;
+
+#[cfg(target_os = "wasi")]
+struct JagaWasi;
+
+#[cfg(target_os = "wasi")]
+impl JagaWasi {
+    fn masuk() -> Self { unsafe { jrg_wasm_di_jembatan += 1 }; JagaWasi }
+}
+
+#[cfg(target_os = "wasi")]
+impl Drop for JagaWasi {
+    fn drop(&mut self) { unsafe { jrg_wasm_di_jembatan -= 1 }; }
+}
+

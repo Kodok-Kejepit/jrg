@@ -18,6 +18,8 @@ pub(crate) mod deopt;
 pub(crate) mod lambat;
 #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
 pub(crate) mod tata_letak;
+#[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
+pub(crate) mod jir;
 
 use std::sync::atomic::{AtomicBool, Ordering};
 

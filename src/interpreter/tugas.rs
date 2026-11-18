@@ -148,11 +148,13 @@ impl Interpreter {
         // ke frame bekas clone-an dan tidak pernah jalan.
         interp.defer_frames.push(Vec::new());
 
+        let aktor = crate::antrean::buntu::lahir();
         let hasil = std::thread::Builder::new()
             .name("jrg-future".to_string())
             // Stack sebesar utas utama: dengan bawaan 2 MB rekursi ±150 tingkat sudah mematikan proses.
             .stack_size(super::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                let _aktor = aktor;
                 super::catat_puncak_stack();
                 // Kegagalan IKUT dibawa, tidak ditelan.
                 let v = match interp.call_fn(f, sisa) {
@@ -187,7 +189,7 @@ impl Interpreter {
         if !klaim(&serah) {
             return Err(pesan_sudah_diserahkan(siapa));
         }
-        let hasil = channel_recv(&ch).map_err(|e| format!("{}: {}", siapa, e))?;
+        let hasil = channel_recv(&ch).map_err(|e| sebut_siapa(siapa, e))?;
         cek_gagal(hasil)
     }
 
@@ -221,7 +223,7 @@ impl Interpreter {
             if !klaim(serah) {
                 return Err(pesan_sudah_diserahkan(&format!("{}: elemen ke-{}", siapa, i)));
             }
-            let v = channel_recv(ch).map_err(|e| format!("{}: {}", siapa, e))?;
+            let v = channel_recv(ch).map_err(|e| sebut_siapa(siapa, e))?;
             hasil.push(cek_gagal(v)?);
         }
         Ok(Value::Array(hasil.into()))
@@ -327,4 +329,9 @@ pub fn batas_tunggu(ms: i128) -> Option<std::time::Instant> {
 
 pub fn lewat(batas: Option<std::time::Instant>) -> bool {
     batas.map_or(false, |b| std::time::Instant::now() >= b)
+}
+
+/// Galat penerimaan diberi nama pintunya — kecuali kebuntuan, yang milik seluruh program, bukan pintu itu.
+pub(crate) fn sebut_siapa(siapa: &str, e: String) -> String {
+    if e == crate::antrean::PESAN_BUNTU { e } else { format!("{}: {}", siapa, e) }
 }

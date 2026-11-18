@@ -366,11 +366,13 @@ pub struct TypeTable {
     /// Emission order for `%Name = type {...}` declarations — later entries may
     /// reference earlier ones (opaque `ptr` means this almost never actually …
     pub emit_order: Vec<String>,
+    /// Lebar penunjuk sasaran dalam byte: 8, atau 4 di wasm32 (`CodegenOptions::ptr32`).
+    pub lebar_ptr: u64,
 }
 
 impl TypeTable {
     pub fn new() -> Self {
-        TypeTable { structs: HashMap::new(), enums: HashMap::new(), emit_order: Vec::new() }
+        TypeTable { structs: HashMap::new(), enums: HashMap::new(), emit_order: Vec::new(), lebar_ptr: 8 }
     }
 
     pub fn register_struct(&mut self, layout: StructLayout) {
@@ -509,18 +511,16 @@ impl TypeTable {
                     None => 0,
                 }
             }
-            JrgType::Enum(name) => {
-                match self.enums.get(name) {
-                    Some(e) => {
-                        let tag = 4u64;
-                        let pad = round_up(tag, e.payload_align.max(1));
-                        round_up(pad + e.payload_bytes, e.payload_align.max(4))
-                    }
-                    None => 4,
-                }
-            }
-            JrgType::Fn(..) => 16,
-            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => 8,
+            // Cermin `llvm_struct_def`: `{ i32, [n x i64|i128] }`, muatan mulai di satu elemen blob. Dulu dari
+            // perataan muatan sendiri, jadi `Option<bool>`/`Option<i32>` (dan penunjuk di wasm32) terhitung 8 byte
+            // padahal 16: larik dan kotaknya ditulis melewati tempatnya.
+            JrgType::Enum(name) => match self.enums.get(name) {
+                Some(e) if e.blob_len() > 0 => e.blob_elem_size() * (1 + e.blob_len()),
+                _ => 4,
+            },
+            // `{ ptr, ptr }` dan penunjuk telanjang: ikut lebar penunjuk sasaran.
+            JrgType::Fn(..) => 2 * self.lebar_ptr,
+            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => self.lebar_ptr,
             JrgType::Never => 0,
         }
     }
@@ -547,11 +547,11 @@ impl TypeTable {
                 None => 1,
             },
             JrgType::Enum(name) => match self.enums.get(name) {
-                Some(e) => e.payload_align.max(4),
-                None => 4,
+                Some(e) if e.blob_len() > 0 => e.blob_elem_size(),
+                _ => 4,
             },
-            JrgType::Fn(..) => 8,
-            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => 8,
+            JrgType::Fn(..) => self.lebar_ptr,
+            JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) | JrgType::Kotak(_) => self.lebar_ptr,
             JrgType::Never => 1,
         }
     }

@@ -606,7 +606,8 @@ pub enum Expr {
     Slice  { obj: Box<Expr>, lo: Option<Box<Expr>>, hi: Option<Box<Expr>>, span: Span },
     Call   { func: Box<Expr>, args: Vec<Expr>, span: Span },
     Await  { expr: Box<Expr>, span: Span },
-    Propagate { expr: Box<Expr>, span: Span }, // `expr?`
+    /// `expr?`; `keluarga` = keluarga kembalian yang ditulis fungsi/closure pemiliknya (diisi parser).
+    Propagate { expr: Box<Expr>, keluarga: Keluarga, span: Span },
     /// `ret` adalah anotasi `-> T` yang boleh ditulis sesudah parameter.
     /// Seperti tiap anotasi tipe di JRG ia DIPERIKSA NAMANYA dan tidak
     /// ditegakkan; yang memakainya cuma inferensi backend LLVM.
@@ -665,3 +666,18 @@ pub enum BinaryOp {
 pub enum Visibility { Public, Private }
 
 pub type Ident = String;
+
+/// Keluarga nilai kembalian yang DITULIS fungsi pemilik sebuah `?`: `?` yang meneruskan keluarga lain
+/// (`None` dari fungsi `-> Result`) gagal saat jalan, di tiga mesin. Tanpa anotasi: `Bebas`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Keluarga { Bebas, Option, Result }
+
+impl Keluarga {
+    pub fn dari_anotasi(t: Option<&TypeExpr>) -> Keluarga {
+        match t {
+            Some(TypeExpr::Named(n)) if n.package.is_none() && n.modul.is_none() && n.name == "Option" => Keluarga::Option,
+            Some(TypeExpr::Named(n)) if n.package.is_none() && n.modul.is_none() && n.name == "Result" => Keluarga::Result,
+            _ => Keluarga::Bebas,
+        }
+    }
+}

@@ -217,7 +217,7 @@ pub(crate) fn channel_try_send(chan: &ChannelHandle, val: Value) -> Result<(), b
 /// Terima yang memblokir. Gagal hanya kalau channelnya ditutup DAN kosong:
 /// isi yang sudah terkirim tetap dikuras lebih dulu.
 pub fn channel_recv(chan: &ChannelHandle) -> Result<Value, String> {
-    chan.terima().ok_or_else(|| crate::antrean::PESAN_TERIMA_TERTUTUP.to_string())
+    chan.terima_cek()?.ok_or_else(|| crate::antrean::PESAN_TERIMA_TERTUTUP.to_string())
 }
 
 /// Ambil kalau sudah ada, tanpa memblokir.
@@ -1008,6 +1008,21 @@ pub fn pesan_modul_tak_diimpor(path: &str, modul: &str) -> String {
             path, modul)
 }
 
+/// Penanda isi `var x: T` tanpa nilai awal untuk `T` yang tidak punya nilai nol (struct, enum, `Option`, ..).
+/// Nama tipenya diawali karakter kendali, jadi program tidak bisa menulisnya; MEMBACA-nya gagal.
+pub const TIPE_BELUM_DIISI: &str = "\u{1}belum-diisi";
+
+pub fn nilai_belum_diisi(tipe: &str) -> Value {
+    Value::Enum { type_name: TIPE_BELUM_DIISI.to_string(), variant: tipe.to_string(), payload: None }
+}
+
+/// `var x: T` dibaca sebelum ditulis — satu kalimat untuk tiga mesin.
+pub fn pesan_dibaca_sebelum_diisi(nama: &str, tipe: &str) -> String {
+    format!("`{}` dibaca sebelum diisi — `var {}: {}` ditulis tanpa nilai awal, dan `{}` tidak punya nilai nol \
+             yang jelas; isi dulu (`{} = ..`) sebelum dipakai, atau beri nilai awal di deklarasinya",
+            nama, nama, tipe, tipe, nama)
+}
+
 /// Nama tingkat atas yang dibaca sebelum barisnya sempat dijalankan. Dulu dijawab "belum
 /// dikenal … lupa `let B`?" untuk nama yang jelas dideklarasikan beberapa baris di bawahnya.
 pub fn pesan_belum_diisi(nama: &str) -> String {
@@ -1221,6 +1236,16 @@ pub fn pesan_bongkar_bukan_tuple(sasaran: usize, tipe: &str) -> String {
     format!("`=` dengan {} sasaran butuh nilai berupa tuple berisi {} nilai di sisi kanan, dapat `{}`\n  \
              bantuan: tulis satu nilai per sasaran (`a, b = x, y`), atau pastikan sisi kanannya \
              mengembalikan tuple", sasaran, sasaran, tipe)
+}
+
+/// `?` atas nilai yang bukan `Option`/`Result` — menyebut TIPE, bukan isi; satu kalimat untuk tiga mesin.
+pub fn pesan_sebar_bukan_hasil(tipe: &str) -> String {
+    format!("operator `?` hanya berlaku untuk Result/Option, dapat `{}`", tipe)
+}
+
+/// `?` atas `asal` ("Option"/"Result") di fungsi yang BERANOTASI keluarga lain — tiga mesin, satu kalimat.
+pub fn pesan_sebar_keluarga(asal: &str) -> String {
+    format!("`?` pada {} butuh fungsi ini mengembalikan `{}<..>` juga", asal, asal)
 }
 
 /// `a, b = e` dengan tuple yang isinya tidak sebanyak sasarannya.

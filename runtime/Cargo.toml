@@ -1,6 +1,6 @@
 [package]
 name        = "jrgrt"
-version     = "0.6.0"
+version     = "0.6.1"
 edition     = "2021"
 description = "JawaRustGo++ native runtime — linked into every jrgc --emit-llvm compiled binary. no_std + alloc on libc, zero external crates: must build fully offline."
 
@@ -25,3 +25,6 @@ strip         = true
 
 [profile.dev]
 panic = "abort"
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(jrg_gabung)'] }

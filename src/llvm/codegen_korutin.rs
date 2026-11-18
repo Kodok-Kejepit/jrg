@@ -96,12 +96,17 @@ impl Codegen {
     /// `Future::new(f, args..)` / `Task::spawn(f, args..)`: `f(args..)` jalan sebagai goroutine
     /// dan hasilnya menunggu di channel sekali-serah.
     pub(crate) fn masa_baru(&mut self, args: &[Expr], tugas: bool, span: Span) -> Result<Val, String> {
+        self.masa_baru_dgn(args, tugas, true, span)
+    }
+
+    /// `salin`: tangkapan closure-nya disalin, seperti `Future::new`; `tangkap` menjalankannya di tempat, jadi tidak.
+    fn masa_baru_dgn(&mut self, args: &[Expr], tugas: bool, salin: bool, span: Span) -> Result<Val, String> {
         let nama = if tugas { "Task::spawn" } else { "Future::new" };
         let Some((f, sisa)) = args.split_first() else {
             return Err(super::galat::tandai(span, format!("`{}` butuh fungsi yang dijalankan", nama)));
         };
         let panggil = Expr::Call { func: Box::new(f.clone()), args: sisa.to_vec(), span };
-        let clo = self.closure_dgn_params(&[], &panggil, &[], true, span)?;
+        let clo = self.closure_dgn_params(&[], &panggil, &[], salin, span)?;
         let JrgType::Fn(_, ret) = clo.ty.clone() else { return Err("closure tugas bukan fungsi".to_string()); };
         let ret = *ret;
         let kode = self.fresh("msk.");
@@ -130,6 +135,66 @@ impl Codegen {
         self.emit(format!("{} = call ptr @jrg_masa_baru(ptr @{}, ptr {}, ptr {}, i64 {}, i32 {})",
             r, bungkus, env, kode, self.types.sizeof(&ret), tugas as i32));
         Ok(Val { text: r, ty: JrgType::Masa(Box::new(ret), tugas) })
+    }
+
+    /// `tangkap(f)`: `f` dijalankan sebagai tugas (seperti `Future::new`), dan hasilnya diambil tanpa melempar galatnya —
+    /// gagal = `Err(Galat)` yang diisi runtime (`jrg_tangkap_rekam`: kalimat dalam bahasa pesan, lokasi dari blok situs).
+    pub(crate) fn tangkap(&mut self, f: &Expr, span: Span) -> Result<Val, String> {
+        // Closure literal dipakai apa adanya; yang lain dihitung sekali dulu, seperti di dua mesin acuan.
+        let fexpr = match f {
+            Expr::Closure { params, .. } if !params.is_empty() => {
+                self.panik_statis(&crate::interpreter::tangkap::pesan_butuh_argumen(params.len()));
+                return Ok(Val { text: "undef".into(), ty: JrgType::Unit });
+            }
+            Expr::Closure { .. } => f.clone(),
+            _ => {
+                let v = self.codegen_expr(f, None)?;
+                let pesan = match &v.ty {
+                    JrgType::Fn(p, _) if !p.is_empty() => Some(crate::interpreter::tangkap::pesan_butuh_argumen(p.len())),
+                    JrgType::Fn(..) => None,
+                    t => Some(crate::interpreter::tangkap::pesan_bukan_fungsi(&t.nama_typeof())),
+                };
+                if let Some(p) = pesan {
+                    self.panik_statis(&p);
+                    return Ok(Val { text: "undef".into(), ty: JrgType::Unit });
+                }
+                let tempat = self.spill_to_place(&v);
+                self.lokal_sementara(tempat, v.ty.clone(), span)
+            }
+        };
+        let m = self.masa_baru_dgn(std::slice::from_ref(&fexpr), false, false, span)?;
+        let JrgType::Masa(t, _) = m.ty.clone() else { return Err("tangkap: bukan tugas".to_string()) };
+        let t = *t;
+        let galat = self.daftar_galat();
+        let slot = self.alloca_typed("tkh.", &t);
+        if t != JrgType::Unit { self.emit(format!("store {} zeroinitializer, ptr {}", t.llvm_ty(), slot)); }
+        let gslot = self.alloca_typed("tkg.", &galat);
+        self.emit(format!("store {} zeroinitializer, ptr {}", galat.llvm_ty(), gslot));
+        self.ensure_extern("declare i32 @jrg_tangkap_ambil(ptr, ptr, ptr)", "jrg_tangkap_ambil");
+        let rc = self.fresh("tkr.");
+        self.emit(format!("{} = call i32 @jrg_tangkap_ambil(ptr {}, ptr {}, ptr {})", rc, m.text, slot, gslot));
+        let ok = self.fresh("tko.");
+        self.emit(format!("{} = icmp ne i32 {}, 0", ok, rc));
+        let harap = JrgType::Enum(self.instantiate_result(&t, &galat));
+        let isi = self.lokal_sementara(slot, t.clone(), span);
+        let gal = self.lokal_sementara(gslot, galat.clone(), span);
+        let v_ok = self.construct_option_result("Ok", &[isi], Some(&harap), span)?;
+        let v_err = self.construct_option_result("Err", &[gal], Some(&harap), span)?;
+        let p = self.fresh("tkp.");
+        self.emit(format!("{} = select i1 {}, {} {}, {} {}", p, ok, harap.llvm_ty(), v_ok.text, harap.llvm_ty(), v_err.text));
+        Ok(Val { text: p, ty: harap })
+    }
+
+    /// Struct `Galat` milik `tangkap`, field-nya urut abjad seperti tampilannya di dua mesin lain.
+    /// Tata letak `Galat` (rekaman `tangkap`), didaftarkan sekali: dari `tangkap` atau dari anotasi `Galat`.
+    pub(crate) fn daftar_galat(&mut self) -> JrgType {
+        let nama = crate::interpreter::tangkap::NAMA.to_string();
+        let milik_tangkap = |s: &super::types::StructLayout| s.fields.iter().map(|(n, _)| n.as_str()).eq(["baris", "berkas", "kolom", "pesan"]);
+        if self.types.structs.get(&nama).is_some_and(milik_tangkap) { return JrgType::Struct(nama); }
+        self.types.register_struct(super::types::StructLayout { name: nama.clone(), fields: vec![
+            ("baris".to_string(), JrgType::I64), ("berkas".to_string(), JrgType::Str),
+            ("kolom".to_string(), JrgType::I64), ("pesan".to_string(), JrgType::Str)] });
+        JrgType::Struct(nama)
     }
 
     fn masa_dari(&mut self, e: &Expr, nama: &str, span: Span) -> Result<(Val, JrgType), String> {

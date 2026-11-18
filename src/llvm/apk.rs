@@ -337,7 +337,7 @@ fn jrgc_android(abi: &Abi, alat: &Alat, verbose: bool) -> Result<PathBuf, String
         }
     };
     if perlu {
-        if verbose { eprintln!("[jrgc] membangun jrgc untuk {} — beberapa menit, di-cache setelahnya...", abi.nama); }
+        if verbose { crate::ecetak_t!("[jrgc] membangun jrgc untuk {} — beberapa menit, di-cache setelahnya...", abi.nama); }
         let linker = alat.ndk_bin.join(format!("{}{}-clang", abi.clang, API));
         if let Some(k) = crate::host::skrip_tanpa_penafsir(&linker) { return Err(k); }
         let besar = abi.rust.to_uppercase().replace('-', "_");

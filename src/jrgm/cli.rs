@@ -262,6 +262,13 @@ pub(crate) enum JrgmCommand {
     /// Jalankan Language Server Protocol server (untuk VS Code / Neovim)
     Lsp,
 
+    /// Bahasa pesan JRG untuk semua jalan berikutnya: en (bawaan) atau id
+    #[command(alias = "bahasa")]
+    Language {
+        /// en atau id; tanpa ini, tampilkan bahasa yang berlaku
+        kode: Option<String>,
+    },
+
     /// Terbitkan versi: tag v<versi> didorong ke repositori git
     Publish {
         #[arg(long)]

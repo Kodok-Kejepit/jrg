@@ -7,7 +7,12 @@ use std::process::Command;
 /// supaya kasus yang rakus gagal "memori habis" alih-alih menghabiskan memori mesin.
 fn jrgc() -> &'static str {
     static PASANG: std::sync::Once = std::sync::Once::new();
-    PASANG.call_once(|| if std::env::var_os("JRGC_BATAS_MEMORI").is_none() { std::env::set_var("JRGC_BATAS_MEMORI", "2048") });
+    // `JRG_ARENA_RACUN=1`: arena yang dipulihkan di akhir putaran loop (`codegen_arena`) diisi sampah, jadi nilai yang
+    // salah dibebaskan muncul sebagai jawaban rusak di SELURUH tabel ini, bukan benar karena kebetulan.
+    PASANG.call_once(|| {
+        if std::env::var_os("JRGC_BATAS_MEMORI").is_none() { std::env::set_var("JRGC_BATAS_MEMORI", "2048") }
+        std::env::set_var("JRG_ARENA_RACUN", "1");
+    });
     env!("CARGO_BIN_EXE_jrgc")
 }
 
@@ -65,6 +70,80 @@ fn jalankan_llvm(src: &str) -> Hasil {
         sukses: out.status.success(),
         kode: out.status.code(),
     }
+}
+
+/// `jalankan_llvm`, lalu biner yang sama dijalankan langsung dengan `JRG_BAHASA=en` (Fase DWIBAHASA): biner memilih
+/// bahasa galatnya sendiri saat jalan. Batas memorinya `JRGC_BATAS_MEMORI` lewat `ulimit`, seperti di `jrgc`.
+fn jalankan_llvm_dua_bahasa(src: &str) -> (Hasil, String) {
+    let dir = dir_uji("emit2");
+    let file = dir.join("uji.jrg");
+    std::fs::write(&file, src).expect("tulis sumber");
+    let bin = dir.join("uji.bin");
+    let out = Command::new(jrgc())
+        .arg(&file).arg("--emit-llvm").arg("-o").arg(&bin)
+        .env("JRG_SOPAN", "1").env("JRG_BAHASA", "id").env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
+        .output().expect("jalankan jrgc --emit-llvm");
+    let en = if bin.exists() {
+        // Batasnya `JRGC_BATAS_MEMORI` yang sama (kosong = tanpa batas: sapuan ASan butuh ruang alamat bayangannya).
+        let mib = std::env::var("JRGC_BATAS_MEMORI").unwrap_or_default();
+        let batas = if mib.trim().is_empty() { String::new() } else { format!("ulimit -v {}; ", mib.trim().parse::<u64>().unwrap_or(2048) * 1024) };
+        let o = Command::new("sh").arg("-c").arg(format!("{batas}exec \"$0\"")).arg(&bin)
+            .env("JRG_BAHASA", "en").env_remove("DISPLAY").env_remove("WAYLAND_DISPLAY")
+            .stdin(std::process::Stdio::null()).output().expect("jalankan biner");
+        String::from_utf8_lossy(&o.stderr).to_string()
+    } else { String::new() };
+    let _ = std::fs::remove_dir_all(&dir);
+    (Hasil {
+        keluaran: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+        galat: String::from_utf8_lossy(&out.stderr).to_string(),
+        sukses: out.status.success(),
+        kode: out.status.code(),
+    }, en)
+}
+
+/// Kata Indonesia yang tidak mungkin ada di kalimat Inggris (sama dengan `tests/terjemah.rs`).
+fn masih_indonesia(baris: &str) -> bool {
+    const KATA: [&str; 16] = ["tidak", "bisa", "harus", "yang", "dengan", "belum", "pakai", "untuk", "kalau",
+        "cuma", "sudah", "butuh", "dapat", "bukan", "karena", "tanpa"];
+    let mut bersih = String::new();
+    let mut dalam = false;
+    for c in baris.chars() {
+        if c == '`' { dalam = !dalam; continue; }
+        if !dalam { bersih.push(c.to_ascii_lowercase()); }
+    }
+    let kata: Vec<&str> = bersih.split(|c: char| !c.is_alphanumeric()).collect();
+    KATA.iter().filter(|k| kata.contains(k)).count() >= 2
+}
+
+/// `tok()` atas masukan bukan UTF-8 gagal dengan kalimat yang sama di tiga mesin (Fase AMAN-68): LLVM dulu
+/// menjawab teks kosong tanpa suara.
+#[test]
+fn tok_bukan_utf8_sama_di_tiga_mesin() {
+    if !ada_clang() { eprintln!("lewati: clang tidak ada"); return; }
+    use std::io::Write;
+    let dir = dir_uji("tok");
+    let file = dir.join("t.jrg");
+    std::fs::write(&file, "package main\npub fn main() {\n    wok(tok())\n    wok(tok())\n}\n").unwrap();
+    let bin = dir.join("t.bin");
+    let o = Command::new(jrgc()).arg(&file).arg("--emit-llvm").arg("-o").arg(&bin).arg("--no-run")
+        .env("JRG_SOPAN", "1").output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let jalan = |mut c: Command| {
+        let mut anak = c.env("JRG_SOPAN", "1").stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped()).spawn().unwrap();
+        anak.stdin.take().unwrap().write_all(b"halo\nx\xffy\n").unwrap();
+        let o = anak.wait_with_output().unwrap();
+        (o.status.code(), String::from_utf8_lossy(&o.stdout).to_string(), String::from_utf8_lossy(&o.stderr).to_string())
+    };
+    let mut ci = Command::new(jrgc());
+    ci.arg(&file);
+    let mut cv = Command::new(jrgc());
+    cv.arg(&file).arg("--vm");
+    for (nama, (kode, keluar, galat)) in [("interp", jalan(ci)), ("vm", jalan(cv)), ("llvm", jalan(Command::new(&bin)))] {
+        assert_eq!((kode, keluar.as_str()), (Some(1), "halo\n"), "{}: {}", nama, galat);
+        assert!(galat.contains("tok: masukan bukan teks UTF-8 yang sah"), "{}: {}", nama, galat);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// Jalankan lewat `--vm`. Hanya dipakai sapuan tiga-mesin di bawah.
@@ -231,6 +310,10 @@ include!("bersama/paritas.rs");
 const PARITAS_BEDA_DI_LLVM: &[(&str, &str)] = &[
     // Kosong sejak Fase URUTAN-LLVM (entri terakhirnya, tulisan yang hilang di `m[0] = m[0] + g()`,
     // ditutup). Entri berikutnya: ("nama kasus PARITAS", "sebabnya").
+    ("tangkap: stack habis tertangkap dan berlokasi",
+     "biner LLVM tidak tahu di situs mana stack-nya habis (penjaganya di luar situs mana pun, lihat \
+      `pesan_gagal_saat_jalan_sama`), jadi `Galat`-nya berlokasi kosong (`baris` 0): nilai \"tidak diketahui\" yang \
+      didokumentasikan, bukan lokasi karangan"),
 ];
 
 /// Modul yang di-`import` jalan lewat LLVM dan menjawab sama dengan dua mesin lain (Fase
@@ -571,6 +654,8 @@ const BIAYA_LLVM: &[(&str, &str, &str, usize, f64)] = &[
     ("q = q.push(x)", "struct Q { pub xs: []int }\nimpl Q { pub fn push(self, x: int) -> Q { self.xs += [x]\n return self } }\n",
      "var q = Q { xs: [] }\n var i = 0\n while i < N { q = q.push(i)\n i += 1 }\n wok(len(q.xs))", 200_000, 24.0),
     ("s = s + \"x\" melewati satu chunk arena", "", "var s = \"\"\n var i = 0\n while i < N { s = s + \"x\"\n i += 1 }\n wok(len(s))", 500_000, 24.0),
+    // #1053: `let r = arr::pop(a); a = r[0]` berbagi penyangga — dulu disalin tiap pop dan 20 ribu pop habis 4 GB.
+    ("let r = arr::pop(a); a = r[0]", "", "var a = arr::fill(1, N)\n var s = 0\n while len(a) > 0 {\n let r = arr::pop(a)\n a = r[0]\n s += 1 }\n wok(s)", 100_000, 24.0),
     // Fase AMAN-34 (#918): `x = [.., x, ..]` memindahkan `x` — dulu disalin utuh tiap langkah (20 ribu langkah 3 GB).
     ("a = [a, x] membungkus dirinya", "", "var a = []\n var i = 0\n while i < N { a = [a, i]\n i += 1 }\n wok(len(a))", 50_000, 24.0),
     // Fase AMAN-35 (#922): rune ditempel lewat penyangga stack — dulu tiap rune teks arena baru, `s` disalin.
@@ -591,6 +676,14 @@ const BIAYA_LLVM: &[(&str, &str, &str, usize, f64)] = &[
      "let a = arr::map(arr::fill(0, N), |y| y + 1)\n var i = 0\n var s = 0\n while i < 200000 { s += satu(a)\n i += 1 }\n wok(s)", 2_000, 4.0),
     ("x, _ = m::f(x, ..): std/batas::coba", "import \"std/batas\"\n",
      "var p = batas::baru(5, 0.001, N)\n for _, i in range(N) { p, _ = batas::coba(p, «k${i}», i) }\n wok(batas::jumlah_kunci(p))", 2_000, 24.0),
+    // Antrean B butir 4: `var b = a` antar-lokal polos berbagi penyangga — dulu disalin tiap kali (16 ribu × 16 ribu
+    // elemen: 1,2 s dan 1,9 GB).
+    ("let t = [a] yang cuma dibaca", "",
+     "var a = arr::fill(0, N)\n var i = 0\n var s = 0\n while i < 200000 { let t = [a]\n s += len(t[0])\n i += 1 }\n wok(s)", 2_000, 4.0),
+    ("var n = m atas larik bersarang yang cuma dibaca", "",
+     "var m: [][]int = [arr::fill(0, N)]\n var i = 0\n var s = 0\n while i < 200000 { var n = m\n s += n[0][0]\n i += 1 }\n wok(s)", 2_000, 4.0),
+    ("var b = a yang cuma dibaca", "",
+     "var a = arr::fill(0, N)\n var i = 0\n var s = 0\n while i < 200000 { var b = a\n s += b[0]\n i += 1 }\n wok(s)", 2_000, 4.0),
     ("array sebagai argumen ke parameter yang cuma dibaca", "fn pjg(x: []int) -> int { return len(x) + x[0] }\n",
      "var a = arr::fill(0, N)\n var i = 0\n var s = 0\n while i < 200000 { s += pjg(a)\n i += 1 }\n wok(s)", 2_000, 4.0),
     ("struct berisi array sebagai argumen", "struct P { pub xs: []int }\nfn pjg(p: P) -> int { return len(p.xs) }\n",
@@ -746,18 +839,22 @@ include!("bersama/paritas_llvm.rs");
 // ───────────────────────────────────────────
 
 const BELUM_DIDUKUNG_LLVM: &[(&str, &str, &str)] = &[
-    // Fase AMAN-43: acuan menjawab struct ber-field tambahan; dulu kalimat pertamanya "tipe `unit`
-    // tidak punya method `y`" dan kalimat yang benar menunjuk `<lapis>`, bukan panggilan pemakai.
-    ("json::merge atas struct ditolak di situs panggil",
-     "package main\nstruct P { pub x: int, pub y: int }\npub fn main() { let q = json::merge(dict { y: 2 }, P { x: 1, y: 0 })\n wok(q.y) }",
-     "`json::merge` atas struct `P` belum bisa di backend LLVM"),
+    // Larik nilai fungsi berbeda tipe hasil: dulu ditolak tanpa lokasi dengan "string sebagai int" (pembungkus
+    // bawaan dipaksa ke hasil elemen pertama); sekarang di situs pemakai, menyebut tipe fungsinya.
+    ("larik fungsi bawaan berbeda tipe hasil",
+     "package main\npub fn main() {\n let hs = [len, typeof]\n wok(hs[0](\"abc\"))\n}",
+     "`fn(nilai bertag) -> string` sebagai `fn(nilai bertag) -> int`"),
+    // `json::merge` struct+dict yang tidak muat di tata letak struct-nya (acuan: struct berfield tambahan/berjenis lain).
+    ("json::merge membawa kunci yang bukan field",
+     "package main\nstruct P { pub x: int, pub y: int }\npub fn main() { wok(json::merge(dict { z: 2 }, P { x: 1, y: 0 })) }",
+     "dict-nya membawa kunci yang bukan field struct `P` (field-nya: x, y)"),
+    ("json::merge mengganti jenis field",
+     "package main\nstruct P { pub x: int, pub y: int }\npub fn main() { wok(json::merge(P { x: 1, y: 0 }, dict { y: \"t\" })) }",
+     "kunci `y` di dict bernilai `string`, sedangkan field `P.y` bertipe `int`"),
     // Fase POTONG-BERTAG (#848): tipe elemennya tidak diketahui dari tag; dulu ditolak saat kompilasi.
     ("potong: array di dalam nilai bertag",
      "package main\npub fn main() { let v = len(env::args()) > 99 $ 5 : [1, 2, 3]\n wok(v[0:2]) }",
      "di dalam nilai bertag belum didukung backend LLVM"),
-    // Fase POTONG: tipe hasil `t[a:b]` bergantung pada batasnya.
-    ("potong: tuple berbatas variabel", "package main\npub fn main() { let t = (1, 2, 3)\n let i = 1\n wok(t[i:]) }",
-     "batas potongan tuple di backend LLVM harus angka yang sudah pasti saat kompilasi"),
     // Fase SEBAR-TIPE: dua mesin lain menyimpan `2` di field `string`; di LLVM tipe field tetap.
     ("sebar membawa field berjenis lain dari sasarannya",
      "package main\nstruct A { pub x: int, pub y: string }\nstruct B { pub x: int, pub y: int }\npub fn main() { let b = B { x: 1, y: 2 }\n let a = A { x: 5, ...b }\n wok(a.y) }",
@@ -788,15 +885,17 @@ const BELUM_DIDUKUNG_LLVM: &[(&str, &str, &str)] = &[
     ("nilai bertag: struct dibuka sebagai struct lain",
      "package main\nstruct P { pub x: int }\nstruct Q { pub y: int }\npub fn main() { var y = nil\n y = P { x: 7 }\n let q: Q = y\n wok(q.y) }",
      "nilai bertipe `struct:P` tidak bisa mengisi tempat yang bertipe `struct:Q`"),
-    // Fase KORUTIN: kebuntuan DILAPORKAN di LLVM (korutin satu utas bisa melihatnya); dua mesin
-    // lain menggantung selamanya, jadi kasus ini tidak pernah dijalankan di sana.
-    ("kebuntuan: menerima dari channel yang tidak punya pengirim",
-     "package main\npub fn main() { let c = make_chan(int)\n wok(<-c) }",
-     "kebuntuan: semua goroutine sedang menunggu channel"),
     // Fase ISI: kotak bertag mencatat isi array/dict-nya. Dulu dua program ini mencetak sampah
     // tanpa pesan (pemeriksaan tagnya cuma tahu "ini array").
     ("nilai bertag: array<int> dibuka sebagai []string", "package main\npub fn main() {\n    var x = nil\n    x = [1, 2, 3]\n    let a: []string = x\n    wok(len(a))\n    wok(a[0])\n}\n",
      "nilai bertipe `array<int>` tidak bisa mengisi tempat yang bertipe `array<string>`"),
+    // AGI-20261118-02: kunci dict campur yang LITERAL ditimpa tipe lain lalu dibaca `d["a"]`/`d.a`/`dict::get` —
+    // tipe statis kunci cuma petunjuk, dulu payload skalar dibuka tanpa cek tag (pointer/byte mentah bocor). Sekarang
+    // lewat `buka_terperiksa`: gagal keras menyebut tipe asli, bukan membaca memori mentah sebagai skalar.
+    ("dict campur: kunci int ditimpa string, dibaca lewat indeks", "package main\npub fn main() {\n    var d = {\"a\": 1, \"b\": \"teks\"}\n    d[\"a\"] = \"rahasia\"\n    wok(\"mulai\")\n    let x = d[\"a\"]\n    wok(x)\n}\n",
+     "tidak bisa mengisi tempat yang bertipe `int`"),
+    ("dict campur: kunci string ditimpa array, dibaca lewat field", "package main\npub fn main() {\n    var d = {\"a\": \"hello\", \"b\": 1}\n    d[\"a\"] = [65, 66]\n    wok(\"mulai\")\n    wok(d.a)\n}\n",
+     "tidak bisa mengisi tempat yang bertipe `string`"),
     ("nilai bertag: isi dict campur dibuka sebagai []float", "package main\npub fn main() {\n    var d = {\"a\": 1, \"b\": \"teks\"}\n    d[\"c\"] = [1, 2, 3]\n    let a: []float = d[\"c\"]\n    wok(a)\n    let k = \"c\"\n    let b: [][]int = d[k]\n    wok(len(b))\n    wok(b)\n}\n",
      "nilai bertipe `array<int>` tidak bisa mengisi tempat yang bertipe `array<float>`"),
     // Fase BUNGKUS: nilai bertag yang tagnya tidak cocok dengan tipe variabelnya gagal saat
@@ -828,11 +927,13 @@ const BELUM_DIDUKUNG_LLVM: &[(&str, &str, &str)] = &[
     ("literal tidak muat di anotasinya", "package main\npub fn main() { let x: u8 = 300\n wok(x) }",
      "tidak muat di `u8`"),
     // Tahap 5: dulu DIVERGENSI — LLVM mengarang `D {x: 0}`, `Some(0)`, varian pertama.
-    ("var struct tanpa nilai awal", "package main\nstruct D { x: int = 5 }\npub fn main() { var a: D\n wok(a) }",
+    // 2026-11-18: dibaca SEBELUM diisi kini ditolak acuan juga (`DITOLAK_INTERP_DAN_LLVM`); yang tersisa di sini
+    // bentuk sah: diisi dulu, baru dibaca — LLVM masih menolak deklarasinya.
+    ("var struct tanpa nilai awal, diisi lalu dibaca", "package main\nstruct D { x: int = 5 }\npub fn main() { var a: D\n a = D {}\n wok(a) }",
      "tidak punya nilai nol"),
-    ("var Option tanpa nilai awal", "package main\npub fn main() { var a: Option<int>\n wok(a) }",
+    ("var Option tanpa nilai awal, diisi lalu dibaca", "package main\npub fn main() { var a: Option<int>\n a = Some(2)\n wok(a) }",
      "tidak punya nilai nol"),
-    ("var enum tanpa nilai awal", "package main\nenum Warna { Merah, Hijau }\npub fn main() { var a: Warna\n wok(a) }",
+    ("var enum tanpa nilai awal, diisi lalu dibaca", "package main\nenum Warna { Merah, Hijau }\npub fn main() { var a: Warna\n a = Warna::Hijau\n wok(a) }",
      "tidak punya nilai nol"),
     // "extern C: fungsi sebagai argumen" (sampai Fase FUNGSI-JEMBATAN) dan
     // "urutan pada array" (sampai Fase UMUM) dulu di sini.
@@ -859,14 +960,7 @@ pub fn main() {
     // Dict bernilai campur tipe DULU di sini, dengan alasan yang benar: satu
     // buffer pasangan `{ %JrgStr, V }` cuma punya satu `V`, jadi nilai campur …
 
-    // Fase SEBAR-CLOSURE: closure literal yang diikat `let` sudah jalan (`PARITAS_LLVM`); yang fungsinya baru
-    // diketahui saat jalan — `var` yang bisa ditugasi closure lain, parameter — tetap ditolak menyebut gulanya.
-    ("spread di pemanggilan nilai fungsi dari var",
-     "package main\npub fn main() { var tambah = |a, b| a + b\n wok(tambah(...[1, 2])) }",
-     "spread di pemanggilan"),
-    ("argumen bernama ke parameter bernilai fungsi",
-     "package main\nfn pakai(g) { return g(a: 10, b: 2) }\npub fn main() { wok(pakai(|a, b| a / b)) }",
-     "argumen bernama"),
+    // K5 (2026-11-18): spread dan argumen bernama ke nilai fungsi dari `var`/parameter pindah ke `PARITAS_LLVM`.
 
 
     // Fase SINKRON-LLVM: `Atomic` di backend ini 64 bit, dan luapannya ditolak saat jalan.
@@ -879,6 +973,30 @@ pub fn main() {
 
 /// `(nama, program, kata-kunci-interpreter, kata-kunci-llvm)`
 const DITOLAK_INTERP_DAN_LLVM: &[(&str, &str, &str, &str)] = &[
+    // 2026-11-18: kebuntuan dilaporkan interpreter dan `--vm` juga (`antrean::buntu`).
+    ("kebuntuan: main menerima dari channel tanpa pengirim", "package main\npub fn main() { let c = make_chan(int)\n wok(<-c) }",
+     "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    ("kebuntuan: main dan goroutine saling menunggu", "package main\npub fn main() { let a = make_chan(int)\n let b = make_chan(int)\n spawn { <-a\n b <- 1 }\n <-b\n a <- 1 }",
+     "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    ("kebuntuan: goroutine buntu sesudah main selesai", "package main\npub fn main() { let c = make_chan(int)\n spawn { <-c }\n wok(\"main selesai\") }",
+     "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    // 2026-11-18 (surat Bayu–Agus): `var x: T` tanpa nilai nol yang dibaca sebelum diisi — acuan dulu `nil`.
+    ("var struct dibaca sebelum diisi", "package main\nstruct D { x: int = 5 }\npub fn main() { var a: D\n wok(a) }",
+     "`a` dibaca sebelum diisi", "tidak punya nilai nol"),
+    ("var Option dibaca sebelum diisi", "package main\npub fn main() { var a: Option<int>\n wok(a) }",
+     "`a` dibaca sebelum diisi", "tidak punya nilai nol"),
+    ("var enum dibaca sebelum diisi, lewat closure", "package main\nenum Warna { Merah, Hijau }\npub fn main() { var a: Warna\n let f = || a\n wok(f()) }",
+     "`a` dibaca sebelum diisi", "tidak punya nilai nol"),
+    // Audit `Result`/`?` 2026-11-18: `?` yang mengubah keluarga kembalian yang DITULIS — acuan saat jalan (dulu
+    // diam-diam `None` dari fungsi `-> Result`), LLVM saat kompilasi, satu kalimat (`pesan_sebar_keluarga`).
+    ("? atas Option di fungsi -> Result", "package main\nfn f(o: Option<int>) -> Result<int, string> { let v = o?; Ok(v) }\npub fn main() { wok(f(None)) }",
+     "`?` pada Option butuh fungsi ini mengembalikan `Option<..>` juga", "`?` pada Option butuh fungsi ini mengembalikan `Option<..>` juga"),
+    ("? atas Result di fungsi -> Option", "package main\nfn f(r: Result<int, string>) -> Option<int> { let v = r?; Some(v) }\npub fn main() { wok(f(Err(\"x\"))) }",
+     "`?` pada Result butuh fungsi ini mengembalikan `Result<..>` juga", "`?` pada Result butuh fungsi ini mengembalikan `Result<..>` juga"),
+    ("? atas bukan Option/Result: satu kalimat yang menyebut tipe", "package main\nfn f() -> int { let v = 5?; v }\npub fn main() { wok(f()) }",
+     "operator `?` hanya berlaku untuk Result/Option, dapat `int`", "operator `?` hanya berlaku untuk Result/Option, dapat `int`"),
+    ("method prelude: jumlah argumen salah", "package main\npub fn main() { let o: Option<int> = None\n wok(o.or_else()) }",
+     "method `or_else` butuh 1 argumen (f), dapat 0", "method `or_else` butuh 1 argumen (f), dapat 0"),
     // Fase ISI-SISIP: penerima `arr::insert` yang bukan larik — satu kalimat (acuan saat jalan, LLVM saat kompilasi).
     ("arr::insert atas bukan larik", "package main\npub fn main() { wok(arr::insert(5, 0, 1)) }",
      "arr::insert: argumen ke-1 harus array, dapat `int`", "arr::insert: argumen ke-1 harus array, dapat `int`"),
@@ -1356,9 +1474,19 @@ fn pesan_gagal_saat_jalan_sama() {
     let mut gagal = Vec::new();
     let mut berlokasi = 0;
     let mut tanpa: Vec<&str> = Vec::new();
+    let (mut baris_en, mut indo) = (0, Vec::new());
     for (nama, src, keluaran, memuat) in GAGAL_SAAT_JALAN {
         let i = jalankan_interp(src);
-        let l = jalankan_llvm(src);
+        let (l, en) = jalankan_llvm_dua_bahasa(src);
+        // Biner yang sama dalam bahasa Inggris: lokasinya tetap, kalimatnya tidak lagi Indonesia.
+        let lokasi_baris = |g: &str| g.lines().find(|b| b.trim_start().starts_with("--> ")).map(str::to_string);
+        if lokasi_baris(&en) != lokasi_baris(&l.galat) {
+            gagal.push(format!("[{}] lokasi LLVM berbahasa Inggris {:?}, Indonesia {:?}", nama, lokasi_baris(&en), lokasi_baris(&l.galat)));
+        }
+        for b in en.lines().filter(|b| b.starts_with("error") || b.trim_start().starts_with("= ")) {
+            baris_en += 1;
+            if masih_indonesia(b) { indo.push(format!("{}: {}", nama, b)); }
+        }
 
         for (label, h) in [("interpreter", &i), ("llvm", &l)] {
             if h.sukses {
@@ -1391,6 +1519,9 @@ fn pesan_gagal_saat_jalan_sama() {
         }
     }
     eprintln!("{} dari {} kasus berlokasi di LLVM; berlokasi di acuan saja: {:?}", berlokasi, GAGAL_SAAT_JALAN.len(), tanpa);
+    assert!(baris_en > 150, "cuma {} baris galat Inggris terbaca dari biner LLVM", baris_en);
+    assert!(indo.len() * 50 <= baris_en, "{} dari {} baris galat biner LLVM (JRG_BAHASA=en) masih Indonesia:\n  {}",
+        indo.len(), baris_en, indo.join("\n  "));
     assert!(gagal.is_empty(), "{} masalah pada pesan gagal saat jalan:\n\n{}", gagal.len(), gagal.join("\n\n"));
 }
 
@@ -1675,6 +1806,13 @@ fn tiap_fungsi_lapis_bernama_builtin_yang_ada() {
     }
     assert!(jumlah >= 40, "lapis.jrg cuma memuat {} fungsi publik — berkasnya terbaca?", jumlah);
     assert!(salah.is_empty(), "fungsi lapis tanpa builtin bernama sama: {:?}", salah);
+}
+
+/// Runtime LLVM menerjemahkan galatnya dengan SALINAN `src/terjemah/inti.rs` (Fase DWIBAHASA).
+#[test]
+fn salinan_terjemah_inti_di_runtime_identik() {
+    assert!(include_str!("../src/terjemah/inti.rs") == include_str!("../runtime/src/terjemah_inti.rs"),
+        "runtime/src/terjemah_inti.rs berbeda dari src/terjemah/inti.rs — salin ulang: cp src/terjemah/inti.rs runtime/src/terjemah_inti.rs");
 }
 
 /// Runtime LLVM memakai SALINAN `json_inti.rs`; dua berkas itu harus sama bita demi bita.
@@ -2074,4 +2212,36 @@ pub fn main() {{
     assert_eq!(hasil[0], ["200 hai 1", "200 hai 2", "200 id=77", "500 handler error",
                           "404 404 Not Found: GET /hilang", "200 3"], "jawaban acuan");
     assert_eq!(hasil[0], hasil[1], "--emit-llvm menjawab beda dari acuan");
+}
+
+/// Fase ARENA: dua juta putaran yang membuat teks dulu memuncak ±95 MB, sekarang ±1,5 MB — harus muat 64 MiB dan sama
+/// dengan acuan; TANPA pemulihan (`JRGC_TANPA_PULIH_ARENA=1`) harus kehabisan memori, kalau tidak batasnya tak membuktikan.
+#[test]
+fn arena_dipulihkan_tiap_putaran() {
+    if lewati_tanpa_clang("arena_dipulihkan_tiap_putaran") { return; }
+    // Sapuan sanitizer memasang `JRGC_BATAS_MEMORI` kosong: ruang alamat bayangan ASan tidak muat di batas apa pun.
+    if std::env::var("JRGC_BATAS_MEMORI").is_ok_and(|v| v.trim().is_empty()) {
+        eprintln!("lewati: tanpa batas memori (sapuan sanitizer)");
+        return;
+    }
+    let src = "package main\nfn h(acc: int, s: string) -> int {\n    var a = acc\n    for i in 0..len(s) { a = (a * 31 + i) % 1000003 }\n    return a\n}\npub fn main() {\n    var acc = 7\n    for r in 0..2000000 {\n        let t = \"butir-\" + str(r % 997) + \":\" + str(r)\n        let u = str::upper(str::reverse(t))\n        acc = h(acc, u)\n    }\n    wok(acc)\n}\n";
+    let dir = dir_uji("arena");
+    let file = dir.join("uji.jrg");
+    std::fs::write(&file, src).unwrap();
+    let jalan = |tanpa: bool| {
+        let mut c = Command::new(jrgc());
+        c.arg(&file).arg("--emit-llvm").arg("-o").arg(dir.join(if tanpa { "mati.bin" } else { "baru.bin" }))
+            .env("JRG_SOPAN", "1").env("JRGC_BATAS_MEMORI", "64");
+        if tanpa { c.env("JRGC_TANPA_PULIH_ARENA", "1"); }
+        c.output().unwrap()
+    };
+    let baru = jalan(false);
+    let acuan = jalankan_interp(src);
+    assert!(baru.status.success(), "dengan pemulihan arena harus muat 64 MiB:\n{}", String::from_utf8_lossy(&baru.stderr));
+    assert_eq!(String::from_utf8_lossy(&baru.stdout).trim(), acuan.keluaran, "jawaban beda dengan acuan");
+    let mati = jalan(true);
+    assert!(!mati.status.success() && String::from_utf8_lossy(&mati.stderr).contains("memori habis"),
+        "tanpa pemulihan arena program ini seharusnya melewati 64 MiB (puncaknya ±95 MB) — instrumennya tidak membuktikan apa-apa:\n{}",
+        String::from_utf8_lossy(&mati.stderr));
+    let _ = std::fs::remove_dir_all(&dir);
 }

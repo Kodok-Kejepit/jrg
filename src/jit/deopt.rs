@@ -7,10 +7,10 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
 use super::layak::{Cara, Jenis};
-use super::turun::{BUKA_SUDAH, GAGAL_SPEK, PUNCAK_VM};
+use super::turun::{BUKA_SUDAH, GAGAL_SPEK, PUNCAK_VM, SISIP};
 
 /// Bit penanda di `ip` rekaman deopt (`turun.rs`).
-const BENDERA: i64 = BUKA_SUDAH | GAGAL_SPEK | PUNCAK_VM;
+const BENDERA: i64 = BUKA_SUDAH | GAGAL_SPEK | PUNCAK_VM | SISIP;
 use crate::vm::value::VmValue;
 use crate::vm::vm::{CallFrame, Vm};
 
@@ -73,46 +73,27 @@ pub extern "C" fn undi() -> i32 {
 pub(crate) fn pulihkan(vm: &mut Vm, catatan: Catatan) {
     JUMLAH.fetch_add(1, Ordering::Relaxed);
     if super::laporan::diminta() { catat_sebab(&catatan); }
-    let mut rekaman = catatan.into_iter().rev();
+    let mut rekaman = catatan.into_iter().rev().peekable();
     if let Some(r) = rekaman.next() {
         let (f, rencana) = super::modul::info(r.fid);
-        let (ip, bendera) = ((r.ip as i64 & !BENDERA) as usize, r.ip as i64 & BENDERA);
-        // Bukaan gabungan dijaga di `LoadLocal`-nya; spekulasinya milik instruksi sesudahnya. Hasil yang
-        // dispekulasikan dijaga di instruksi sesudahnya.
-        if bendera & GAGAL_SPEK != 0 {
-            let situs = if bendera & PUNCAK_VM != 0 { ip - 1 } else if rencana.cara[ip] == Cara::Muat { ip + 1 } else { ip };
-            f.chunk.kode_jit.tandai_spek_gagal(situs);
-            SPEK_BARU.with(|s| s.set(true));
-        }
-        let mut jenis = rencana.keadaan[ip].clone().expect("ip lanjut selalu terjangkau");
-        // `keadaan[ip]` sudah sesudah `wujud[ip]`; rekaman yang dipasang instruksi SEBELUMNYA untuk `ip` tiba
-        // sebelum `muat`-nya berjalan, jadi salinan mayanya dibaca dari lokal asalnya (sama isinya bila sudah).
-        for &(p, j) in &rencana.wujud[ip] { jenis[p] = j; }
-        // Bukaan yang sudah berhasil: angkanya di bingkai native (lokal gabungan tidak pernah di stack VM).
-        if let (true, Cara::Buka(daftar)) = (bendera & BUKA_SUDAH != 0, &rencana.cara[ip]) {
-            for &(p, j) in daftar { jenis[p] = j; }
-        }
-        if bendera & PUNCAK_VM != 0 { if let Some(p) = jenis.last_mut() { *p = Jenis::Nilai; } }
+        let (ip, jenis) = jenis_rekaman(&f, &rencana, r.ip);
         let fr = vm.frames.last_mut().expect("bingkai yang menjalankan kode native");
         fr.ip = ip;
         let basis = fr.slot + 1;
         let mut lama = vm.stack.split_off(basis);
-        // Salinan maya: lokal asalnya belum berubah sejak dimuat; dibaca sebelum posisi-posisinya dipindah.
-        let mut salinan: Vec<Option<VmValue>> = jenis.iter().map(|j| match j {
-            Jenis::Salinan(l) => Some(match &lama[*l as usize] {
-                VmValue::Cell(c) => c.lock().unwrap_or_else(|p| p.into_inner()).clone(),
-                v => v.clone(),
-            }),
-            _ => None,
-        }).collect();
-        for (i, v) in r.nilai.into_iter().enumerate() {
-            // `Lebar` sudah ditulis ke stack VM oleh blok deopt-nya (`turun::keluar_deopt`).
-            let nilai = match jenis[i] {
-                Jenis::Salinan(_) => salinan[i].take().expect("dibaca di atas"),
-                j if j.di_vm() || j == Jenis::Lebar => std::mem::replace(&mut lama[i], VmValue::Nil),
-                j => nilai_dari(j, v, &rencana.callee, &f.chunk.constants),
-            };
-            vm.stack.push(nilai);
+        let asal: Vec<VmValue> = Vec::new();
+        isi_bingkai(vm, &mut lama, 0, asal, &jenis, r.nilai, &rencana, &f);
+        // Bingkai callee yang disisipkan JIR: pemanggil lanjut sesudah `Call`, callee di atas posisi fungsinya.
+        while rekaman.peek().is_some_and(|r| r.ip as i64 & SISIP != 0) {
+            let r = rekaman.next().expect("baru diperiksa");
+            let (fc, rc) = super::modul::info(r.fid);
+            let (ipc, jenisc) = jenis_rekaman(&fc, &rc, r.ip);
+            vm.frames.last_mut().expect("bingkai pemanggil").ip += 1;
+            let argc = fc.arity as usize;
+            let slot = vm.stack.len() - argc - 1;
+            let args = vm.stack.split_off(slot + 1);
+            isi_bingkai(vm, &mut lama, slot + 1 - basis, args, &jenisc, r.nilai, &rc, &fc);
+            vm.dorong_bingkai(CallFrame { func: fc, ip: ipc, slot, defers: Vec::new(), argc: argc as u8, closure: None });
         }
     }
     for r in rekaman {
@@ -125,6 +106,59 @@ pub(crate) fn pulihkan(vm: &mut Vm, catatan: Catatan) {
         }
         let argc = f.arity as u8;
         vm.dorong_bingkai(CallFrame { func: f, ip: r.ip as usize, slot, defers: Vec::new(), argc, closure: None });
+    }
+}
+
+/// `ip` lanjut dan jenis tiap posisi bingkai rekaman `ip_mentah` (bitnya: `BENDERA`) fungsi `f`.
+fn jenis_rekaman(f: &Arc<crate::vm::value::VmFunction>, rencana: &super::layak::Rencana, ip_mentah: u32) -> (usize, Vec<Jenis>) {
+    let (ip, bendera) = ((ip_mentah as i64 & !BENDERA) as usize, ip_mentah as i64 & BENDERA);
+    // Bukaan gabungan dijaga di `LoadLocal`-nya; spekulasinya milik instruksi sesudahnya. Hasil yang
+    // dispekulasikan dijaga di instruksi sesudahnya.
+    if bendera & GAGAL_SPEK != 0 {
+        let situs = if bendera & PUNCAK_VM != 0 { ip - 1 } else if rencana.cara[ip] == Cara::Muat { ip + 1 } else { ip };
+        f.chunk.kode_jit.tandai_spek_gagal(situs);
+        SPEK_BARU.with(|s| s.set(true));
+    }
+    let mut jenis = rencana.keadaan[ip].clone().expect("ip lanjut selalu terjangkau");
+    // `keadaan[ip]` sudah sesudah `wujud[ip]`; rekaman yang dipasang instruksi SEBELUMNYA untuk `ip` tiba
+    // sebelum `muat`-nya berjalan, jadi salinan mayanya dibaca dari lokal asalnya (sama isinya bila sudah).
+    for &(p, j) in &rencana.wujud[ip] { jenis[p] = j; }
+    // Bukaan yang sudah berhasil: angkanya di bingkai native (lokal gabungan tidak pernah di stack VM).
+    if let (true, Cara::Buka(daftar)) = (bendera & BUKA_SUDAH != 0, &rencana.cara[ip]) {
+        for &(p, j) in daftar { jenis[p] = j; }
+    }
+    if bendera & PUNCAK_VM != 0 { if let Some(p) = jenis.last_mut() { *p = Jenis::Nilai; } }
+    (ip, jenis)
+}
+
+/// Posisi bingkai ke stack VM (yang sudah sepanjang dasarnya): isi native dari rekaman, nilai milik VM dari `args`
+/// (posisi pertama bingkai, sudah dipisah dari stack) lalu dari `lama[geser + i]` (stack lama bingkai terluar).
+#[allow(clippy::too_many_arguments)]
+fn isi_bingkai(
+    vm: &mut Vm, lama: &mut [VmValue], geser: usize, mut args: Vec<VmValue>, jenis: &[Jenis], nilai: Vec<i64>,
+    rencana: &super::layak::Rencana, f: &Arc<crate::vm::value::VmFunction>,
+) {
+    // Salinan maya: lokal asalnya belum berubah sejak dimuat; dibaca sebelum posisi-posisinya dipindah.
+    let mut salinan: Vec<Option<VmValue>> = jenis.iter().map(|j| match j {
+        Jenis::Salinan(l) => Some(match if (*l as usize) < args.len() { &args[*l as usize] } else { &lama[geser + *l as usize] } {
+            VmValue::Cell(c) => c.lock().unwrap_or_else(|p| p.into_inner()).clone(),
+            v => v.clone(),
+        }),
+        _ => None,
+    }).collect();
+    // Posisi yang tidak pernah ditulis (lubang `ambil` atas varian basi, JIR-3b) adalah `nil`, seperti di VM.
+    let mut ambil = |i: usize| -> VmValue {
+        if i < args.len() { std::mem::replace(&mut args[i], VmValue::Nil) }
+        else { lama.get_mut(geser + i).map_or(VmValue::Nil, |v| std::mem::replace(v, VmValue::Nil)) }
+    };
+    for (i, v) in nilai.into_iter().enumerate() {
+        // `Lebar` sudah ditulis ke stack VM oleh blok deopt-nya (`turun::keluar_deopt`).
+        let nilai = match jenis[i] {
+            Jenis::Salinan(_) => salinan[i].take().expect("dibaca di atas"),
+            j if j.di_vm() || j == Jenis::Lebar => ambil(i),
+            j => nilai_dari(j, v, &rencana.callee, &f.chunk.constants),
+        };
+        vm.stack.push(nilai);
     }
 }
 

@@ -14,6 +14,11 @@ on:
 jobs:
   suite:
     runs-on: ubuntu-latest
+    # Profil rilis tanpa LTO dan dengan codegen-units 16, KHUSUS uji: biner yang dirilis (`rilis.yml`) tetap LTO.
+    # Tiap biner tes ditaut ulang dengan LTO dan satu unit kode, dan itu bagian terbesar job ini (17 dari 37 menit).
+    env:
+      CARGO_PROFILE_RELEASE_LTO: "false"
+      CARGO_PROFILE_RELEASE_CODEGEN_UNITS: "16"
     steps:
       - uses: actions/checkout@v4
 
@@ -29,6 +34,38 @@ jobs:
           (cd runtime && cargo build --release)
           (cd jembatan && cargo build --release)
 
+      # Mesin kelima (`--emit-wasm`): sysroot dan compiler-rt wasi-sdk plus binaryen (`wasm-opt`, Asyncify untuk
+      # korutin), sidiknya dipatok (rantai pasok).
+      - name: Tembolok alat WASI
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/jrgm/wasi
+          key: wasi-sdk-34-binaryen-133
+
+      # Node 24: rekursi 20 ribu tingkat lewat --emit-wasm keluar 1 tanpa keluaran di node bawaan image.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Alat WASI (--emit-wasm)
+        run: |
+          rustup target add wasm32-wasip1
+          mkdir -p ~/.cache/jrgm/wasi/rt && cd ~/.cache/jrgm/wasi
+          if [ ! -d wasi-sysroot-34.0 ] || [ ! -d rt/libclang_rt-34.0 ]; then
+            u=https://github.com/WebAssembly/wasi-sdk/releases/download/wasi-sdk-34
+            curl -sSfL -o sysroot.tgz $u/wasi-sysroot-34.0.tar.gz
+            curl -sSfL -o rt.tgz $u/libclang_rt-34.0.tar.gz
+            echo "9d813544eeebe38b7b8f2244ed591de46b6db812c6dd1a257ff9f0d2a905a2be  sysroot.tgz" | sha256sum -c -
+            echo "eee3e634dcf71aa22b1333391623cf5c9965a637dc428a27b1a858c026c587f1  rt.tgz" | sha256sum -c -
+            tar xzf sysroot.tgz && tar xzf rt.tgz -C rt && rm sysroot.tgz rt.tgz
+          fi
+          if [ ! -x binaryen-version_133/bin/wasm-opt ]; then
+            curl -sSfL -o bny.tgz https://github.com/WebAssembly/binaryen/releases/download/version_133/binaryen-version_133-x86_64-linux.tar.gz
+            echo "2dc9c7813f5375db93d96ead4b78222fcc3e2677bbb832297af4797782a37489  bny.tgz" | sha256sum -c -
+            tar xzf bny.tgz && rm bny.tgz
+          fi
+          (cd $GITHUB_WORKSPACE/runtime && cargo build --release --target wasm32-wasip1)
+
       # `JRG_SOPAN` sengaja tidak diset: `tests/nada.rs` menguji sapaan yang
       # variabel itu matikan.
       - name: Bangun tes
@@ -40,6 +77,8 @@ jobs:
       - name: Suite
         env:
           RUST_TEST_THREADS: "2"
+          # Alat `--emit-wasm` yang hilang di CI = gagal, bukan tes yang dilewati diam-diam.
+          JRG_WASI_WAJIB: "1"
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           ( while true; do echo "[mem $(date +%T)] $(free -m | awk '/Mem/ {print "pakai", $3, "sedia", $7}') | $(ps -eo rss=,comm= --sort=-rss | head -3 | awk '{printf "%s:%dM ", $2, $1/1024}')"; sleep 20; done ) &

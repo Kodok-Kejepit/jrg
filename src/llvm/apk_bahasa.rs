@@ -88,7 +88,7 @@ fn sumber_resep(r: &Resep, verbose: bool) -> Result<PathBuf, String> {
     std::fs::create_dir_all(&d).map_err(|e| format!("gagal membuat {}: {}", d.display(), e))?;
     let arsip = d.join(r.url.rsplit('/').next().unwrap_or(r.akar));
     if !arsip.is_file() {
-        eprintln!("[jrgm] mengunduh {} {} ({})", r.label, r.versi, r.url);
+        crate::ecetak_t!("[jrgm] mengunduh {} {} ({})", r.label, r.versi, r.url);
         let sementara = arsip.with_extension("unduh");
         jalan(Command::new("curl").args(["-fsSL", "--max-time", "600", "-o"]).arg(&sementara).arg(r.url),
               &format!("mengunduh {}", r.url))
@@ -101,7 +101,7 @@ fn sumber_resep(r: &Resep, verbose: bool) -> Result<PathBuf, String> {
         return Err(format!("sidik {} tidak cocok, jadi tidak dipakai\n  SHA-256 seharusnya {}\n  yang didapat       {}\n  \
                             bantuan: hapus berkas itu supaya diunduh ulang", arsip.display(), r.sha256, sidik));
     }
-    if verbose { eprintln!("[jrgm] sidik {} cocok", arsip.display()); }
+    if verbose { crate::ecetak_t!("[jrgm] sidik {} cocok", arsip.display()); }
     let _ = std::fs::remove_dir_all(&akar);
     if arsip.extension().map_or(false, |e| e == "zip") {
         jalan(Command::new("unzip").arg("-qo").arg(&arsip).arg("-d").arg(&d), "membuka arsip (unzip)")?;
@@ -148,7 +148,7 @@ pub fn bangun(id: &str, abi: &str, sasaran: &str, ndk_bin: &Path, verbose: bool)
     }
     let sumber = berkas_sumber(r, &akar)?;
     std::fs::create_dir_all(&d).map_err(|e| format!("gagal membuat {}: {}", d.display(), e))?;
-    eprintln!("[jrgm] mengompilasi {} {} untuk {} (sekali saja)", r.label, r.versi, abi);
+    crate::ecetak_t!("[jrgm] mengompilasi {} {} untuk {} (sekali saja)", r.label, r.versi, abi);
     let sementara = d.join("belum");
     let mut cmd = Command::new(ndk_bin.join("clang"));
     cmd.arg(sasaran).args(["-O2", "-fPIE", "-pie", "-w", "-s", "-Wl,-z,max-page-size=16384"]).args(r.bendera)

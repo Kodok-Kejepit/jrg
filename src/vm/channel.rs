@@ -13,7 +13,8 @@ pub type VmChannel = crate::antrean::Antrean<VmValue>;
 impl VmChannel {
     pub fn send(&self, val: VmValue) -> Result<(), String> { self.kirim(val) }
     pub fn try_send(&self, val: VmValue) -> Result<bool, String> { self.coba_kirim(val) }
-    pub fn recv(&self) -> Result<Option<VmValue>, String> { Ok(self.terima()) }
+    /// `Err` = kebuntuan yang terlihat (`antrean::PESAN_BUNTU`, cuma di thread utama).
+    pub fn recv(&self) -> Result<Option<VmValue>, String> { self.terima_cek() }
     pub fn try_recv(&self) -> Result<Option<VmValue>, String> {
         match self.coba_terima() {
             Ok(v) => Ok(Some(v)),
@@ -41,18 +42,26 @@ unsafe impl Send for SpawnTask {}
 static HANDLE_GOROUTINE: std::sync::Mutex<Vec<std::thread::JoinHandle<()>>> =
     std::sync::Mutex::new(Vec::new());
 
-/// Tunggu semua goroutine, sama seperti `Interpreter::join_all_goroutines`.
-pub fn join_all_goroutines() {
+/// Tunggu semua goroutine, sama seperti `Interpreter::join_all_goroutines`: `Err(PESAN_BUNTU)` kalau yang
+/// ditunggu terblokir selamanya (`antrean::buntu`).
+pub fn join_all_goroutines() -> Result<(), String> {
+    use crate::antrean::buntu;
     loop {
         let h = {
             let mut g = HANDLE_GOROUTINE.lock().unwrap_or_else(|p| p.into_inner());
             g.pop()
         };
-        match h {
-            Some(h) => { let _ = h.join(); }
-            None => break,
+        let Some(h) = h else { break };
+        if buntu::aktif() && buntu::utama() {
+            let (mut gen, mut stabil) = (buntu::generasi(), 0u32);
+            while !h.is_finished() {
+                std::thread::sleep(buntu::TIAP);
+                if buntu::sisanya_buntu(&mut gen, &mut stabil) { return Err(crate::antrean::PESAN_BUNTU.to_string()); }
+            }
         }
+        let _ = h.join();
     }
+    Ok(())
 }
 
 /// `Err` membawa kalimat galatnya: program tidak boleh jalan terus tanpa goroutine yang dimintanya.
@@ -60,9 +69,12 @@ pub fn spawn_goroutine(task: SpawnTask) -> Result<(), String> {
     // Didaftarkan SEBELUM utasnya lahir: kalau sesudah, laporan bisa
     // terlanjur dicetak sebelum penghitungnya naik.
     crate::profiler::utas_baru();
+    // Dihitung SEBELUM utasnya lahir: main yang langsung `<-c` tidak boleh melihat dirinya sendirian.
+    let aktor = crate::antrean::buntu::lahir();
     let h = std::thread::Builder::new()
         .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
         .spawn(move || {
+        let _aktor = aktor;
         crate::interpreter::catat_puncak_stack();
         let mut vm = super::vm::Vm::new();
         // Goroutine mewarisi keadaan profiler dari proses, bukan dari VM induknya —

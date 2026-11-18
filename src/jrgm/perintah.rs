@@ -19,7 +19,7 @@ pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip
         .map_err(|e| format!("tidak bisa get cwd: {}", crate::host::galat_io(&e)))?;
     let manifest = Manifest::load(&cwd)?;
     if verbose {
-        eprintln!("[jrgm] build: {} v{} (profile: {}, target: {})",
+        crate::ecetak_t!("[jrgm] build: {} v{} (profile: {}, target: {})",
             manifest.name, manifest.version,
             profile, target.unwrap_or("host"));
     }
@@ -85,8 +85,8 @@ pub(crate) fn cmd_build(profile: &str, target: Option<&str>, verbose: bool, skip
         // menemukan yang kedua — satu perjalanan bolak-balik per berkas.
         return Err(gagal.join("\n"));
     }
-    eprintln!("[jrgm] {} berkas diperiksa", berkas.len());
-    eprintln!("[jrgm] build selesai (mode: interpreter — tidak ada binary output)");
+    crate::ecetak_t!("[jrgm] {} berkas diperiksa", berkas.len());
+    crate::ecetak_t!("[jrgm] build selesai (mode: interpreter — tidak ada binary output)");
     Ok(())
 }
 
@@ -107,7 +107,7 @@ pub(crate) fn cmd_run(profile: &str, args: &[String], verbose: bool, prof: bool,
     let use_vm = jalur_vm(use_vm, use_jit);
 
     if verbose {
-        eprintln!("[jrgm] run: {} v{} [{}{}]",
+        crate::ecetak_t!("[jrgm] run: {} v{} [{}{}]",
             manifest.name, manifest.version,
             if use_jit { "JIT" } else if use_vm { "VM" } else { "interpreter" },
             if watch { "+watch" } else { "" });
@@ -147,7 +147,7 @@ pub(crate) fn cmd_exec(file: &Path, args: &[String], verbose: bool, prof: bool,
         if kode != 0 { process::exit(kode); }
         return Ok(());
     }
-    if verbose { eprintln!("[jrgm] exec: {}", file.display()); }
+    if verbose { crate::ecetak_t!("[jrgm] exec: {}", file.display()); }
     let use_vm = jalur_vm(use_vm, use_jit);
 
     if watch {
@@ -243,7 +243,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, use_jit: bool, batas_
     inc.dedup();
 
     let jrgc = crate::hotreload::biner_jrgc();
-    eprintln!("[jrgm] {} test di {} berkas{}", total, rencana.len(),
+    crate::ecetak_t!("[jrgm] {} test di {} berkas{}", total, rencana.len(),
         if use_jit { " (JIT)" } else if use_vm { " (VM)" } else { "" });
 
     // Path ditulis relatif terhadap akar proyek. Yang absolut benar tapi
@@ -253,7 +253,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, use_jit: bool, batas_
 
     let mut gagal: Vec<String> = Vec::new();
     for (f, uji) in &rencana {
-        eprintln!("\n== {} ({} test)", pendek(f), uji.len());
+        crate::ecetak_t!("\n== {} ({} test)", pendek(f), uji.len());
         let mut cmd = std::process::Command::new(&jrgc);
         cmd.arg("--uji").arg(f);
         if use_jit { cmd.arg("--jit"); } else if use_vm { cmd.arg("--vm"); }
@@ -295,7 +295,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, use_jit: bool, batas_
                 None    => format!("{} (proses dihentikan sinyal)", pendek(f)),
             }),
             None => {
-                eprintln!("  DIBUNUH setelah {} detik — ada test yang tidak selesai", batas_detik);
+                crate::ecetak_t!("  DIBUNUH setelah {} detik — ada test yang tidak selesai", batas_detik);
                 gagal.push(format!("{} (timeout)", pendek(f)));
             }
         }
@@ -303,7 +303,7 @@ pub(crate) fn cmd_test(filter: Option<&str>, use_vm: bool, use_jit: bool, batas_
 
     eprintln!();
     if gagal.is_empty() {
-        eprintln!("[jrgm] semua {} test lulus", total);
+        crate::ecetak_t!("[jrgm] semua {} test lulus", total);
         return Ok(());
     }
     // Berkas yang gagal disebut namanya lagi di akhir: tiap berkas sudah
@@ -414,7 +414,7 @@ pub(crate) fn cmd_add(name: &str, version: Option<&str>, git: Option<&str>, rev:
     match graf.and_then(|g| path_dependensi(&g).map(|_| g)) {
         Ok(_) => {
             let asal = path.map(|p| p.display().to_string()).or(git.map(str::to_string)).unwrap_or_default();
-            println!("menambah `{}` dari `{}`{}", name, asal, if dev { " (dev)" } else { "" });
+            crate::cetak_t!("menambah `{}` dari `{}`{}", name, asal, if dev { " (dev)" } else { "" });
             Ok(())
         }
         Err(e) => Err(format!("{}\n  catatan: barisnya sudah ditulis; hapus lagi dengan \
@@ -449,7 +449,7 @@ pub(crate) fn cmd_remove(name: &str) -> Result<(), String> {
     }
     std::fs::write(&manifes, baru)
         .map_err(|e| format!("jrgm remove: tidak bisa tulis `jrgm.toml`: {}", crate::host::galat_io(&e)))?;
-    println!("membuang `{}`", name);
+    crate::cetak_t!("membuang `{}`", name);
     Ok(())
 }
 
@@ -468,7 +468,7 @@ pub(crate) fn cmd_tree() -> Result<(), String> {
 
     println!("{} {}", m.name, m.version);
     if graf.is_empty() {
-        println!("  (tidak ada dependency lokal)");
+        crate::cetak_t!("  (tidak ada dependency lokal)");
         return Ok(());
     }
     // Batang `│` hanya boleh diteruskan ke bawah leluhur yang MASIH punya
@@ -490,8 +490,8 @@ pub(crate) fn cmd_tree() -> Result<(), String> {
         println!("{}{} {} {}{}", awalan, cabang, s.nama, s.versi, ulang);
     }
     if graf.iter().any(|s| s.berulang) {
-        println!("\n(*) sudah muncul di atas — ditandai, bukan disembunyikan, supaya");
-        println!("    terlihat kalau sebuah paket dipakai dari dua tempat.");
+        crate::cetak_t!("\n(*) sudah muncul di atas — ditandai, bukan disembunyikan, supaya");
+        crate::cetak_t!("    terlihat kalau sebuah paket dipakai dari dua tempat.");
     }
     Ok(())
 }
@@ -501,7 +501,7 @@ pub(crate) fn cmd_clean()  -> Result<(), String> {
         std::fs::remove_dir_all("target")
             .map_err(|e| format!("tidak bisa hapus target dir: {}", crate::host::galat_io(&e)))?;
     }
-    eprintln!("[jrgm] target directory dibersihkan");
+    crate::ecetak_t!("[jrgm] target directory dibersihkan");
     Ok(())
 }
 
@@ -568,7 +568,7 @@ pub(crate) fn cmd_fmt(paths: &[std::path::PathBuf], check: bool) -> Result<(), S
     // berbohong, cuma dengan bentuk yang berbeda.
     if !rusak.is_empty() {
         for (p, e) in &rusak {
-            eprintln!("  {}: {}", p.display(), e);
+            crate::ecetak_t!("  {}: {}", p.display(), e);
         }
         return Err(format!(
             "{} dari {} berkas tidak bisa diformat (lihat di atas)",
@@ -578,11 +578,11 @@ pub(crate) fn cmd_fmt(paths: &[std::path::PathBuf], check: bool) -> Result<(), S
 
     if check {
         if berubah.is_empty() {
-            eprintln!("[jrgm] {} berkas, semuanya sudah rapi", berkas.len());
+            crate::ecetak_t!("[jrgm] {} berkas, semuanya sudah rapi", berkas.len());
             return Ok(());
         }
         for p in &berubah {
-            eprintln!("  belum rapi: {}", p.display());
+            crate::ecetak_t!("  belum rapi: {}", p.display());
         }
         // Keluar TIDAK NOL. Inilah seluruh guna `--check`: versi lama selalu
         // keluar 0, jadi gerbang format di CI mana pun selalu hijau tanpa
@@ -593,7 +593,7 @@ pub(crate) fn cmd_fmt(paths: &[std::path::PathBuf], check: bool) -> Result<(), S
         ));
     }
 
-    eprintln!(
+    crate::ecetak_t!(
         "[jrgm] {} berkas diperiksa, {} dirapikan",
         berkas.len(), berubah.len()
     );

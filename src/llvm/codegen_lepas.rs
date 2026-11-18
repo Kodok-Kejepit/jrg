@@ -94,6 +94,46 @@ pub(crate) fn calon_lepas(s: &Stmt, sesudah: &[Stmt], ekor: Option<&Expr>) -> Op
     (!disebut.contains(name)).then(|| name.clone())
 }
 
+/// Sisa blok (`sesudah`, `ekor`) tidak menyebut `r` selain `r[1]`/`r.1`. Bentuk yang tidak dikenal penggantinya
+/// tetap terhitung menyebut `r` — kalau ragu, tidak ada yang dipindah.
+pub(crate) fn cuma_bagian_kedua(sesudah: &[Stmt], ekor: Option<&Expr>, r: &str) -> bool {
+    fn g(e: &mut Expr, r: &str) {
+        let kedua = |x: &Expr| match x {
+            Expr::Index { obj, idx, .. } => matches!(&**obj, Expr::Ident(n, _) if n == r)
+                && matches!(&**idx, Expr::Literal(LitKind::Int(1), _)),
+            Expr::Field { obj, field, .. } => matches!(&**obj, Expr::Ident(n, _) if n == r) && field == "1",
+            _ => false,
+        };
+        if kedua(e) { *e = kosong(); return; }
+        match e {
+            Expr::Call { func, args, .. } => { g(func, r); for a in args.iter_mut() { g(a, r); } }
+            Expr::Method { obj, args, .. } => { g(obj, r); for a in args.iter_mut() { g(a, r); } }
+            Expr::Field { obj, .. } | Expr::Unary { expr: obj, .. } => g(obj, r),
+            Expr::Index { obj, idx, .. } => { g(obj, r); g(idx, r); }
+            Expr::Binary { lhs, rhs, .. } => { g(lhs, r); g(rhs, r); }
+            Expr::Ternary { cond, then, else_, .. } => { g(cond, r); g(then, r); g(else_, r); }
+            _ => {}
+        }
+    }
+    fn s(st: &mut Stmt, r: &str) {
+        match st {
+            Stmt::Expr(e) => g(e, r),
+            Stmt::Let(l) => g(&mut l.init, r),
+            Stmt::Var(v) => if let Some(i) = v.init.as_deref_mut() { g(i, r) },
+            Stmt::Assign(a) => for v in a.values.iter_mut() { g(v, r) },
+            _ => {}
+        }
+    }
+    let mut sisa: Vec<Stmt> = sesudah.to_vec();
+    for st in sisa.iter_mut() { s(st, r); }
+    let mut ekor = ekor.cloned();
+    if let Some(e) = ekor.as_mut() { g(e, r); }
+    let b = Block { stmts: sisa, tail: ekor.map(Box::new), span: crate::lexer::Span::dummy() };
+    let mut disebut = std::collections::HashSet::new();
+    crate::interpreter::capture::kumpul_nama_blok(&b, &mut disebut);
+    !disebut.contains(r)
+}
+
 impl super::codegen::Codegen {
     /// `calon` (nama dari `calon_lepas`) dicatat kalau lokalnya memang nilai bertag milik fungsi ini.
     pub(crate) fn catat_lepas(&self, calon: Option<String>, lepas: &mut Vec<(String, String)>) {

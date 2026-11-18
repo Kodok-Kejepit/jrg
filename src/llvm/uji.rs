@@ -43,15 +43,15 @@ const BARIS_PENANDA: usize = 987_654_321;
 /// `(lulus, gagal tanpa baris, gagal berbaris)` untuk satu tes, dari `uji::baris_hasil`.
 pub fn templat_hasil(nama: &str) -> (String, String, String) {
     let gagal = Err("\u{1}".to_string());
-    (crate::uji::baris_hasil(nama, &Ok(()), None),
-     crate::uji::baris_hasil(nama, &gagal, None),
-     crate::uji::baris_hasil(nama, &gagal, Some(BARIS_PENANDA)).replacen(&BARIS_PENANDA.to_string(), "\u{2}", 1))
+    (crate::uji::baris_hasil_id(nama, &Ok(()), None),
+     crate::uji::baris_hasil_id(nama, &gagal, None),
+     crate::uji::baris_hasil_id(nama, &gagal, Some(BARIS_PENANDA)).replacen(&BARIS_PENANDA.to_string(), "\u{2}", 1))
 }
 
 /// Rangkuman dengan penanda total `\u{3}`, lulus `\u{4}`, gagal `\u{5}`.
 pub fn templat_rangkuman() -> String {
     let (l, g) = (100_000_007usize, 200_000_011usize);
-    crate::uji::rangkuman(l, g).replacen(&(l + g).to_string(), "\u{3}", 1)
+    crate::uji::rangkuman_id(l, g).replacen(&(l + g).to_string(), "\u{3}", 1)
         .replacen(&l.to_string(), "\u{4}", 1).replacen(&g.to_string(), "\u{5}", 1)
 }
 
@@ -127,7 +127,7 @@ mod tests {
     #[test]
     fn templat_memuat_semua_penanda() {
         let (ok, g, gb) = super::templat_hasil("test_a");
-        assert_eq!(ok, crate::uji::baris_hasil("test_a", &Ok(()), None));
+        assert_eq!(ok, crate::uji::baris_hasil_id("test_a", &Ok(()), None));
         assert!(g.contains('\u{1}') && gb.contains('\u{1}') && gb.contains('\u{2}'));
         let r = super::templat_rangkuman();
         assert!(r.contains('\u{3}') && r.contains('\u{4}') && r.contains('\u{5}'), "{}", r);

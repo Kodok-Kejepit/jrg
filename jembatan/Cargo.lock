@@ -322,18 +322,19 @@ checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
 name = "jrg_jembatan"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "jrgc",
 ]
 
 [[package]]
 name = "jrgc"
-version = "0.6.0"
+version = "0.6.1"
 dependencies = [
  "bitflags 2.4.2",
  "clap",
  "indexmap",
+ "libc",
  "minifb",
  "smallvec",
  "unicode-xid",
@@ -358,9 +359,9 @@ checksum = "20870f649af7073d53e38067b2a84312175d56ea15217e1b15bc83506ec50afb"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.186"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 
 [[package]]
 name = "libloading"

@@ -37,6 +37,7 @@ const KHUSUS: &[(&str, NativeKhusus)] = &[
     ("dok::router_after",       NativeKhusus::Router { metode: "AFTER" }),
     ("dok::router_ws",          NativeKhusus::Router { metode: "WS" }),
     ("terap",                   NativeKhusus::Terap),
+    ("tangkap",                 NativeKhusus::Tangkap),
     ("terap_bernama",           NativeKhusus::TerapBernama),
 ];
 

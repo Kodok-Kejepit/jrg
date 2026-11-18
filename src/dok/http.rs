@@ -801,9 +801,18 @@ fn write_response(stream: &mut TcpStream, status: i128, content_type: &str, body
 }
 
 fn write_response_bytes(stream: &mut TcpStream, status: i128, content_type: &str, body: &[u8], extra_headers: &[(String, String)]) {
+    let kepala = kepala_jawaban(status, content_type, body.len(), extra_headers);
+    let akhir = std::time::Duration::from_secs(30) + std::time::Duration::from_secs((body.len() / 16384) as u64);
+    let mulai = std::time::Instant::now();
+    if !tulis_bertenggat(stream, kepala.as_bytes(), akhir, std::time::Duration::ZERO) { return; }
+    let sisa = akhir.saturating_sub(mulai.elapsed());
+    if !sisa.is_zero() { tulis_bertenggat(stream, body, sisa, std::time::Duration::ZERO); }
+}
+
+fn kepala_jawaban(status: i128, content_type: &str, n: usize, extra_headers: &[(String, String)]) -> String {
     let mut out = format!(
         "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n",
-        status, status_reason(status), content_type, body.len()
+        status, status_reason(status), content_type, n
     );
     for (k, v) in extra_headers { out.push_str(&format!("{}: {}\r\n", k, v)); }
     // Peramban tidak menebak jenis isi: unggahan `.txt`/tanpa ekstensi berisi HTML tidak jadi halaman (stored XSS),
@@ -812,20 +821,18 @@ fn write_response_bytes(stream: &mut TcpStream, status: i128, content_type: &str
         out.push_str("X-Content-Type-Options: nosniff\r\n");
     }
     out.push_str("\r\n");
-    let mut semua = out.into_bytes();
-    semua.extend_from_slice(body);
-    tulis_bertenggat(stream, &semua, std::time::Duration::from_secs(30), std::time::Duration::from_secs(1));
+    out
 }
 
 /// Klien yang tidak membaca jawabannya (slow read, kelas CVE-2012-5568) dulu menahan utasnya selamanya — 512 unduhan
 /// berkas besar yang tak dibaca membekukan server. Tenggat total `dasar` + `per_16k` tiap 16 KiB, per potongan.
-fn tulis_bertenggat(stream: &mut TcpStream, data: &[u8], dasar: std::time::Duration, per_16k: std::time::Duration) {
+fn tulis_bertenggat(stream: &mut TcpStream, data: &[u8], dasar: std::time::Duration, per_16k: std::time::Duration) -> bool {
     let akhir = std::time::Instant::now() + dasar + per_16k * (data.len() / 16384) as u32;
     for potong in data.chunks(16384) {
         let sisa = akhir.saturating_duration_since(std::time::Instant::now());
-        if sisa.is_zero() || stream.set_write_timeout(Some(sisa)).is_err() || stream.write_all(potong).is_err() { return; }
+        if sisa.is_zero() || stream.set_write_timeout(Some(sisa)).is_err() || stream.write_all(potong).is_err() { return false; }
     }
-    let _ = stream.flush();
+    stream.flush().is_ok()
 }
 
 fn guess_content_type(path: &Path) -> &'static str {
@@ -858,7 +865,7 @@ pub(crate) fn segmen_tersembunyi(rel: &str) -> bool {
 
 /// Coba layani file statis. `None` kalau tidak ada mount yang cocok atau
 /// filenya tidak ada — supaya caller bisa lanjut ke pencarian route biasa.
-fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, String, Vec<u8>)> {
+fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<Statis> {
     for (prefix, dir) in mounts {
         let prefix_norm = if prefix.ends_with('/') { prefix.clone() } else { format!("{}/", prefix) };
         let path_norm = if path.ends_with('/') { path.to_string() } else { format!("{}/", path) };
@@ -869,22 +876,53 @@ fn try_serve_static(mounts: &[(String, PathBuf)], path: &str) -> Option<(i128, S
         let Some(dasar) = dir.to_str() else { continue };
         // `gabung_aman` menolak `..`, `\`, NUL, dan tautan simbolik yang keluar dari `dir`.
         let Ok(penuh) = crate::stdlib::fs::gabung_aman(dasar, sasaran) else {
-            return Some((403, "text/plain".to_string(), b"Forbidden".to_vec()));
+            return Some(Statis::Jawab(403, "text/plain".to_string(), b"Forbidden".to_vec()));
         };
         let full = Path::new(&penuh);
         if full.is_file() {
             if let Ok(m) = std::fs::metadata(full) {
                 if m.len() > MAKS_BADAN as u64 {
-                    return Some((413, "text/plain".to_string(), b"Payload Too Large".to_vec()));
+                    return Some(Statis::Jawab(413, "text/plain".to_string(), b"Payload Too Large".to_vec()));
                 }
-            }
-            if let Ok(bytes) = crate::host::baca_berkas(full) {
-                let ctype = guess_content_type(full);
-                return Some((200, ctype.to_string(), bytes));
+                if let Ok(f) = std::fs::File::open(full) {
+                    return Some(Statis::Berkas(f, guess_content_type(full).to_string(), m.len()));
+                }
             }
         }
     }
     None
+}
+
+/// Berkas statis DIBUKA, belum dibaca: dulu tiap permintaan memuat seluruh berkasnya (sampai 64 MiB) dan menyalinnya
+/// sekali lagi untuk ditulis — 20 pembaca lambat atas berkas 60 MB memegang 2,35 GB (Fase AMAN-58, CWE-400).
+enum Statis { Jawab(i128, String, Vec<u8>), Berkas(std::fs::File, String, u64) }
+
+#[cfg(test)]
+impl Statis {
+    fn kode(&self) -> i128 { match self { Statis::Jawab(k, ..) => *k, Statis::Berkas(..) => 200 } }
+}
+
+/// Byte berkas statis yang dimuat ke memori karena ada middleware `sesudah` yang butuh badannya.
+static BERKAS_TERPAKAI: AtomicUsize = AtomicUsize::new(0);
+const MAKS_BERKAS_SERENTAK: usize = 256 * 1024 * 1024;
+
+/// Berkas dialirkan dari disk per 16 KiB dengan tenggat tulis yang sama seperti jawaban biasa.
+fn kirim_berkas(stream: &mut TcpStream, mut f: std::fs::File, ctype: &str, n: u64) {
+    let dasar = std::time::Duration::from_secs(30) + std::time::Duration::from_secs(n / 16384);
+    let akhir = std::time::Instant::now() + dasar;
+    let tulis = |stream: &mut TcpStream, b: &[u8]| {
+        let sisa = akhir.saturating_duration_since(std::time::Instant::now());
+        !sisa.is_zero() && stream.set_write_timeout(Some(sisa)).is_ok() && stream.write_all(b).is_ok()
+    };
+    if !tulis(stream, kepala_jawaban(200, ctype, n as usize, &[]).as_bytes()) { return; }
+    let mut buf = vec![0u8; 16384];
+    let mut sisa = n;
+    while sisa > 0 {
+        let k = match f.read(&mut buf[..(sisa.min(16384) as usize)]) { Ok(0) | Err(_) => return, Ok(k) => k };
+        if !tulis(stream, &buf[..k]) { return; }
+        sisa -= k as u64;
+    }
+    let _ = stream.flush();
 }
 
 // ─── SERVER: dispatch ke handler JRG ─────────────────────────────────────
@@ -1052,13 +1090,30 @@ fn handle_connection(panggil: &mut PemanggilHandler, router_id: u64, mut stream:
 
     // Berkas statis yang BUKAN teks (font, gambar) disimpan sebagai byte: dulu ia dipaksa jadi
     // teks UTF-8 dan tiap byte tak sah diganti tiga byte — berkasnya rusak tanpa suara.
+    let mut _jaga_berkas: Option<Pesanan> = None;
     let (status, ctype, body, extra_headers) = if let Some(v) = hasil_awal {
         value_to_response(v)
-    } else if let Some((status, ctype, bytes)) =
-        try_serve_static(&router.static_mounts, &path_kini)
-    {
-        // 2) File statis, supaya route dinamis tidak perlu tahu-menahu soal itu.
-        (status, ctype, bytes, Vec::new())
+    } else if let Some(st) = try_serve_static(&router.static_mounts, &path_kini) {
+        // 2) File statis, supaya route dinamis tidak perlu tahu-menahu soal itu. Tanpa middleware `sesudah` ia
+        //    dialirkan dari disk; dengan itu badannya dimuat, di bawah anggaran bersama.
+        match st {
+            Statis::Jawab(status, ctype, bytes) => (status, ctype, bytes, Vec::new()),
+            Statis::Berkas(f, ctype, n) if router.sesudah.is_empty() => return kirim_berkas(&mut stream, f, &ctype, n),
+            Statis::Berkas(f, ctype, n) => {
+                let mut p = Pesanan::baru(&BERKAS_TERPAKAI);
+                let mut isi = Vec::new();
+                if !p.tambah(n as usize, MAKS_BERKAS_SERENTAK) {
+                    write_response(&mut stream, PENUH.0, "text/plain", PENUH.1, &[("Retry-After".to_string(), "1".to_string())]);
+                    return;
+                }
+                if f.take(n).read_to_end(&mut isi).is_err() {
+                    write_response(&mut stream, 500, "text/plain", "gagal membaca berkas statis", &[]);
+                    return;
+                }
+                _jaga_berkas = Some(p);
+                (200, ctype, isi, Vec::new())
+            }
+        }
     } else {
         // 3) Cari route yang cocok (method + pattern path).
         let mut matched: Option<(Handler, Vec<(String, String)>)> = None;
@@ -1231,6 +1286,28 @@ mod tes_permintaan {
         assert!(t.elapsed() < std::time::Duration::from_secs(5), "penulis tertahan {:?}", t.elapsed());
     }
 
+    /// Berkas statis dialirkan utuh dari disk, kepala dan badannya sama dengan jawaban biasa.
+    #[test]
+    fn berkas_statis_dialirkan_utuh() {
+        use std::io::Read;
+        let berkas = std::env::temp_dir().join(format!("jrg-uji-alir-{}.bin", std::process::id()));
+        let isi: Vec<u8> = (0..100_003u32).map(|i| (i % 251) as u8).collect();
+        std::fs::write(&berkas, &isi).unwrap();
+        let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let mut klien = std::net::TcpStream::connect(l.local_addr().unwrap()).unwrap();
+        let (mut s, _) = l.accept().unwrap();
+        super::kirim_berkas(&mut s, std::fs::File::open(&berkas).unwrap(), "application/octet-stream", isi.len() as u64);
+        drop(s);
+        let mut semua = Vec::new();
+        klien.read_to_end(&mut semua).unwrap();
+        let _ = std::fs::remove_file(&berkas);
+        let pisah = semua.windows(4).position(|w| w == b"\r\n\r\n").unwrap();
+        let kepala = String::from_utf8_lossy(&semua[..pisah]).to_string();
+        assert!(kepala.starts_with("HTTP/1.1 200 OK") && kepala.contains("Content-Length: 100003"), "{}", kepala);
+        assert!(kepala.contains("X-Content-Type-Options: nosniff"), "{}", kepala);
+        assert!(semua[pisah + 4..] == isi[..], "badan berkas berubah");
+    }
+
     #[test]
     fn berkas_bertitik_tidak_disajikan() {
         for r in [".env", ".git/config", "sub/.htpasswd", "a/.ssh/id_rsa", ".well-known/../.env"] {
@@ -1383,16 +1460,16 @@ mod tes_permintaan {
         std::fs::write(publik.join("biasa.txt"), b"aman").unwrap();
         std::fs::write(luar.join("rahasia.txt"), b"bocor").unwrap();
         let mounts = vec![("/aset".to_string(), publik.clone())];
-        assert_eq!(try_serve_static(&mounts, "/aset/biasa.txt").map(|x| x.0), Some(200));
-        assert_eq!(try_serve_static(&mounts, "/aset/../luar/rahasia.txt").map(|x| x.0), Some(403));
-        assert_eq!(try_serve_static(&mounts, "/aset/a\\b").map(|x| x.0), Some(403));
+        assert_eq!(try_serve_static(&mounts, "/aset/biasa.txt").map(|x| x.kode()), Some(200));
+        assert_eq!(try_serve_static(&mounts, "/aset/../luar/rahasia.txt").map(|x| x.kode()), Some(403));
+        assert_eq!(try_serve_static(&mounts, "/aset/a\\b").map(|x| x.kode()), Some(403));
         #[cfg(unix)]
         {
             use std::os::unix::fs::symlink;
             symlink(luar.join("rahasia.txt"), publik.join("tautan.txt")).unwrap();
             symlink(&luar, publik.join("folder_luar")).unwrap();
-            assert_eq!(try_serve_static(&mounts, "/aset/tautan.txt").map(|x| x.0), Some(403));
-            assert_eq!(try_serve_static(&mounts, "/aset/folder_luar/rahasia.txt").map(|x| x.0), Some(403));
+            assert_eq!(try_serve_static(&mounts, "/aset/tautan.txt").map(|x| x.kode()), Some(403));
+            assert_eq!(try_serve_static(&mounts, "/aset/folder_luar/rahasia.txt").map(|x| x.kode()), Some(403));
         }
         let _ = std::fs::remove_dir_all(&akar);
     }

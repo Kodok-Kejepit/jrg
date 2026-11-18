@@ -35,6 +35,34 @@ impl Vm {
         self.call_value_immediate(f, daftar)
     }
 
+    /// `tangkap(f)`: `selesaikan_dari` sudah melepas bingkai dan menjalankan `defer`-nya, jadi galatnya cukup direkam.
+    pub(crate) fn tangkap_vm(&mut self, args: &[VmValue]) -> VmResult<VmValue> {
+        use crate::interpreter::tangkap;
+        let f = match args.first() {
+            Some(v) if v.bisa_dipanggil() => v.clone(),
+            Some(lain) => return Err(super::vm::VmError::new(tangkap::pesan_bukan_fungsi(&lain.type_name_penuh()))),
+            None => return Err(super::vm::VmError::new(tangkap::pesan_bukan_fungsi("()"))),
+        };
+        let wajib = match &f {
+            VmValue::Function(fu) => fu.arity_min as usize,
+            VmValue::Closure(c) => c.func.arity_min as usize,
+            _ => 0,
+        };
+        if wajib > 0 { return Err(super::vm::VmError::new(tangkap::pesan_butuh_argumen(wajib))); }
+        match self.call_value_immediate(f, Vec::new()) {
+            Ok(v) => Ok(VmValue::varian("Result", "Ok", Some(v))),
+            Err(e) => {
+                let r = tangkap::rekam(&e.msg, e.span);
+                let mut m = std::collections::HashMap::new();
+                m.insert("pesan".to_string(), VmValue::str(r.pesan));
+                m.insert("berkas".to_string(), VmValue::str(r.berkas));
+                m.insert("baris".to_string(), VmValue::Int(r.baris));
+                m.insert("kolom".to_string(), VmValue::Int(r.kolom));
+                Ok(VmValue::varian("Result", "Err", Some(VmValue::struktur(tangkap::NAMA, m))))
+            }
+        }
+    }
+
     /// `terap_bernama(f, posisional, nama, nilai)` — mesin di balik gula `f(a, b:
     /// 2)`.
     pub(crate) fn terap_bernama_vm(&mut self, args: &[VmValue]) -> VmResult<VmValue> {
@@ -90,6 +118,7 @@ impl Vm {
             NK::Router { metode } => return Some(self.pasang_route_vm(metode, args)),
             NK::Serve => return Some(self.serve_vm(args)),
             NK::Terap => return Some(self.terap_vm(args)),
+            NK::Tangkap => return Some(self.tangkap_vm(args)),
             NK::TerapBernama => return Some(self.terap_bernama_vm(args)),
             NK::Hof { nama } => return Some(self.hof_lewat_nilai(nama, args)),
             NK::Ffi { nomor } => return Some(self.ffi_vm(nomor, args)),
@@ -479,10 +508,13 @@ impl Vm {
         let ch_kirim = ch.clone();
         let label = tipe.to_string();
 
+        // Badan tugas aktor kebuntuan (`antrean::buntu`), dihitung SEBELUM utasnya lahir.
+        let aktor = crate::antrean::buntu::lahir();
         let hasil = std::thread::Builder::new()
             .name("jrg-tugas".to_string())
             .stack_size(crate::interpreter::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                let _aktor = aktor;
                 crate::interpreter::catat_puncak_stack();
                 let mut vm = crate::vm::vm::Vm::new();
                 // Global pemanggil disalin, BUKAN dibagi: `VmValue` agregat sudah berupa

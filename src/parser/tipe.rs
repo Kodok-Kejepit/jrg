@@ -26,6 +26,10 @@ impl Parser {
     // ── Type parsing ──────────────────────────────────────────────────────
 
     pub(crate) fn parse_type(&mut self) -> Result<TypeExpr, ParseError> {
+        self.dengan_sarang(Self::parse_type_dalam)
+    }
+
+    fn parse_type_dalam(&mut self) -> Result<TypeExpr, ParseError> {
         match self.current().kind.clone() {
             TokenKind::Bang => { self.advance(); Ok(TypeExpr::Never) }
             TokenKind::Star => {

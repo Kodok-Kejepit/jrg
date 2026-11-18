@@ -14,6 +14,8 @@ pub enum OpCode {
     /// Pop yang MENOLAK kalau nilainya bisa dipanggil: sebuah fungsi yang
     /// berdiri sendiri sebagai pernyataan tidak mengerjakan apa pun.
     PopPeriksa,
+    /// Puncak penanda `var x: T` yang belum diisi (`interpreter::TIPE_BELUM_DIISI`) = galat; arg = nama `x`.
+    PeriksaIsi,
     /// Tukar dua nilai teratas.
     Swap,
 

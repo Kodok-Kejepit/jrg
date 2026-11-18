@@ -225,11 +225,13 @@ fn rangka_web_langsung_melayani_dan_melolosi_html() {
         eprintln!("LEWAT: biner jrgm belum dibangun di {}", j.display());
         return;
     }
+    // Kerangka ikut bahasa pesan; keduanya harus jalan dan melolosi HTML.
+    for (bahasa, rute) in [("id", "/halo/"), ("en", "/hello/")] {
     let tmp = crate::bersama::dir_unik("jrg_rangka_web");
     let _ = std::fs::remove_dir_all(&tmp);
     std::fs::create_dir_all(&tmp).unwrap();
 
-    let out = Command::new(&j).args(["new", "situs", "--kind", "web"])
+    let out = Command::new(&j).args(["new", "situs", "--kind", "web"]).env("JRG_BAHASA", bahasa)
         .current_dir(&tmp).output().unwrap();
     assert!(out.status.success(), "jrgm new --kind web gagal: {}",
         String::from_utf8_lossy(&out.stderr));
@@ -270,7 +272,7 @@ fn rangka_web_langsung_melayani_dan_melolosi_html() {
     let api = ambil("/api");
     // `<script>` di URL harus tampil terlolosi — kalau tidak, kerangka bawaan
     // ini memasang lubang XSS di setiap proyek baru.
-    let nakal = ambil("/halo/%3Cscript%3E");
+    let nakal = ambil(&format!("{rute}%3Cscript%3E"));
     let hilang = ambil("/tidak-ada-sama-sekali");
     let _ = anak.kill();
     let _ = anak.wait();
@@ -288,6 +290,7 @@ fn rangka_web_langsung_melayani_dan_melolosi_html() {
     assert!(!nakal.contains("<script>"), "tag mentah lolos ke halaman");
     let hilang = hilang.expect("404 tidak menjawab");
     assert!(hilang.contains("404"), "path tak dikenal bukan 404");
+    }
 }
 
 /// Tiap subperintah yang belum ada isinya harus KELUAR TIDAK NOL dan menyebut
@@ -986,6 +989,28 @@ mod uji {
         let (kode, teks) = jalankan(jrgm(), &["test", "--filter", "ada"], &d);
         assert_eq!(kode, Some(0), "filter yang cocok malah gagal:\n{}", teks);
         assert!(teks.contains("ok    test_ada"), "testnya tidak jalan:\n{}", teks);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// `jrgm new` tidak menimpa folder yang sudah ada dan menolak nama yang merusak manifesnya (Fase AMAN-62).
+    #[test]
+    fn proyek_baru_tidak_menimpa_dan_nama_aman() {
+        let d = crate::bersama::dir_unik("jrg-uji-new-aman");
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(d.join("ada/src")).unwrap();
+        std::fs::write(d.join("ada/src/main.jrg"), "kode pemakai").unwrap();
+        for args in [&["new", "ada"][..], &["new", "ada", "--bahasa", "python"][..]] {
+            let (kode, teks) = jalankan(jrgm(), args, &d);
+            assert_eq!(kode, Some(1), "{:?} menimpa folder yang ada:\n{}", args, teks);
+            assert!(teks.contains("sudah ada"), "{:?}:\n{}", args, teks);
+        }
+        assert_eq!(std::fs::read_to_string(d.join("ada/src/main.jrg")).unwrap(), "kode pemakai");
+        for nama in ["a\"b", "x\n[dependencies]", "a b", ".", "..", "a/..", "-x"] {
+            let (kode, teks) = jalankan(jrgm(), &["new", "--", nama], &d);
+            assert_eq!(kode, Some(1), "nama {:?} diterima:\n{}", nama, teks);
+        }
+        let (kode, teks) = jalankan(jrgm(), &["new", "sub/baru-1"], &d);
+        assert_eq!(kode, Some(0), "jalur folder ditolak:\n{}", teks);
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -2880,6 +2905,33 @@ fn dependensi_git_publish_add_update() {
     assert!(!ok && t.contains("bukan dependensi git"), "{}", t);
     let (ok, t) = jalan(&a, &["add", "lain", "--git", &akar.join("tidak-ada.git").display().to_string()]);
     assert!(!ok && t.contains("tidak bisa mengambil"), "{}", t);
+    let _ = std::fs::remove_dir_all(&akar);
+}
+
+/// URL `<nama>::` memanggil `git-remote-<nama>` dari PATH; jrgm cuma membolehkan https/http/ssh/git/file, apa pun
+/// konfigurasi git pemakainya (Fase AMAN-63).
+#[test]
+#[cfg(unix)]
+fn transport_git_asing_tidak_dijalankan() {
+    use std::os::unix::fs::PermissionsExt;
+    let akar = std::env::temp_dir().join(format!("jrg_dep_transport_{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&akar);
+    std::fs::create_dir_all(akar.join("bin")).unwrap();
+    let jejak = akar.join("dijalankan");
+    let helper = akar.join("bin/git-remote-jrgjahat");
+    std::fs::write(&helper, format!("#!/bin/sh\ntouch {}\nexit 1\n", jejak.display())).unwrap();
+    std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let jalan = |dir: &Path, args: &[&str]| {
+        let path = format!("{}:{}", akar.join("bin").display(), std::env::var("PATH").unwrap_or_default());
+        let o = Command::new(jrgm()).args(args).current_dir(dir).env("JRGM_TEMBOLOK", akar.join("tembolok"))
+            .env("JRG_SOPAN", "1").env("PATH", path).env("GIT_CONFIG_COUNT", "1")
+            .env("GIT_CONFIG_KEY_0", "protocol.allow").env("GIT_CONFIG_VALUE_0", "always").output().unwrap();
+        (o.status.success(), String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr))
+    };
+    assert!(jalan(&akar, &["new", "app"]).0);
+    let (ok, t) = jalan(&akar.join("app"), &["add", "x", "--git", "jrgjahat::apa-saja"]);
+    assert!(!ok, "{}", t);
+    assert!(!jejak.exists(), "git-remote-jrgjahat dijalankan: {}", t);
     let _ = std::fs::remove_dir_all(&akar);
 }
 

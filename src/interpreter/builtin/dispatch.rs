@@ -260,10 +260,43 @@ impl Interpreter {
                 }
                 self.call_fn(f, akhir)
             }
-            // Satu-satunya cara kode JRG melempar galat sendiri.
+            // `tangkap(f)`: galat saat jalan di dalam `f` (sesudah `defer`-nya) jadi `Err(Galat)`.
+            Tangkap => {
+                let f = match args.first() {
+                    Some(v) if v.bisa_dipanggil() => v.clone(),
+                    Some(lain) => return runtime_err!("{}", crate::interpreter::tangkap::pesan_bukan_fungsi(&lain.type_name())),
+                    None => return runtime_err!("{}", crate::interpreter::tangkap::pesan_bukan_fungsi("()")),
+                };
+                let wajib = match &f {
+                    Value::Closure { params, .. } => params.len(),
+                    Value::Function(jf) => jf.defaults.iter().filter(|d| d.is_none()).count() - jf.variadic as usize,
+                    _ => 0,
+                };
+                if wajib > 0 { return runtime_err!("{}", crate::interpreter::tangkap::pesan_butuh_argumen(wajib)); }
+                match self.call_fn(f, Vec::new()) {
+                    Ok(v) => Ok(crate::interpreter::ok_value(v)),
+                    Err(Signal::RuntimeError(e)) => {
+                        let r = crate::interpreter::tangkap::rekam(&e.message, e.span);
+                        let mut fields = HashMap::new();
+                        fields.insert("pesan".to_string(), Value::Str(std::sync::Arc::new(r.pesan)));
+                        fields.insert("berkas".to_string(), Value::Str(std::sync::Arc::new(r.berkas)));
+                        fields.insert("baris".to_string(), Value::Int(r.baris));
+                        fields.insert("kolom".to_string(), Value::Int(r.kolom));
+                        let g = Value::Struct { name: crate::interpreter::tangkap::NAMA.to_string(), fields: fields.into() };
+                        Ok(Value::Enum { type_name: "Result".to_string(), variant: "Err".to_string(), payload: Some(Box::new(g)) })
+                    }
+                    Err(lain) => Err(lain),
+                }
+            }
+            // Satu-satunya cara kode JRG melempar galat sendiri; `panik(g)` atas `Galat` melempar ulang.
             Panik => {
                 let pesan = match args.first() {
                     None => "panik() tanpa alasan — sebutkan apa yang salah".to_string(),
+                    Some(Value::Struct { name, fields }) if name == crate::interpreter::tangkap::NAMA => {
+                        let teks = |k: &str| match fields.get(k) { Some(Value::Str(s)) => s.to_string(), _ => String::new() };
+                        let bulat = |k: &str| match fields.get(k) { Some(Value::Int(n)) => *n, _ => 0 };
+                        crate::interpreter::tangkap::pesan_lempar_ulang(&teks("pesan"), &teks("berkas"), bulat("baris"), bulat("kolom"))
+                    }
                     Some(v) => format!("{}", v),
                 };
                 runtime_err!("{}", pesan)

@@ -65,6 +65,7 @@ impl Codegen {
             let mut lepas = Vec::new();
             for (i, s) in block.stmts.iter().enumerate() {
                 let calon = super::codegen_lepas::calon_lepas(s, &block.stmts[i + 1..], block.tail.as_deref());
+                cg.tandai_pop_pindah(&block.stmts, i, block.tail.as_deref());
                 cg.codegen_stmt(s)?;
                 if cg.terminated { return Ok(()); }
                 cg.catat_lepas(calon, &mut lepas);
@@ -136,6 +137,10 @@ impl Codegen {
     }
 
     pub(crate) fn codegen_let(&mut self, l: &LetStmt) -> Result<(), String> {
+        if let Some(a) = self.pop_pindah.take() {
+            self.pastikan_milik(&a);
+            if self.coba_pop_berbagi(l, &a)? { return Ok(()); }
+        }
         let expected = match &l.ty {
             Some(te) => Some(self.resolve_type_pub(te)?),
             // Tabel yang sama yang membawa tipe `var a = []` juga membawa
@@ -152,14 +157,19 @@ impl Codegen {
         let v = self.codegen_expr(&l.init, expected.as_ref());
         self.nama_diikat = nama_lama;
         let v = v?;
+        // `let b = a` atas lokal berbendera: berbagi penyangga sampai salah satunya menulis (`codegen_bagi.rs`).
+        let bagi = pattern_simple_name(&l.pattern).filter(|n| self.akan_berbendera(n, &v.ty)
+            && expected.as_ref().map_or(true, |t| *t == v.ty))
+            .and_then(|n| self.sumber_bagi_nilai(&l.init, &v.ty).map(|b| (n, b)));
         // Nama baru = pemilik baru. Lihat `ambil_milik`.
-        let v = self.ambil_milik(&l.init, v)?;
+        let v = if bagi.is_some() { v } else { self.ambil_milik(&l.init, v)? };
         let final_ty = expected.unwrap_or(v.ty.clone());
         // Span dipersempit ke INISIALISASINYA sebelum koersi.
         let lama = self.masuk_span(l.init.span());
         let v = self.coerce(&v, &final_ty);
         self.pulih_span(lama);
         self.bind_pattern(&l.pattern, &v, &final_ty)?;
+        if let Some((n, sumber)) = bagi { self.tandai_berbagi(&n, &sumber); }
         if let (false, Expr::Closure { params, .. }, Some(n)) = (l.is_mut, &*l.init, pattern_simple_name(&l.pattern)) {
             if let Some((ptr, _)) = self.lookup_local(&n) { self.param_closure.insert(ptr, params.clone()); }
         }
@@ -179,7 +189,13 @@ impl Codegen {
                 let hasil = self.codegen_expr(e, expected.as_ref());
                 self.nama_diikat = nama_lama;
                 let hasil = hasil?;
-                self.ambil_milik(e, hasil)?
+                // `var b = a` atas lokal berbendera: berbagi, seperti `let`.
+                let sama_tipe = expected.as_ref().map_or(true, |t| *t == hasil.ty);
+                if sama_tipe && self.akan_berbendera(&v.name, &hasil.ty) && self.sumber_bagi_nilai(e, &hasil.ty).is_some() {
+                    hasil
+                } else {
+                    self.ambil_milik(e, hasil)?
+                }
             }
             None => {
                 // Tipe tanpa nilai nol yang jelas (struct, Option, enum, …) bernilai `nil` di
@@ -187,9 +203,9 @@ impl Codegen {
                 if let Some(te) = &v.ty {
                     if crate::parser::nilai_nol(te, v.span).is_none() {
                         return Err(super::galat::tandai(v.span, format!(
-                            "`var {}` tanpa nilai awal bertipe yang tidak punya nilai nol — acuan \
-                             mengisinya `nil`, yang belum bisa diwakili backend LLVM v1. Beri nilai \
-                             awal, atau jalankan tanpa `--emit-llvm`", v.name)));
+                            "`var {}` tanpa nilai awal bertipe yang tidak punya nilai nol — dua mesin lain \
+                             menolaknya saat DIBACA sebelum diisi, dan backend LLVM v1 belum bisa mencatat \
+                             \"belum diisi\". Beri nilai awal, atau jalankan tanpa `--emit-llvm`", v.name)));
                     }
                 }
                 let t = expected.clone().unwrap_or(JrgType::I64);
@@ -212,6 +228,10 @@ impl Codegen {
         let slot = self.alloca_local(&v.name, final_ty.clone());
         if final_ty != JrgType::Unit {
             self.emit(format!("store {} {}, ptr {}", final_ty.llvm_ty(), val.text, slot));
+        }
+        if let Some(sumber) = v.init.as_ref().and_then(|e| self.sumber_bagi_nilai(e, &final_ty))
+            .filter(|_| self.milik_lokal.contains_key(&slot)) {
+            self.tandai_berbagi(&v.name, &sumber);
         }
         Ok(())
     }
@@ -315,10 +335,14 @@ impl Codegen {
             for (n, e) in s.names.iter().zip(s.values.iter()) {
                 let v = self.codegen_expr(e, None)?;
                 if n == "_" { continue; }
+                // `b := a` berbagi kalau dua-duanya berbendera; selain itu nama baru = pemilik baru.
+                let sumber = self.sumber_bagi_nilai(e, &v.ty).filter(|_| self.akan_berbendera(n, &v.ty));
+                let v = if sumber.is_some() { v } else { self.ambil_milik(e, v)? };
                 let slot = self.alloca_local(n, v.ty.clone());
                 if v.ty != JrgType::Unit {
                     self.emit(format!("store {} {}, ptr {}", v.ty.llvm_ty(), v.text, slot));
                 }
+                if let Some(s) = sumber { self.tandai_berbagi(n, &s); }
             }
             Ok(())
         } else if s.values.len() == 1 {
@@ -379,6 +403,8 @@ impl Codegen {
         }
         // `a = a + [x]`, `a = arr::push(a, x)`, `a += [x]`: ditumbuhkan DI TEMPAT (kapasitas
         // per variabel) — dulu tiap putaran menyalin seluruh array ke alokasi baru.
+        // Salin-saat-tulis lokal polos (`codegen_bagi.rs`): sasaran yang masih berbagi penyangga disalin dulu.
+        let tanpa_salin = self.milik_sebelum_tugas(a);
         if a.targets.len() > 1 && a.values.len() == 1 && matches!(a.op, AssignOp::Eq) {
             return self.codegen_bongkar(a);
         }
@@ -399,6 +425,7 @@ impl Codegen {
         }
         if self.coba_tumbuh_di_tempat(a)? { return Ok(()); }
         if self.coba_pop_di_tempat(a)? { return Ok(()); }
+        if self.coba_tugas_pop_pindah(a)? { return Ok(()); }
         if self.coba_tumbuh_jalur(a)? { return Ok(()); }
         if self.coba_panggil_milik(a)? { return Ok(()); }
         self.arg_pindah = self.argumen_dipindahkan(a);
@@ -453,7 +480,7 @@ impl Codegen {
             self.nama_diikat = nama_lama;
             let v = v?;
             let milik = std::mem::take(&mut self.lit_milik) | std::mem::take(&mut self.hasil_pindah_milik);
-            let v = if milik { v } else { self.ambil_milik(val_expr, v)? };
+            let v = if milik || tanpa_salin { v } else { self.ambil_milik(val_expr, v)? };
             new_vals.push(v);
         }
         if tunda_ya { place_ptrs[0] = Some(self.tempat_tulis(&a.targets[0])?); }
@@ -749,7 +776,7 @@ impl Codegen {
         self.start_block(body_lbl);
         self.loop_stack.push(LoopCtx { label: w.label.clone(), continue_bb: cond_lbl.clone(), break_bb: end_lbl.clone() });
         self.push_scope();
-        self.codegen_stmt_block(&w.body)?;
+        self.badan_loop(&w.body)?;
         self.pop_scope();
         self.loop_stack.pop();
         if !self.terminated { self.terminate(format!("br label %{}", cond_lbl)); }
@@ -766,7 +793,7 @@ impl Codegen {
         self.start_block(body_lbl.clone());
         self.loop_stack.push(LoopCtx { label: l.label.clone(), continue_bb: body_lbl.clone(), break_bb: end_lbl.clone() });
         self.push_scope();
-        self.codegen_stmt_block(&l.body)?;
+        self.badan_loop(&l.body)?;
         self.pop_scope();
         self.loop_stack.pop();
         if !self.terminated { self.terminate(format!("br label %{}", body_lbl)); }
@@ -798,7 +825,7 @@ impl Codegen {
                 self.start_block(body_lbl);
                 self.loop_stack.push(LoopCtx { label: label.clone(), continue_bb: post_lbl.clone(), break_bb: end_lbl.clone() });
                 self.push_scope();
-                self.codegen_stmt_block(body)?;
+                self.badan_loop(body)?;
                 self.pop_scope();
                 self.loop_stack.pop();
                 if !self.terminated { self.terminate(format!("br label %{}", post_lbl)); }

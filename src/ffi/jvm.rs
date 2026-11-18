@@ -20,6 +20,7 @@ mod idx {
     pub const EXCEPTION_OCCURRED: usize = 15;
     pub const EXCEPTION_CLEAR: usize = 17;
     pub const DELETE_LOCAL_REF: usize = 23;
+    pub const NEW_LOCAL_REF: usize = 25;
     pub const GET_STATIC_METHOD_ID: usize = 113;
     pub const CALL_STATIC_OBJECT_A: usize = 116;
     pub const CALL_STATIC_BOOLEAN_A: usize = 119;
@@ -349,10 +350,19 @@ fn id_dari_handle(v: &Value, nama: &str) -> Result<u64, String> {
     }
 }
 
-fn ambil_global(id: u64, nama: &str) -> Result<(*mut c_void, String), String> {
+/// Referensi LOKAL baru atas objek ber-`id`, dibuat selagi tabel terkunci: `jvm::lepas` dari goroutine lain
+/// menghapus referensi global-nya di bawah kunci yang sama, jadi objeknya hidup selama referensi lokal ini dipegang
+/// (dulu penunjuk global dipakai sesudah kunci dilepas, AGI-20261118-10). Pemanggil menghapusnya.
+unsafe fn pinjam_objek(env: Env, id: u64, nama: &str) -> Result<(*mut c_void, String), String> {
     let t = tabel_objek().lock().map_err(|_| "tabel objek terkunci".to_string())?;
     match t.1.get(&id) {
-        Some(o) => Ok((o.global, o.kelas.clone())),
+        Some(o) => {
+            let baru: extern "C" fn(Env, *mut c_void) -> *mut c_void =
+                std::mem::transmute(fungsi(env, idx::NEW_LOCAL_REF));
+            let l = baru(env, o.global);
+            if l.is_null() { return Err(format!("{}: JVM menolak membuat referensi objek (memori habis?)", nama)); }
+            Ok((l, o.kelas.clone()))
+        }
         None => Err(format!(
             "{}: objek Java ini sudah dilepas lewat `jvm::lepas` — sebuah handle \
              yang sudah dilepas tidak boleh dipakai lagi", nama)),
@@ -484,8 +494,20 @@ unsafe fn ke_jvalue(env: Env, tipe: &str, v: &Value, ke: usize, nama: &str)
             }
             Value::Struct { name, .. } if name == "JavaObj" => {
                 let id = id_dari_handle(v, nama)?;
-                let (g, _) = ambil_global(id, nama)?;
-                (JValue { l: g }, None)
+                let (g, kelas) = pinjam_objek(env, id, nama)?;
+                // JNI tidak memeriksa jenis argumen objek: objek kelas lain dibaca di offset yang salah dan JVM
+                // mati SIGSEGV (AGI-20261118-10). Diperiksa `IsInstanceOf` atas kelas di deskriptornya.
+                let cls = cari_kelas(env, &lain[1..lain.len() - 1])?;
+                let cek: extern "C" fn(Env, *mut c_void, *mut c_void) -> u8 =
+                    std::mem::transmute(fungsi(env, idx::IS_INSTANCE_OF));
+                let cocok = cek(env, g, cls) != 0;
+                hapus_lokal(env, cls);
+                if !cocok {
+                    hapus_lokal(env, g);
+                    return Err(format!("{}: argumen ke-{} butuh objek `{}`, dapat objek `{}`",
+                        nama, ke + 1, lain[1..lain.len() - 1].replace('/', "."), kelas));
+                }
+                (JValue { l: g }, Some(g))
             }
             _ => return Err(salah("objek Java (hasil `jvm::baru`) atau `nil`")),
         },
@@ -744,33 +766,35 @@ pub fn panggil_objek(
         return Err(format!("`{}{}` minta {} argumen, diberi {}",
             metode, tanda_tangan, params.len(), args.len()));
     }
-    let (global, kelas) = ambil_global(id, "jvm::panggil")?;
     let env = env_thread_ini(opsi)?;
+    let c_nama = CString::new(metode).map_err(|_| "nama metode memuat NUL".to_string())?;
+    let c_sig = CString::new(tanda_tangan).map_err(|_| "tanda tangan memuat NUL".to_string())?;
     unsafe {
+        let (global, kelas) = pinjam_objek(env, id, "jvm::panggil")?;
         let get_cls: extern "C" fn(Env, *mut c_void) -> *mut c_void =
             std::mem::transmute(fungsi(env, idx::GET_OBJECT_CLASS));
         let cls = get_cls(env, global);
         let get_mid: extern "C" fn(Env, *mut c_void, *const c_char, *const c_char) -> *mut c_void =
             std::mem::transmute(fungsi(env, idx::GET_METHOD_ID));
-        let c_nama = CString::new(metode).map_err(|_| "nama metode memuat NUL".to_string())?;
-        let c_sig = CString::new(tanda_tangan).map_err(|_| "tanda tangan memuat NUL".to_string())?;
         let mid = get_mid(env, cls, c_nama.as_ptr(), c_sig.as_ptr());
         if mid.is_null() {
             let _ = periksa_exception(env);
             hapus_lokal(env, cls);
+            hapus_lokal(env, global);
             return Err(format!(
                 "`{}.{}` dengan tanda tangan `{}` tidak ketemu — bandingkan dengan \
                  keluaran `javap -s {}`", kelas, metode, tanda_tangan, kelas));
         }
         let (nilai, sementara) = match siapkan_args(env, &params, args, metode) {
             Ok(v) => v,
-            Err(e) => { hapus_lokal(env, cls); return Err(e); }
+            Err(e) => { hapus_lokal(env, cls); hapus_lokal(env, global); return Err(e); }
         };
         let ptr = if nilai.is_empty() { std::ptr::null() } else { nilai.as_ptr() };
         let hasil = panggil_instance(env, global, mid, ptr, &ret);
         for o in sementara { hapus_lokal(env, o); }
         let cek = periksa_exception(env);
         hapus_lokal(env, cls);
+        hapus_lokal(env, global);
         cek?;
         hasil
     }
@@ -852,25 +876,27 @@ pub fn field_statis(
 
 /// Baca field INSTANCE dari sebuah handle objek.
 pub fn field_objek(opsi: &[String], id: u64, nama: &str, tipe: &str) -> Result<Value, String> {
-    let (global, kelas) = ambil_global(id, "jvm::field")?;
     let env = env_thread_ini(opsi)?;
+    let c_nama = CString::new(nama).map_err(|_| "nama field memuat NUL".to_string())?;
+    let c_tipe = CString::new(tipe).map_err(|_| "tipe field memuat NUL".to_string())?;
     unsafe {
+        let (global, kelas) = pinjam_objek(env, id, "jvm::field")?;
         let get_cls: extern "C" fn(Env, *mut c_void) -> *mut c_void =
             std::mem::transmute(fungsi(env, idx::GET_OBJECT_CLASS));
         let cls = get_cls(env, global);
         let get_fid: extern "C" fn(Env, *mut c_void, *const c_char, *const c_char) -> *mut c_void =
             std::mem::transmute(fungsi(env, idx::GET_FIELD_ID));
-        let c_nama = CString::new(nama).map_err(|_| "nama field memuat NUL".to_string())?;
-        let c_tipe = CString::new(tipe).map_err(|_| "tipe field memuat NUL".to_string())?;
         let fid = get_fid(env, cls, c_nama.as_ptr(), c_tipe.as_ptr());
         hapus_lokal(env, cls);
         if fid.is_null() {
             let _ = periksa_exception(env);
+            hapus_lokal(env, global);
             return Err(format!(
                 "field `{}.{}` bertipe `{}` tidak ketemu — bandingkan dengan \
                  keluaran `javap -s {}`", kelas, nama, tipe, kelas));
         }
         let hasil = baca_field(env, global, fid, tipe, false);
+        hapus_lokal(env, global);
         periksa_exception(env)?;
         hasil
     }
@@ -1160,7 +1186,7 @@ mod tests {
 #define Q(f) printf("VM_%s %zu\n", #f, offsetof(struct JNIInvokeInterface_, f)/sizeof(void*))
 int main(void){
   P(GetVersion);P(FindClass);P(GetObjectClass);P(GetMethodID);P(CallObjectMethodA);
-  P(ExceptionOccurred);P(ExceptionClear);P(DeleteLocalRef);P(GetStaticMethodID);
+  P(ExceptionOccurred);P(ExceptionClear);P(DeleteLocalRef);P(NewLocalRef);P(GetStaticMethodID);
   P(CallStaticObjectMethodA);P(CallStaticBooleanMethodA);P(CallStaticByteMethodA);
   P(CallStaticCharMethodA);P(CallStaticShortMethodA);P(CallStaticIntMethodA);
   P(CallStaticLongMethodA);P(CallStaticFloatMethodA);P(CallStaticDoubleMethodA);
@@ -1205,6 +1231,7 @@ int main(void){
         assert_eq!(ambil("ExceptionOccurred"), idx::EXCEPTION_OCCURRED);
         assert_eq!(ambil("ExceptionClear"), idx::EXCEPTION_CLEAR);
         assert_eq!(ambil("DeleteLocalRef"), idx::DELETE_LOCAL_REF);
+        assert_eq!(ambil("NewLocalRef"), idx::NEW_LOCAL_REF);
         assert_eq!(ambil("GetStaticMethodID"), idx::GET_STATIC_METHOD_ID);
         assert_eq!(ambil("CallStaticObjectMethodA"), idx::CALL_STATIC_OBJECT_A);
         assert_eq!(ambil("CallStaticBooleanMethodA"), idx::CALL_STATIC_BOOLEAN_A);

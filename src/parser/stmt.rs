@@ -43,6 +43,7 @@ impl Parser {
                     // sisa berkas dibaca sebagai isi blok dan satu galat jadi tiga.
                     let dalam = self.kurawal_terbuka(mulai);
                     if dalam > 0 { self.tutup_kurawal(dalam); }
+                    else if self.lompati_kepala_gagal(mulai) {}
                     else if !self.at_exact(&TokenKind::RBrace) { self.synchronize(); }
                 }
             }
@@ -78,6 +79,8 @@ impl Parser {
     /// Bentuk dari bahasa LAIN yang orang wajar coba, ditolak sambil menyebut
     /// padanannya di sini.
     pub(crate) fn tolak_bentuk_asing(&mut self) -> Option<ParseError> {
+        // Galatnya menunjuk awal bentuk itu, walau sebagian sudah dilompati.
+        let galat_di = self.current().span;
         let pesan: Option<String> = match &self.current().kind {
             TokenKind::KwDo => Some(concat!(
                 "`do { ... } while c` belum ada di JRG. Bentuk yang setara: ",
@@ -109,8 +112,28 @@ impl Parser {
                 Some(concat!(
                     "JRG tidak punya `try`/`catch`, dan itu keputusan: kegagalan ",
                     "diwakili nilai (`Result`), bukan aliran kendali yang tak terlihat ",
-                    "di tanda tangan. Pakai `?` untuk meneruskan kegagalan, atau ",
-                    "`match` untuk menanganinya").to_string()),
+                    "di tanda tangan. Pakai `?` untuk meneruskan kegagalan, `match` ",
+                    "untuk menanganinya, atau `tangkap(|| ..)` untuk menangkap galat saat ",
+                    "jalan sebagai `Result`").to_string()),
+            TokenKind::Ident(n)
+                if matches!(n.as_str(), "elif" | "elsif" | "elseif")
+                    && !matches!(self.peek_kind(1), Some(TokenKind::Eq | TokenKind::LParen | TokenKind::Dot)) => {
+                let n = n.clone();
+                self.lompati_bentuk_berblok();
+                Some(format!("JRG tidak punya `{}` — cabang berikutnya ditulis `}} else if syarat {{ .. }}`", n))
+            }
+            TokenKind::Ident(n)
+                if matches!(n.as_str(), "def" | "function" | "func")
+                    && matches!(self.peek_kind(1), Some(TokenKind::Ident(_)))
+                    && matches!(self.peek_kind(2), Some(TokenKind::LParen)) =>
+                Some(format!("fungsi di JRG ditulis `fn nama(a, b) {{ .. }}`, bukan `{} nama(..)`", n)),
+            TokenKind::KwFor if matches!(self.peek_kind(1), Some(TokenKind::LParen)) && self.kurung_berisi_titik_koma(1) => {
+                self.lompati_bentuk_berblok();
+                Some(concat!(
+                    "`for (awal; syarat; langkah)` gaya C bukan bentuk JRG — tulis ",
+                    "`for i in 0..n { .. }` (rentang), `for _, x in daftar { .. }` (isi), ",
+                    "atau `while syarat { .. }`").to_string())
+            }
             TokenKind::Ident(n)
                 if n == "switch" && matches!(self.peek_kind(1),
                     Some(TokenKind::IntLit(_)) | Some(TokenKind::Ident(_))) =>
@@ -118,9 +141,74 @@ impl Parser {
                     "`switch` bukan bentuk JRG — pakai `match`, yang juga menerima pola ",
                     "dan penjaga: `match x { 1 | 2 => ..., n if n > 9 => ..., _ => ... }`")
                     .to_string()),
+            // `class Foo { .. }`, `class Foo: Induk { .. }`, `class Foo(Induk):` — Java/Python/JS/C++.
+            TokenKind::Ident(n)
+                if matches!(n.as_str(), "class" | "interface" | "abstract")
+                    && matches!(self.peek_kind(1), Some(TokenKind::Ident(_))) => {
+                let n = n.clone();
+                self.lompati_bentuk_berblok();
+                Some(format!(
+                    "`{}` bukan bentuk JRG. Sebuah tipe berisi field ditulis `struct Nama {{ x: int }}` \
+                     (warisan: `struct Anak: Induk {{ .. }}`); pilihan terbatas pakai `enum`; perilaku bersama \
+                     pakai `trait` lalu `impl Trait for Nama`. Method ditulis di blok `impl Nama {{ fn m(self) {{ .. }} }}`", n))
+            }
+            // `public`/`private`/`protected` sebagai pengubah di depan deklarasi — Java/TS/C++.
+            TokenKind::Ident(n)
+                if matches!(n.as_str(), "public" | "private" | "protected" | "internal")
+                    && matches!(self.peek_kind(1), Some(TokenKind::KwFn | TokenKind::KwStruct
+                        | TokenKind::KwEnum | TokenKind::KwConst | TokenKind::KwLet | TokenKind::Ident(_))) => {
+                let n = n.clone();
+                Some(format!(
+                    "`{}` bukan pengubah di JRG. Yang publik ditandai `pub` DI DEPAN deklarasinya \
+                     (`pub fn`, `pub struct`, field `pub x: int`); tanpa `pub` sebuah nama privat ke modulnya", n))
+            }
             _ => None,
         };
-        pesan.map(|p| self.error(p))
+        pesan.map(|p| self.error_di(p, galat_di))
+    }
+
+    /// `(` di `peek(i)` memuat `;` sebelum `)` pasangannya: kepala `for` gaya C, bukan pola tuple.
+    fn kurung_berisi_titik_koma(&self, i: usize) -> bool {
+        let mut dalam = 0usize;
+        for t in &self.tokens[(self.pos + i).min(self.tokens.len())..] {
+            match t.kind {
+                TokenKind::LParen => dalam += 1,
+                TokenKind::RParen => { dalam -= 1; if dalam == 0 { return false; } }
+                TokenKind::Semi if dalam == 1 => return true,
+                TokenKind::LBrace | TokenKind::Eof => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    /// Lompati bentuk asing sampai blok `{ .. }` miliknya tertutup, supaya satu salah tulis jadi SATU galat.
+    fn lompati_bentuk_berblok(&mut self) {
+        let mut kurung = 0usize;
+        while !self.at_exact(&TokenKind::Eof) {
+            match self.current().kind {
+                TokenKind::LParen | TokenKind::LBracket => kurung += 1,
+                TokenKind::RParen | TokenKind::RBracket => kurung = kurung.saturating_sub(1),
+                TokenKind::RBrace if kurung == 0 => return,
+                TokenKind::LBrace if kurung == 0 => { self.advance(); self.tutup_kurawal(1); return; }
+                _ => {}
+            }
+            self.advance();
+        }
+    }
+
+    /// Galat di kepala `if`/`while`/`for`/`match` sebelum badannya dibuka: seluruh bentuknya (juga rantai `else`)
+    /// dilompati, supaya badannya tidak dibaca sebagai pernyataan lepas dan satu salah tulis tetap satu galat.
+    pub(crate) fn lompati_kepala_gagal(&mut self, mulai: usize) -> bool {
+        let Some(t) = self.tokens.get(mulai) else { return false };
+        if !matches!(t.kind, TokenKind::KwIf | TokenKind::KwWhile | TokenKind::KwFor | TokenKind::KwMatch) { return false }
+        if self.pos <= mulai || self.at_exact(&TokenKind::RBrace) { return false }
+        self.lompati_bentuk_berblok();
+        while self.at_exact(&TokenKind::KwElse) {
+            self.advance();
+            self.lompati_bentuk_berblok();
+        }
+        true
     }
 
     pub(crate) fn parse_stmt(&mut self) -> Result<Stmt, ParseError> {

@@ -33,6 +33,11 @@ impl IndeksBaris {
 
 /// Satu baris hasil untuk satu test.
 pub fn baris_hasil(nama: &str, hasil: &Result<(), String>, baris: Option<usize>) -> String {
+    crate::terjemah::t(&baris_hasil_id(nama, hasil, baris))
+}
+
+/// `baris_hasil` sebelum diterjemahkan: templat biner `--emit-llvm`, yang menerjemahkannya sendiri saat jalan.
+pub fn baris_hasil_id(nama: &str, hasil: &Result<(), String>, baris: Option<usize>) -> String {
     match hasil {
         Ok(()) => format!("  ok    {}", nama),
         Err(p) => {
@@ -48,11 +53,15 @@ pub fn baris_hasil(nama: &str, hasil: &Result<(), String>, baris: Option<usize>)
 /// Rangkuman satu berkas. Dikembalikan sebagai teks, bukan dicetak, supaya
 /// pemanggilnya yang menentukan ke mana ia pergi.
 pub fn rangkuman(lulus: usize, gagal: usize) -> String {
+    crate::terjemah::t(&rangkuman_id(lulus, gagal))
+}
+
+pub fn rangkuman_id(lulus: usize, gagal: usize) -> String {
     format!("--- {} test: {} lulus, {} gagal ---", lulus + gagal, lulus, gagal)
 }
 
 /// Kalimat yang dipakai kalau sebuah berkas dijalankan dengan `--uji` tapi
 /// tidak berisi satu pun fungsi test.
 pub fn tidak_ada_uji() -> String {
-    "tidak ada fungsi test di berkas ini — namanya harus diawali `test_` atau `uji_`".to_string()
+    crate::terjemah::t("tidak ada fungsi test di berkas ini — namanya harus diawali `test_` atau `uji_`")
 }

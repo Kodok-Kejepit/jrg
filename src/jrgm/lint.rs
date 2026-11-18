@@ -35,7 +35,7 @@ pub(crate) fn cmd_lint(ketat: bool) -> Result<(), String> {
         total.galat += h.galat;
         total.peringatan += h.peringatan;
     }
-    eprintln!("[jrgm] lint: {} berkas, {} galat, {} peringatan", berkas.len(), total.galat, total.peringatan);
+    crate::ecetak_t!("[jrgm] lint: {} berkas, {} galat, {} peringatan", berkas.len(), total.galat, total.peringatan);
     if total.galat > 0 { return Err(String::new()); }
     if ketat && total.peringatan > 0 {
         return Err(format!("{} peringatan, dan `--ketat` memperlakukannya sebagai galat", total.peringatan));

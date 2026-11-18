@@ -183,6 +183,7 @@ impl Vm {
                     let mut calon: Vec<String> = crate::interpreter::calon_method_enum(tipe)
                         .iter().map(|s| s.to_string()).collect();
                     calon.extend(self.nama_metode_tipe(tipe));
+                    calon.extend(crate::opsi::method_milik(tipe));
                     let saran = crate::diag::saran_nama_terdekat(
                         name, calon.iter().map(|s| s.as_str()));
                     return Err(VmError::at(crate::interpreter::pesan_method_tak_ada(

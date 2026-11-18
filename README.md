@@ -118,7 +118,7 @@ nilai yang tampak masuk akal; dan program yang jalan di dua mesin harus mencetak
 
 ## Status
 
-Versi **0.6.0**. Interpreter dan VM menjalankan seluruh bahasa, `--jit` menjalankannya juga sambil mengompilasi bagian
+Versi **0.6.1**. Interpreter dan VM menjalankan seluruh bahasa, `--jit` menjalankannya juga sambil mengompilasi bagian
 yang panas ke kode mesin; backend LLVM menjalankan semua uji konformans tapi belum seluruh bahasa. Selama `0.x`,
 perubahan yang memutus program lama masih mungkin dan selalu dicatat di
 [CHANGELOG](CHANGELOG.md). Daftar yang belum jadi ada di [Yang belum jadi](https://jrg-lang.org/web_dokumentasi/batasan.html).

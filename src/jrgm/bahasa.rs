@@ -469,7 +469,7 @@ pub(crate) fn bangun(m: &Manifest, r: &Resep, akar: &Path) -> Result<(), String>
             if akar.join("src").is_dir() { "src/" } else { "akar proyek" }));
     }
     for t in &l { jalan_diam(&isi, r.nama, t, &format!("membangun {} ({})", m.name, r.nama))?; }
-    eprintln!("[jrgm] build {} selesai ({}, {} berkas sumber)", m.name, r.nama, isi.sumber.len());
+    crate::ecetak_t!("[jrgm] build {} selesai ({}, {} berkas sumber)", m.name, r.nama, isi.sumber.len());
     Ok(())
 }
 
@@ -520,13 +520,13 @@ pub(crate) fn uji(m: &Manifest, r: &Resep, akar: &Path, saring: Option<&str>) ->
         let mut ok = true;
         let (akhir, awal) = l.split_last().unwrap();
         for t in awal {
-            if let Err(e) = jalan_diam(&isi, r.nama, t, &format!("mengompilasi {}", f)) { eprintln!("{}", e); ok = false; break; }
+            if let Err(e) = jalan_diam(&isi, r.nama, t, &format!("mengompilasi {}", f)) { crate::ecetak_t!("{}", e); ok = false; break; }
         }
         if ok { ok = jalan_terbuka(&isi, r.nama, akhir, &[])? == 0; }
-        eprintln!("uji {} ... {}", f, if ok { "ok" } else { "GAGAL" });
+        crate::ecetak_t!("uji {} ... {}", f, if ok { "ok" } else { "GAGAL" });
         if ok { lulus += 1 } else { gagal.push(f.clone()) }
     }
-    eprintln!("\n[jrgm] {} lulus, {} gagal", lulus, gagal.len());
+    crate::ecetak_t!("\n[jrgm] {} lulus, {} gagal", lulus, gagal.len());
     if gagal.is_empty() { Ok(()) } else { Err(format!("uji yang gagal: {}", gagal.join(", "))) }
 }
 
@@ -536,7 +536,7 @@ pub(crate) fn rapikan(m: &Manifest, r: &Resep, akar: &Path, cek: bool) -> Result
     wajib(&l, m, "rapikan", "rapikan")?;
     let isi = Isian::proyek(m, r, akar);
     for t in &l { jalan_diam(&isi, r.nama, t, &format!("merapikan {}", m.name))?; }
-    eprintln!("[jrgm] {} berkas {} dirapikan", isi.sumber.len(), r.nama);
+    crate::ecetak_t!("[jrgm] {} berkas {} dirapikan", isi.sumber.len(), r.nama);
     Ok(())
 }
 
@@ -567,7 +567,7 @@ pub(crate) fn lint(m: &Manifest, r: &Resep, akar: &Path) -> Result<(), String> {
         let k = jalan_terbuka(&isi, r.nama, t, &[])?;
         if k != 0 { return Err(format!("jrgm: lint {} menemukan masalah (kode keluar {})", m.name, k)); }
     }
-    eprintln!("[jrgm] lint {} bersih ({}, {} berkas sumber)", m.name, r.nama, isi.sumber.len());
+    crate::ecetak_t!("[jrgm] lint {} bersih ({}, {} berkas sumber)", m.name, r.nama, isi.sumber.len());
     Ok(())
 }
 
@@ -627,17 +627,17 @@ pub(crate) fn awasi(m: &Manifest, r: &Resep, akar: &Path, args: &[String], bersi
             anak = Some(command(akar, &env, &argv).spawn().map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?);
             Ok(())
         })();
-        if let Err(e) = siap { eprintln!("{}", e); }
-        eprintln!("[jrgm] mengawasi {} berkas — simpan untuk menjalankan ulang, Ctrl-C untuk berhenti", tadi.len());
+        if let Err(e) = siap { crate::ecetak_t!("{}", e); }
+        crate::ecetak_t!("[jrgm] mengawasi {} berkas — simpan untuk menjalankan ulang, Ctrl-C untuk berhenti", tadi.len());
         loop {
             std::thread::sleep(Duration::from_millis(300));
             if let Some(a) = anak.as_mut() {
-                if let Ok(Some(st)) = a.try_wait() { eprintln!("[jrgm] program selesai ({})", status_teks(&st)); anak = None; }
+                if let Ok(Some(st)) = a.try_wait() { crate::ecetak_t!("[jrgm] program selesai ({})", status_teks(&st)); anak = None; }
             }
             if cap_waktu(akar, r) != tadi { break; }
         }
         if let Some(mut a) = anak { let _ = a.kill(); let _ = a.wait(); }
-        eprintln!("[jrgm] berkas berubah, menjalankan ulang");
+        crate::ecetak_t!("[jrgm] berkas berubah, menjalankan ulang");
     }
 }
 
@@ -647,11 +647,12 @@ pub(crate) fn rangka(nama: &str, r: &Resep) -> Result<(), String> {
         return Err("`jrgm new --bahasa lain` tidak punya rangka; buat proyeknya dengan bahasa yang ada \
                     lalu ganti langkahnya di [perintah]".into());
     }
+    super::rangka::periksa_nama_baru(nama)?;
     let akar = PathBuf::from(nama);
-    if akar.exists() { return Err(format!("jrgm: `{}` sudah ada", nama)); }
     let tulis = |p: &str, isi: &str| -> Result<(), String> {
         let f = akar.join(p);
         if let Some(d) = f.parent() { std::fs::create_dir_all(d).map_err(|e| format!("jrgm: {}", crate::host::galat_io(&e)))?; }
+        let isi = if crate::terjemah::aktif() == crate::terjemah::Bahasa::En { super::rangka_en::teks_lain(isi) } else { isi.to_string() };
         std::fs::write(&f, isi.replace("{nama}", nama)).map_err(|e| format!("jrgm: tidak bisa menulis {}: {}", p, crate::host::galat_io(&e)))
     };
     for (p, isi) in r.rangka { tulis(p, isi)?; }
@@ -673,7 +674,7 @@ pub(crate) fn rangka(nama: &str, r: &Resep) -> Result<(), String> {
         _ => "/target\n",
     };
     tulis(".gitignore", abaikan)?;
-    eprintln!("Created `{}` ({}) package — jalankan: cd {} && jrgm run", nama, r.nama, nama);
+    crate::ecetak_t!("Created `{}` ({}) package — jalankan: cd {} && jrgm run", nama, r.nama, nama);
     Ok(())
 }
 

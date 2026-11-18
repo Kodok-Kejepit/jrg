@@ -128,6 +128,49 @@ impl Codegen {
         Ok(true)
     }
 
+    /// Penanda pop berbagi untuk pernyataan ke-`i`, dan untuk penugasan `a = r[0]` sesudahnya kalau sisa blok cuma
+    /// membaca `r[1]`/`r.1`. Dipasang ulang tiap pernyataan, jadi blok bersarang tidak mewarisinya.
+    pub(crate) fn tandai_pop_pindah(&mut self, stmts: &[Stmt], i: usize, ekor: Option<&Expr>) {
+        self.pop_pindah = crate::interpreter::capture::pindah_sebelum_ditimpa(&stmts[i], stmts.get(i + 1));
+        let sebelum = if i > 0 { crate::interpreter::capture::pindah_sebelum_ditimpa(&stmts[i - 1], stmts.get(i)) } else { None };
+        self.pop_tugas_pindah = sebelum.and_then(|a| {
+            let Stmt::Let(l) = &stmts[i - 1] else { return None };
+            let Pattern::Ident { name: r, .. } = &l.pattern else { return None };
+            let Stmt::Assign(t) = &stmts[i] else { return None };
+            let elemen_nol = matches!(&t.values[0], Expr::Index { obj, idx, .. }
+                if matches!(&**obj, Expr::Ident(n, _) if n == r) && matches!(&**idx, Expr::Literal(LitKind::Int(0), _)));
+            (elemen_nol && super::codegen_lepas::cuma_bagian_kedua(&stmts[i + 1..], ekor, r)).then(|| (a, r.clone()))
+        });
+    }
+
+    /// `a = r[0]` yang ditandai `tandai_pop_pindah`: `r.0` (penyangga yang sudah berbagi) pindah ke `a` tanpa salinan.
+    pub(crate) fn coba_tugas_pop_pindah(&mut self, t: &AssignStmt) -> Result<bool, String> {
+        let Some((a, r)) = self.pop_tugas_pindah.take() else { return Ok(false) };
+        if !matches!(t.targets.as_slice(), [Expr::Ident(n, _)] if *n == a) { return Ok(false); }
+        let (Some((sa, ta)), Some((sr, tr))) = (self.lookup_local(&a), self.lookup_local(&r)) else { return Ok(false) };
+        let JrgType::Tuple(es) = &tr else { return Ok(false) };
+        if es.first() != Some(&ta) || !matches!(ta, JrgType::Slice(_)) || self.pinjaman.contains(&a) { return Ok(false); }
+        let p = self.fresh("poptp.");
+        self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 0", p, tr.llvm_ty(), sr));
+        let v = self.load_place(&p, &ta);
+        self.emit(format!("store {} {}, ptr {}", ta.llvm_ty(), v.text, sa));
+        Ok(true)
+    }
+
+    /// `let r = arr::pop(a)` yang `a`-nya ditimpa pernyataan berikutnya (`capture::pindah_sebelum_ditimpa`): sisa larik
+    /// di `r` berbagi penyangga `a` — dulu disalin tiap pop dan tak pernah dibebaskan (20 ribu pop habis 4 GB). Lokal
+    /// pinjaman tidak: sisanya akan jadi pemilik penyangga pemanggil.
+    pub(crate) fn coba_pop_berbagi(&mut self, l: &LetStmt, a: &str) -> Result<bool, String> {
+        if self.pinjaman.contains(a) || a == "self" || self.unit_alias("arr").is_some() || l.ty.is_some() { return Ok(false); }
+        let Some((slot, ty)) = self.lookup_local(a) else { return Ok(false) };
+        let JrgType::Slice(elem) = ty.clone() else { return Ok(false) };
+        let v = self.load_place(&slot, &ty);
+        let hasil = self.metode_pop_dgn(&v, &elem, l.span, true)?;
+        let t = hasil.ty.clone();
+        self.bind_pattern(&l.pattern, &hasil, &t)?;
+        Ok(true)
+    }
+
     /// `x = arr::pop(x)[0]` atas slice milik lokal/`var` modul: panjangnya diturunkan di tempat (kosong
     /// tetap kosong, seperti `arr::pop([])`) — dulu seluruh `x` disalin tiap kali, kuadrat.
     pub(crate) fn coba_pop_di_tempat(&mut self, a: &AssignStmt) -> Result<bool, String> {

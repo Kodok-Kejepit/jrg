@@ -87,11 +87,16 @@ fn sidik(s: &str) -> String {
     format!("{:016x}", h)
 }
 
+/// Cuma transport ini yang boleh dipakai git untuk dependensi. URL datang dari `jrgm.toml` proyek orang lain:
+/// `ext::` menjalankan perintah dan `<nama>::` memanggil `git-remote-<nama>` dari PATH, dan yang menutupnya cuma
+/// konfigurasi git pemakai (Fase AMAN-63).
+const PROTOKOL_GIT: &str = "https:http:ssh:git:file";
+
 /// Jalankan git; keluarannya (stdout) kalau sukses, kalimat galat bersebab kalau tidak.
 fn git(args: &[&str], dir: Option<&Path>) -> Result<String, String> {
     let mut c = Command::new("git");
     if let Some(d) = dir { c.current_dir(d); }
-    c.args(args).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+    c.args(args).env("GIT_TERMINAL_PROMPT", "0").env("GIT_ALLOW_PROTOCOL", PROTOKOL_GIT).stdin(Stdio::null());
     let out = c.output().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound {
         "dependensi git butuh `git`, dan perintahnya tidak ada\n  bantuan: `sudo apt install git` (Termux: `pkg install git`)".to_string()
     } else { format!("git: {}", crate::host::galat_io(&e)) })?;
@@ -108,7 +113,8 @@ fn cermin(url: &str, segarkan: bool) -> Result<PathBuf, String> {
         let _ = std::fs::remove_dir_all(&db);
         let judul = format!("mengambil {}", url);
         let mut c = Command::new("git");
-        c.args(["-c", "protocol.ext.allow=never", "clone", "--bare", "--quiet", "--", url, &db_s]).env("GIT_TERMINAL_PROMPT", "0").stdin(Stdio::null());
+        c.args(["-c", "protocol.ext.allow=never", "clone", "--bare", "--quiet", "--", url, &db_s]).env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_ALLOW_PROTOCOL", PROTOKOL_GIT).stdin(Stdio::null());
         let out = crate::putar::jalankan(&mut c, &judul).map_err(|e| format!("git: {}", crate::host::galat_io(&e)))?;
         if !out.status.success() {
             return Err(format!("tidak bisa mengambil `{}`: {}", url, String::from_utf8_lossy(&out.stderr).trim()));
@@ -203,7 +209,7 @@ pub(crate) fn cmd_update(nama: Option<&str>) -> Result<(), String> {
                 Some(l) if *l == baru => tetap += 1,
                 _ => {
                     maju += 1;
-                    println!("  {} {} -> {}", d.nama, lama.as_deref().map_or("(baru)", |l| &l[..12.min(l.len())]), &baru[..12.min(baru.len())]);
+                    crate::cetak_t!("  {} {} -> {}", d.nama, lama.as_deref().map_or("(baru)", |l| &l[..12.min(l.len())]), &baru[..12.min(baru.len())]);
                 }
             }
             tumpukan.push(dir_dep);
@@ -214,9 +220,9 @@ pub(crate) fn cmd_update(nama: Option<&str>) -> Result<(), String> {
     }
     kunci.simpan()?;
     if maju + tetap == 0 {
-        println!("tidak ada dependensi git; dependensi path selalu terbaca versi terakhirnya");
+        crate::cetak_t!("tidak ada dependensi git; dependensi path selalu terbaca versi terakhirnya");
     } else {
-        println!("{} dimajukan, {} sudah terbaru", maju, tetap);
+        crate::cetak_t!("{} dimajukan, {} sudah terbaru", maju, tetap);
     }
     Ok(())
 }
@@ -258,8 +264,8 @@ pub(crate) fn cmd_publish(dry_run: bool) -> Result<(), String> {
     if akar.join("tests").is_dir() { super::perintah::cmd_test(None, false, false, 120)?; }
     let commit = git(&["rev-parse", "HEAD"], Some(&akar))?;
     if dry_run {
-        println!("akan menandai commit {} sebagai `{}` dan mendorongnya ke {}", &commit[..12], tag, tujuan);
-        println!("(--dry-run: tidak ada yang ditulis)");
+        crate::cetak_t!("akan menandai commit {} sebagai `{}` dan mendorongnya ke {}", &commit[..12], tag, tujuan);
+        crate::cetak_t!("(--dry-run: tidak ada yang ditulis)");
         return Ok(());
     }
     git(&["tag", "-a", &tag, "-m", &format!("{} {}", m.name, m.version)], Some(&akar))?;
@@ -267,7 +273,7 @@ pub(crate) fn cmd_publish(dry_run: bool) -> Result<(), String> {
         let _ = git(&["tag", "-d", &tag], Some(&akar));
         return Err(format!("jrgm publish: {}\n  catatan: tag lokal `{}` dibuang lagi, jadi publish bisa diulang", e, tag));
     }
-    println!("{} {} diterbitkan ({} di {})", m.name, m.version, tag, tujuan);
-    println!("pemakai: jrgm add {} --git {} --version {}", m.name, tujuan, m.version);
+    crate::cetak_t!("{} {} diterbitkan ({} di {})", m.name, m.version, tag, tujuan);
+    crate::cetak_t!("pemakai: jrgm add {} --git {} --version {}", m.name, tujuan, m.version);
     Ok(())
 }

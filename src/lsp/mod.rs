@@ -74,7 +74,8 @@ pub fn run_server() {
         let msg = match parse_message(&body) {
             Some(m) => m,
             None    => {
-                eprintln!("[jrg-lsp] JSON parse error: {}", &body[..body.len().min(80)]);
+                // Dipotong per karakter: potongan byte 80 di tengah karakter UTF-8 dulu panik (AGI-20261118-08).
+                eprintln!("[jrg-lsp] JSON parse error: {}", body.chars().take(80).collect::<String>());
                 continue;
             }
         };
@@ -128,20 +129,24 @@ impl JsonValue {
 
 pub fn parse_message(s: &str) -> Option<JsonValue> {
     let s = s.trim();
-    parse_value(&mut s.chars().peekable())
+    parse_value(&mut s.chars().peekable(), 0)
 }
+
+/// Sarang paling dalam, seperti `json::parse`: 50 ribu `[` dulu menghabiskan stack thread utama (AGI-20261118-08).
+const MAKS_SARANG: usize = 256;
 
 type Chars<'a> = std::iter::Peekable<std::str::Chars<'a>>;
 
-fn parse_value(it: &mut Chars) -> Option<JsonValue> {
+fn parse_value(it: &mut Chars, dalam: usize) -> Option<JsonValue> {
     skip_ws(it);
     match it.peek()? {
-        '{' => parse_object(it),
-        '[' => parse_array(it),
+        '{' | '[' if dalam >= MAKS_SARANG => None,
+        '{' => parse_object(it, dalam + 1),
+        '[' => parse_array(it, dalam + 1),
         '"' => parse_string(it).map(JsonValue::Str),
-        't' => { consume_lit(it, "true");  Some(JsonValue::Bool(true))  }
-        'f' => { consume_lit(it, "false"); Some(JsonValue::Bool(false)) }
-        'n' => { consume_lit(it, "null");  Some(JsonValue::Null)        }
+        't' => { consume_lit(it, "true")?;  Some(JsonValue::Bool(true))  }
+        'f' => { consume_lit(it, "false")?; Some(JsonValue::Bool(false)) }
+        'n' => { consume_lit(it, "null")?;  Some(JsonValue::Null)        }
         '-' | '0'..='9' => parse_number(it).map(JsonValue::Number),
         _ => None,
     }
@@ -151,11 +156,13 @@ fn skip_ws(it: &mut Chars) {
     while it.peek().map(|c| c.is_whitespace()).unwrap_or(false) { it.next(); }
 }
 
-fn consume_lit(it: &mut Chars, s: &str) {
-    for _ in s.chars() { it.next(); }
+/// Literal diperiksa huruf demi huruf: dulu `txyz` terbaca `true`.
+fn consume_lit(it: &mut Chars, s: &str) -> Option<()> {
+    for c in s.chars() { if it.next()? != c { return None; } }
+    Some(())
 }
 
-fn parse_object(it: &mut Chars) -> Option<JsonValue> {
+fn parse_object(it: &mut Chars, dalam: usize) -> Option<JsonValue> {
     it.next(); // '{'
     let mut map = HashMap::new();
     skip_ws(it);
@@ -166,7 +173,7 @@ fn parse_object(it: &mut Chars) -> Option<JsonValue> {
         skip_ws(it);
         if it.next() != Some(':') { return None; } // ':'
         skip_ws(it);
-        let val = parse_value(it)?;
+        let val = parse_value(it, dalam)?;
         map.insert(key, val);
         skip_ws(it);
         match it.peek() {
@@ -178,14 +185,14 @@ fn parse_object(it: &mut Chars) -> Option<JsonValue> {
     Some(JsonValue::Object(map))
 }
 
-fn parse_array(it: &mut Chars) -> Option<JsonValue> {
+fn parse_array(it: &mut Chars, dalam: usize) -> Option<JsonValue> {
     it.next(); // '['
     let mut arr = Vec::new();
     skip_ws(it);
     if it.peek() == Some(&']') { it.next(); return Some(JsonValue::Array(arr)); }
     loop {
         skip_ws(it);
-        arr.push(parse_value(it)?);
+        arr.push(parse_value(it, dalam)?);
         skip_ws(it);
         match it.peek() {
             Some(&',') => { it.next(); }
@@ -259,4 +266,17 @@ pub fn json_obj(pairs: &[(&str, String)]) -> String {
 
 pub fn json_arr(items: &[String]) -> String {
     format!("[{}]", items.join(","))
+}
+
+#[cfg(test)]
+mod uji_json_rpc {
+    /// AGI-20261118-08: sarang JSON berbatas (dulu stack habis di 50 ribu `[`), literal diperiksa hurufnya.
+    #[test]
+    fn sarang_berbatas_dan_literal_diperiksa() {
+        assert!(super::parse_message(&"[".repeat(50_000)).is_none());
+        let dalam = format!("{}1{}", "[".repeat(200), "]".repeat(200));
+        assert!(super::parse_message(&dalam).is_some());
+        assert!(super::parse_message("{\"a\": txyz}").is_none());
+        assert!(super::parse_message("{\"a\": true, \"b\": [null, false]}").is_some());
+    }
 }

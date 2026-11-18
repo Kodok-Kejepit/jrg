@@ -2,11 +2,14 @@
 // Kelas celah pustaka tar bahasa lain ditutup sejak lahir: tar-slip, tautan, dua ukuran untuk satu entri, sparse.
 
 use std::collections::HashMap;
+#[cfg(not(unix))]
 use std::io::Write;
 use std::path::PathBuf;
 
 use crate::interpreter::{err_value, ok_value, Value};
-use crate::stdlib::zip::{periksa_nama, periksa_tabrakan, siapkan_folder, MAKS_ENTRI, MAKS_SATU, MAKS_TOTAL};
+use crate::stdlib::zip::{periksa_nama, periksa_tabrakan, MAKS_ENTRI, MAKS_SATU, MAKS_TOTAL};
+#[cfg(not(unix))]
+use crate::stdlib::zip::siapkan_folder;
 use crate::vm::vm::Vm;
 
 /// Kepala pax dan nama panjang GNU paling besar — isinya cuma nama dan beberapa angka.
@@ -318,25 +321,38 @@ fn t_extract(a: &[Value]) -> Result<Value, String> {
     if let Err(e) = std::fs::create_dir_all(&akar) {
         return Ok(err_value(format!("tar::extract '{}': {}", tujuan, crate::host::galat_io(&e))));
     }
+    // Sama dengan `zip::extract`: di Unix penulisan dianchor ke descriptor akar, tahan race symlink (AGI-20261118-01).
+    #[cfg(unix)]
+    let akar_fd = match crate::stdlib::zip::aman::buka_akar(&akar) {
+        Ok(f) => f,
+        Err(e) => return Ok(err_value(format!("tar::extract '{}': {}", tujuan, e))),
+    };
     let mut ditulis = 0i128;
     for e in &d {
         let bagian: Vec<&str> = e.nama.trim_end_matches('/').split('/').collect();
+        let nama_sampai = |i: usize| bagian[..=i].join("/");
         let hasil = (|| -> Result<(), String> {
-            if e.jenis == Jenis::Folder { siapkan_folder(&akar, &bagian)?; return Ok(()); }
-            let folder = siapkan_folder(&akar, &bagian[..bagian.len() - 1])?;
-            let akhir = folder.join(bagian[bagian.len() - 1]);
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&akhir)
-                .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)))?;
-            let tulis = f.write_all(&b[e.data..e.data + e.ukuran as usize])
-                .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)));
-            drop(f);
-            if let Err(g) = tulis { let _ = std::fs::remove_file(&akhir); return Err(g); }
             #[cfg(unix)]
-            if e.exe {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&akhir, std::fs::Permissions::from_mode(0o755));
+            {
+                use crate::stdlib::zip::aman;
+                use std::os::unix::io::AsRawFd;
+                let fd = akar_fd.as_raw_fd();
+                if e.jenis == Jenis::Folder { return aman::siapkan(fd, &bagian, nama_sampai); }
+                return aman::tulis(fd, &bagian, &b[e.data..e.data + e.ukuran as usize], e.exe, nama_sampai);
             }
-            Ok(())
+            #[cfg(not(unix))]
+            {
+                if e.jenis == Jenis::Folder { siapkan_folder(&akar, &bagian)?; return Ok(()); }
+                let folder = siapkan_folder(&akar, &bagian[..bagian.len() - 1])?;
+                let akhir = folder.join(bagian[bagian.len() - 1]);
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&akhir)
+                    .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)))?;
+                let tulis = f.write_all(&b[e.data..e.data + e.ukuran as usize])
+                    .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)));
+                drop(f);
+                if let Err(g) = tulis { let _ = std::fs::remove_file(&akhir); return Err(g); }
+                Ok(())
+            }
         })();
         match hasil {
             Ok(()) => if e.jenis == Jenis::Berkas { ditulis += 1 },

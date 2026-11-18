@@ -1,6 +1,11 @@
 //! REPL — mengetik JRG sepotong-sepotong dan langsung melihat jawabannya.
 
 
+/// Cetak pesan REPL ke stdout dalam bahasa pesan yang berlaku.
+macro_rules! pesan { ($($a:tt)*) => { println!("{}", crate::terjemah::t(&format!($($a)*))) } }
+/// Sama, ke stderr.
+macro_rules! pesan_galat { ($($a:tt)*) => { eprintln!("{}", crate::terjemah::t(&format!($($a)*))) } }
+
 use crate::interpreter::{Env, Interpreter, Value};
 use crate::lexer::{lex, SourceFile};
 use crate::parser::{parse, Item};
@@ -277,7 +282,7 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
     let arg = bagian.next().unwrap_or("").trim();
     match cmd {
         ":keluar" | ":q" => return false,
-        ":bantuan" | ":h" => println!("{}", BANTUAN),
+        ":bantuan" | ":h" => pesan!("{}", BANTUAN),
         ":riwayat" => {
             for (i, (r, _)) in s.riwayat.iter().enumerate() {
                 println!("{:>3}  {}", i + 1, r.replace('\n', "\n     "));
@@ -285,27 +290,27 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
         }
         ":hapus" => {
             *s = Sesi::baru();
-            println!("sesi dikosongkan");
+            pesan!("sesi dikosongkan");
         }
         ":tipe" => {
             if arg.is_empty() {
-                println!("pakai: :tipe <ekspresi>");
+                pesan!("pakai: :tipe <ekspresi>");
             } else {
                 match s.jalankan(&format!("typeof({})", arg)) {
                     Ok(Hasil::Nilai(v)) => println!("{}", v),
-                    Ok(_) => println!("(tidak menghasilkan nilai)"),
-                    Err(e) => println!("error: {}", e),
+                    Ok(_) => pesan!("(tidak menghasilkan nilai)"),
+                    Err(e) => pesan!("error: {}", e),
                 }
             }
         }
         ":cari" => {
             if arg.is_empty() {
-                println!("pakai: :cari <kata>");
+                pesan!("pakai: :cari <kata>");
                 return true;
             }
             let hasil = crate::bantu::cari(arg);
             if hasil.is_empty() {
-                println!("tidak ada builtin yang namanya memuat `{}`", arg);
+                pesan!("tidak ada builtin yang namanya memuat `{}`", arg);
             } else {
                 // Dibatasi supaya `:cari a` tidak menumpahkan ratusan baris
                 // dan mendorong prompt-nya keluar layar. Jumlah penuhnya tetap
@@ -315,9 +320,9 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
                     println!("  {}", h);
                 }
                 if n > 40 {
-                    println!("  … dan {} lagi (persempit katanya)", n - 40);
+                    pesan!("  … dan {} lagi (persempit katanya)", n - 40);
                 }
-                println!("{} nama", n);
+                pesan!("{} {}", n, crate::terjemah::pilih("nama", "names"));
             }
         }
         ":doc" => {
@@ -334,8 +339,8 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
                     let semua = crate::vm::daftar_builtin();
                     let rujuk: Vec<&str> = semua.iter().map(|s| s.as_str()).collect();
                     match crate::diag::saran_nama_terdekat(arg, rujuk.iter().copied()) {
-                        Some(m) => println!("`{}` tidak terdaftar — maksudnya `{}`?", arg, m),
-                        None => println!("`{}` tidak terdaftar. Coba `:cari {}`.", arg, arg),
+                        Some(m) => pesan!("`{}` tidak terdaftar — maksudnya `{}`?", arg, m),
+                        None => pesan!("`{}` tidak terdaftar. Coba `:cari {}`.", arg, arg),
                     }
                 }
             }
@@ -343,21 +348,21 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
         ":daftar" => {
             if arg.is_empty() {
                 for (ns, n) in crate::bantu::namespace_tersedia() {
-                    println!("  {:<10} {} fungsi", ns, n);
+                    pesan!("  {:<10} {} {}", ns, n, crate::terjemah::pilih("fungsi", "functions"));
                 }
             } else {
                 let isi = crate::bantu::daftar_namespace(arg);
                 if isi.is_empty() {
-                    println!("namespace `{}` tidak ada — `:daftar` tanpa argumen memberi daftarnya", arg);
+                    pesan!("namespace `{}` tidak ada — `:daftar` tanpa argumen memberi daftarnya", arg);
                 } else {
                     for i in &isi { println!("  {}", i); }
-                    println!("{} nama di `{}::`", isi.len(), arg);
+                    pesan!("{} nama di `{}::`", isi.len(), arg);
                 }
             }
         }
         ":simpan" => {
             if arg.is_empty() {
-                println!("pakai: :simpan <berkas.jrg>");
+                pesan!("pakai: :simpan <berkas.jrg>");
                 return true;
             }
             let isi = s.sebagai_program();
@@ -369,15 +374,15 @@ fn perintah(s: &mut Sesi, baris: &str) -> bool {
             };
             if let Some(g) = galat {
                 // Pesan parsernya diteruskan APA ADANYA.
-                println!("tidak ditulis: sesi ini tidak sah sebagai berkas — {}", g);
+                pesan!("tidak ditulis: sesi ini tidak sah sebagai berkas — {}", g);
                 return true;
             }
             match std::fs::write(arg, isi) {
-                Ok(()) => println!("ditulis ke {}", arg),
-                Err(e) => println!("gagal menulis {}: {}", arg, crate::host::galat_io(&e)),
+                Ok(()) => pesan!("ditulis ke {}", arg),
+                Err(e) => pesan!("gagal menulis {}: {}", arg, crate::host::galat_io(&e)),
             }
         }
-        lain => println!("perintah tidak dikenal: {} — coba :bantuan", lain),
+        lain => pesan!("perintah tidak dikenal: {} — coba :bantuan", lain),
     }
     true
 }
@@ -387,7 +392,7 @@ pub fn jalankan() -> i32 {
     let stdin = std::io::stdin();
     let interaktif = std::io::IsTerminal::is_terminal(&stdin);
     if interaktif {
-        println!("{}", SAPAAN);
+        pesan!("{}", SAPAAN);
     }
     let mut s = Sesi::baru();
     let mut buf = String::new();
@@ -408,7 +413,7 @@ pub fn jalankan() -> i32 {
                 match crate::host::baca_baris(&mut b) {
                     Ok(0) => return 0,
                     Ok(_) => {}
-                    Err(e) => { eprintln!("gagal membaca masukan: {}", e); return 1; }
+                    Err(e) => { pesan_galat!("gagal membaca masukan: {}", e); return 1; }
                 }
                 b
             }
@@ -461,7 +466,7 @@ pub fn jalankan() -> i32 {
                 // Satu baris untuk masukan satu baris: kutipan sumber dan caret cuma akan
                 // mengulang baris yang barusan diketik dan masih terlihat di layar, jadi ia …
                 if teks.contains('\n') {
-                    eprintln!("error: {}", e);
+                    pesan_galat!("error: {}", e);
                     for (i, l) in teks.lines().enumerate() {
                         eprintln!("{:>3} | {}", i + 1, l);
                     }

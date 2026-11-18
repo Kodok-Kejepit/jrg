@@ -1360,7 +1360,7 @@ fn efek_langkah(f: &VmFunction, ip: usize, s: &[Jenis]) -> Option<(usize, usize,
         | OpCode::MakeClosure => (0, 1, None),
         // Yang cuma mengintip puncak (`peek`) menggantinya dengan salinan milik VM.
         OpCode::StoreUpval | OpCode::DefGlobal | OpCode::DefVar | OpCode::CekChannelSelect
-        | OpCode::GagalCocok => (1, 1, None),
+        | OpCode::GagalCocok | OpCode::PeriksaIsi => (1, 1, None),
         OpCode::PopPeriksa | OpCode::ChanClose | OpCode::CekTutupSelect | OpCode::Panic => (1, 0, None),
         OpCode::SelectBegin | OpCode::SelectDefault => (0, 0, None),
         OpCode::ArrUbahMilik => (if matches!(a & 3, 0 | 3) { 2 } else { 1 }, 1, None),

@@ -699,7 +699,12 @@ impl Codegen {
     }
 
     /// `a.pop()` — `(sisa, Option<terakhir>)`.
-    pub fn metode_pop(&mut self, v: &Val, elem: &JrgType, span: Span)
+    pub fn metode_pop(&mut self, v: &Val, elem: &JrgType, span: Span) -> Result<Val, String> {
+        self.metode_pop_dgn(v, elem, span, false)
+    }
+
+    /// `berbagi`: sisa larik memakai penyangga `v` (pemanggil menjamin `v` tidak dipakai lagi).
+    pub fn metode_pop_dgn(&mut self, v: &Val, elem: &JrgType, span: Span, berbagi: bool)
         -> Result<Val, String>
     {
         let panjang = self.panjang_koleksi(v, span)?;
@@ -742,8 +747,15 @@ impl Codegen {
         self.start_block(l_end);
         let opt = self.load_place(&slot_opt, &opt_ty);
 
-        // Sisanya sebuah slice atas buffer SENDIRI.
-        let irisan = self.iris_awal(v, &Val { text: n_aman, ty: JrgType::I64 }, elem, span)?;
+        // Sisanya sebuah slice atas buffer SENDIRI, kecuali `berbagi`.
+        let irisan = if berbagi && matches!(v.ty, JrgType::Slice(_)) {
+            let t = v.ty.llvm_ty();
+            let r = self.fresh("popbg.");
+            self.emit(format!("{} = insertvalue {} {}, i64 {}, 1", r, t, v.text, n_aman));
+            Val { text: r, ty: v.ty.clone() }
+        } else {
+            self.iris_awal(v, &Val { text: n_aman, ty: JrgType::I64 }, elem, span)?
+        };
         let tup_ty = JrgType::Tuple(vec![irisan.ty.clone(), opt_ty.clone()]);
         let slot = self.alloca_typed("poptup.", &tup_ty);
         let p0 = self.fresh("poptf.");

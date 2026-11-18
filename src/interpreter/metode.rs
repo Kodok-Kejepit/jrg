@@ -850,7 +850,10 @@ impl Interpreter {
                     )
                 } else { unreachable!() }
             }
-            // Method not found
+            // Method not found — kecuali `Option`/`Result` yang method-nya ditulis di prelude JRG.
+            _ if crate::opsi::nama_fungsi(match &obj { Value::Enum { type_name, .. } => type_name, _ => "" }, method).is_some() => {
+                self.coba_opsi(&obj, method, &args).expect("nama prelude sudah diperiksa")
+            }
             _ => {
                 // Namespace tempat method penerima ini dicari, kalau ada.
                 // Dipakai untuk MENURUNKAN daftar calon saran nama dari
@@ -910,6 +913,7 @@ impl Interpreter {
                 if let Value::Enum { type_name, .. } = &obj {
                     calon.extend(crate::interpreter::calon_method_enum(type_name)
                         .iter().map(|s| s.to_string()));
+                    calon.extend(crate::opsi::method_milik(type_name));
                     if let Some(m) = self.methods.instance.get(type_name) {
                         calon.extend(m.keys().cloned());
                     }

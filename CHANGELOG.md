@@ -6,6 +6,115 @@ mungkin terjadi; semuanya dicatat di bagian **Memutus**.
 
 ## [Belum dirilis]
 
+## [0.6.1] — 2026-11-18
+
+### Memutus
+
+- **Pesan JRG tampil dalam bahasa Inggris secara bawaan** (galat, peringatan, laporan uji, REPL, `jrgm`, `--help`).
+  Bahasa Indonesia tetap ada: `jrgm language id` (untuk semua jalan berikutnya), `jrgc --bahasa id`, atau
+  `JRG_BAHASA=id`. Keluaran program tidak berubah; skrip yang membandingkan teks galat perlu memasang bahasanya.
+  Biner `--emit-llvm` memilih bahasa galatnya sendiri saat jalan dengan aturan yang sama, dan `jrgm new` menulis
+  kerangka proyek dalam bahasa pesan.
+- **`proses::jalankan` dan `proses::keluaran` menghentikan program yang keluarannya melewati 256 MiB** dan menjawab
+  `Err` (dulu `jrgc` mati kehabisan memori); penampung `proses::mulai` yang penuh menunggu dibaca.
+- **`jrgm new` menolak folder yang sudah ada** (dulu `src/main.jrg` di dalamnya ditimpa templat) **dan nama di luar
+  huruf, angka, `_`, `-`** (dengan jalur folder di depannya).
+- **Dependensi git `jrgm` cuma lewat https, http, ssh, git dan berkas lokal**: URL `<nama>::...` dulu memanggil
+  `git-remote-<nama>` dari PATH.
+- **`tok()` gagal berkalimat untuk baris masukan di atas 256 MiB** (dulu `jrgc` mati kehabisan memori), dan di
+  `--emit-llvm` menolak masukan bukan UTF-8 seperti dua mesin lain (dulu teks kosong).
+- **`dok::tcp_recv_all` berhenti di 256 MiB** dan menjawab `Err` (dulu menampung sampai memori habis).
+- **Klien `http::` menolak jawaban yang terpotong** (badan lebih pendek dari `Content-Length`) dan `Content-Length`
+  yang tidak sah atau berbeda-beda; byte sesudah badan dibuang. HTTPS menuntut paling sedikit TLS 1.2.
+- **`?` tidak lagi mengubah `None` menjadi `Err` (atau sebaliknya) diam-diam.** Di fungsi yang kembalian beranotasi
+  `Result`, `x?` atas `Option` kosong dulu pulang dengan `None` apa adanya; sekarang gagal dengan pesan yang menyebut
+  kedua jenisnya. Tulis `x.ok_or("alasan")?` untuk mengubahnya.
+- **`var x: T` tanpa nilai awal untuk struct, enum atau `Option` gagal kalau dibaca sebelum diisi** (dulu `nil` diam-diam).
+  Jenis yang punya nol jelas (`int`, `float`, `bool`, teks, larik, tuple) tetap berawal dari nolnya.
+
+### Baru
+
+- **`tangkap(f)` menangkap galat saat jalan** di tiga mesin: `Ok(nilai)`, atau `Err(Galat)` berisi `pesan`, `berkas`,
+  `baris`, `kolom`. Semua galat ditangkap (juga stack habis) kecuali `exit()` dan memori habis; `defer` jalan dulu;
+  `panik(g)` melempar ulang dengan tempat asalnya.
+
+- **Pembaca berkas bertahap `fs::open`, `fs::read_line`, `fs::read_chunk`, `fs::close`**: untuk berkas di atas 256 MiB
+  yang ditolak `fs::read`.
+- **`http::tenggat(detik)`**: tenggat total tiap permintaan klien HTTP (bawaan mati), supaya server yang menetes
+  jawabannya tidak bisa menahan pemanggil tanpa batas.
+- **`wasm::batas_langkah(h, n)`**: `wasm::panggil` berhenti dengan `Err` sesudah `n` instruksi (bawaan tanpa batas),
+  supaya modul yang tidak dipercaya tidak bisa menggantung pemanggilnya.
+- **`dok::password_needs_rehash(hash, putaran?)`**: `true` kalau hash sandi dibuat dengan putaran lain dari bawaan
+  (600000), supaya hash lama diringkas ulang sesudah login berhasil.
+- **Situs dokumentasi dua bahasa**: bahasa Inggris jadi bawaan, versi Indonesia di `/id/`, dengan tombol EN/ID di
+  tiap halaman. Halaman mesin menjelaskan mesin kelima (WebAssembly) yang sedang dibuat.
+- **Saluran WhatsApp resmi "JRG — Official Channel"** untuk kabar rilis dan komunitas, ditautkan dari tiap halaman
+  situs.
+- **Tiga puluh method baru atas `Option` dan `Result`**, jalan di semua mesin: `unwrap_or_else`, `ok_or`, `ok_or_else`,
+  `filter`, `or`, `or_else`, `and`, `xor`, `map_or`, `map_or_else`, `zip`, `flatten`, `transpose`, `is_some_and`,
+  `is_none_or`, `inspect`, `contains` dan kawan-kawannya.
+- **Kebuntuan dilaporkan, tidak lagi menggantung selamanya.** Kalau semua goroutine menunggu channel dan tidak ada yang
+  bisa maju, programnya berhenti dengan pesan di interpreter, `--vm`, `--jit` dan `--emit-llvm`. Program yang cuma
+  lambat (tidur, kerja lama) tidak dituduh buntu.
+- **Pesan untuk kebiasaan dari bahasa lain**: `elif`, `def`/`function`, `for (;;)` gaya C, `a ? b : c`, `if (x = 5)`,
+  `class`/`interface`, `public`/`private`, `===`/`!==` dan badan bergaya titik dua kini dijawab padanan JRG-nya, dan
+  satu salah tulis tetap satu galat (dulu bisa beruntun sampai lima).
+- **`--emit-llvm`**: potongan tuple dengan batas dari variabel (`t[i:]`), `len()` atas tuple, argumen bernama dan `...`
+  ke nilai fungsi yang baru diketahui saat jalan (`var f = ..`, parameter, `T::m`), dan `json::merge` antara struct
+  dan dict kini jalan; dulu ditolak saat kompilasi.
+- **`--emit-wasm` membawa builtin `jrgc`** (`crypto::`, `re::`, `url::` dan kawan-kawannya) ke WebAssembly.
+
+### Kinerja
+
+- **`--jit` lebih cepat lagi**: IR milik JRGJIT jadi bawaan, callee yang berhasil disisipkan ke pemanggilnya, dan
+  payload tuple serta struct dilipat tanpa dibangun. Jawabannya tetap sama persis dengan `--vm`.
+- **Biner `--emit-llvm` membebaskan memori sementara tiap putaran loop** yang tidak menyimpan nilainya ke luar putaran
+  (teks yang dirakit lalu cuma dibaca): `string_ops` 24 MB → 1,5 MB dan `mixed_report` 7,2 → 1,6 MB, setara C, tanpa
+  melambat. Sambil itu `let t = [a]` dan
+  `var n = m` atas larik bersarang juga tidak lagi menyalin sampai ada yang menulis.
+
+- **`var b = a` di biner `--emit-llvm` tidak lagi menyalin array**: dua nama berbagi isinya sampai salah satunya
+  menulis (16 ribu salinan 16 ribu elemen: 1,2 detik dan 1,9 GB, sekarang 4 ms).
+
+- **`--emit-llvm`: `match` atas bilangan bulat berlengan literal dan rentang jadi satu lompatan bertabel**, bukan
+  perbandingan berurutan — `match_dispatch` 710 → 580 ms, setara C.
+- **`--emit-llvm`: `str::char_at` di dalam loop tidak lagi memeriksa ulang jumlah karakter tiap putaran** —
+  `string_ops` 123 → 109 ms (C 100).
+- **`--emit-llvm`: `let r = arr::pop(a)` lalu `a = r[0]` tidak lagi menyalin larik** — 160 ribu pop 9 ms (dulu kehabisan
+  memori di 20 ribu).
+
+### Diperbaiki
+
+- **`--emit-llvm`: `str::join` atas larik bukan teks jalan** seperti `arr::join` (dulu ditolak saat kompilasi).
+- **Berkas statis `dok::serve` dialirkan dari disk**, tidak lagi dimuat utuh per permintaan. Dengan middleware
+  `sesudah` berkasnya tetap dimuat, di bawah anggaran 256 MiB (lewat: 503).
+
+### Keamanan
+
+- **`zip::extract` dan `tar::extract` tidak lagi bisa menulis ke luar folder tujuan lewat race tautan simbolik.** Pihak
+  lain yang bisa menulis ke folder tujuan dulu dapat mengganti direktori yang sudah diperiksa menjadi tautan di sela
+  pemeriksaan dan penulisan, lalu isi arsip ditulis mengikuti tautan itu ke luar. Di Linux dan macOS tiap bagian jalur
+  sekarang dibuka relatif ke folder tujuan tanpa mengikuti tautan, jadi tautan yang disisipkan kemudian ditolak.
+- **`--emit-llvm` tidak lagi membocorkan isi memori saat kunci dict campur tipe ditimpa nilai berjenis lain.** Dulu
+  `d["a"]`, `d.a` dan `dict::get` atas kunci yang tadinya angka lalu ditimpa teks atau larik membaca alamat memori atau
+  byte mentah sebagai nilai. Sekarang jenisnya diperiksa: jenis yang sama tetap terbaca, jenis lain gagal dengan pesan
+  yang menyebut jenis sebenarnya.
+- **Anotasi tipe dan pola yang bersarang sangat dalam ditolak, tidak lagi mematikan `jrgc`.** `[][]...int`,
+  `Option<Option<...>>` dan pola `(((...)))` puluhan ribu tingkat dulu menghabiskan stack pengurai; sekarang ditolak di
+  256 tingkat dengan pesan yang sama di semua mesin, seperti ekspresi.
+- **`wasm::muat` menolak berkas `.wasm` rusak dengan pesan**, tidak lagi berhenti mendadak.
+- **`wokwok::` tidak lagi berhenti mendadak pada beberapa bentuk array.** `where` dengan kondisi yang di-broadcast
+  membaca tiap operand di posisi yang benar (dulu berhenti, atau membaca posisi yang salah), `reverse` dan reduksi per
+  sumbu atas sumbu berukuran 0 menjawab array kosong, dan `reshape` menolak bentuk yang hasil kalinya meluap atau lebih
+  dari 32 dimensi.
+- **`jvm::` memeriksa kelas objek sebelum diserahkan ke Java.** Objek kelas lain ditolak dengan pesan, bukan jawaban
+  karangan atau JVM yang mati; objek yang dilepas `jvm::lepas` dari goroutine lain tidak lagi bisa terhapus selagi
+  sebuah panggilan memakainya.
+- **`jrgm lsp` tidak lagi mati oleh pesan rusak**: JSON yang bersarang sangat dalam ditolak, pratinjau galat tidak
+  memotong karakter UTF-8, dan literal seperti `true` diperiksa hurufnya.
+- **`http::hanya_publik(true)` menolak lebih banyak bentuk alamat internal IPv6**: alamat yang membawa IPv4 lewat SIIT
+  (`::ffff:0:a.b.c.d`), NAT64 lokal (`64:ff9b:1::/48`), Teredo (`2001::/32`), `2001:db8::/32` dan `100::/64`.
+
 ## [0.6.0] — 2026-11-16
 
 ### Memutus

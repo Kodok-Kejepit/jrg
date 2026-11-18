@@ -1,6 +1,246 @@
 // Tabel bersama `tests/llvm_parity.rs` dan `tests/jit_parity.rs`; disisipkan lewat `include!`.
 
 const PARITAS_LLVM: &[(&str, &str)] = &[
+    // Deteksi kebuntuan (2026-11-18) TIDAK boleh menuduh yang cuma lambat: tidur dan kerja lebih lama dari tenggangnya.
+    ("bukan kebuntuan: goroutine tidur lalu mengirim, Future yang lama", r#"package main
+pub fn main() {
+    let c = make_chan(int)
+    spawn { time::sleep(0.5)
+        c <- 7 }
+    wok(<-c)
+    let f = Future::new(|| { time::sleep(0.4)
+        return 5 })
+    wok(future::await(f))
+    let d = make_chan(int, 1)
+    spawn { time::sleep(0.3)
+        d <- 1 }
+    spawn { let x = <-d
+        wok("terima", x) }
+}
+"#),
+    // Telaah BELUM_DIDUKUNG_LLVM K4 (2026-11-18): `t[a:b]` berbatas variabel, hasilnya bertag — dulu ditolak saat kompilasi.
+    ("potong tuple berbatas variabel, juga negatif, kosong dan campur tipe", r#"package main
+pub fn main() {
+    let t = (1, "dua", 3.5, true)
+    for i in 0..5 { wok(t[i:]) }
+    var a = 1
+    var b = -1
+    wok(t[a:b], t[:a], t[b:], t[a:a], typeof(t[a:b]))
+    let u = (7, 8)
+    wok(u[a:] == (8,), u[0:a] == (7,))
+    wok(len(t[a:b]), len(t[a:a]), len(u[a:]), len(t[b:]))
+}
+"#),
+    // K6 (2026-11-18): `json::merge` antara struct dan dict yang muat di tata letak struct-nya.
+    ("json::merge struct dan dict", r#"package main
+struct P { pub x: int, pub y: int }
+pub fn main() {
+    let q = json::merge(dict { y: 2 }, P { x: 1, y: 0 })
+    wok(q.y, q, typeof(q))
+    wok(json::merge(P { x: 1, y: 0 }, dict { y: 5 }), json::merge(P { x: 1, y: 0 }, dict { x: 7, y: 5 }))
+    wok(json::merge(P { x: 1, y: 0 }, dict {}))
+}
+"#),
+    // K5 (2026-11-18): nilai fungsi yang baru diketahui saat jalan — urutan argumen bernama dari nama parameter
+    // fungsi DI BALIK nilainya, juga sesudah `var` ditugasi closure lain bernama parameter lain.
+    ("argumen bernama dan spread ke nilai fungsi dari var dan parameter", r#"package main
+fn bagi(a, b) { return a / b }
+fn pakai(g) { return g(a: 10, b: 2) }
+fn sebar(g, v) { return g(...v) }
+pub fn main() {
+    var tambah = |a, b| a + b
+    wok(tambah(...[1, 2]), tambah(b: 5, a: 1))
+    tambah = |b, a| a * 100 + b
+    wok(tambah(a: 1, b: 2), tambah(3, a: 4))
+    wok(pakai(|a, b| a / b), pakai(|b, a| a / b), pakai(bagi))
+    var xs = [7, 3]
+    wok(sebar(bagi, xs), sebar(|x, y| x - y, xs))
+    var m = T::m
+    wok(m(T { v: 1 }, k: 5), m(T { v: 4 }, 2))
+}
+struct T { v: int }
+impl T { fn m(self, k) { return self.v + k } }
+"#),
+    // Method `Option`/`Result` dari prelude JRG (`src/opsi.jrg`), dilayani interpreter, `--vm`, `--jit` dan LLVM.
+    ("prelude Option: cadangan, ganti, gabung", r#"package main
+fn dua() -> Option<int> { Some(2) }
+fn kosong() -> Option<int> { None }
+pub fn main() {
+    wok(kosong().unwrap_or_else(|| 5), dua().unwrap_or_else(|| 5))
+    wok(kosong().or(Some(9)), dua().or(Some(9)), kosong().or_else(|| Some(7)))
+    wok(dua().and(Some("a")), kosong().and(Some("a")))
+    wok(dua().xor(kosong()), dua().xor(Some(3)), kosong().xor(Some(3)))
+    wok(dua().ok_or("tidak ada"), kosong().ok_or("tidak ada"), kosong().ok_or_else(|| "telat"))
+    wok(dua().filter(|x| x % 2 == 0), Some(3).filter(|x| x % 2 == 0))
+    wok(Some(Some(4)).flatten(), dua().zip(Some("b")), dua().zip(kosong()))
+    wok(dua().map_or(0, |x| x * 10), kosong().map_or(0, |x| x * 10))
+    wok(kosong().map_or_else(|| -1, |x| x), dua().map_or_else(|| -1, |x| x + 1))
+    wok(dua().is_some_and(|x| x > 1), kosong().is_some_and(|x| x > 1), kosong().is_none_or(|x| x > 9))
+    wok(dua().inspect(|x| wok("lihat", x)), dua().contains(2), kosong().contains(2))
+}
+"#),
+    ("prelude Result: cadangan, ganti, predikat", r#"package main
+fn bagi(a: int, b: int) -> Result<int, string> { if b == 0 { return Err("nol") } Ok(a / b) }
+pub fn main() {
+    wok(bagi(6, 0).unwrap_or_else(|e| len(e)), bagi(6, 3).unwrap_or_else(|e| len(e)))
+    wok(bagi(1, 0).or(bagi(4, 2)), bagi(1, 0).or_else(|e| Ok(len(e))))
+    wok(bagi(4, 2).and(bagi(9, 3)), bagi(4, 0).and(bagi(9, 3)))
+    wok(bagi(4, 2).map_or(-1, |x| x * 100), bagi(4, 0).map_or(-1, |x| x * 100))
+    wok(bagi(4, 0).map_or_else(|e| e + "!", |x| str(x)))
+    wok(bagi(4, 2).is_ok_and(|x| x == 2), bagi(4, 0).is_err_and(|e| e == "nol"))
+    wok(bagi(4, 0).inspect_err(|e| wok("galat", e)), bagi(4, 0).expect_err("harus gagal"))
+    wok(bagi(4, 2).contains(2))
+}
+"#),
+    ("prelude: transpose dua arah, flatten Result", r#"package main
+pub fn main() {
+    let a: Option<Result<int, string>> = Some(Ok(1))
+    let b: Option<Result<int, string>> = Some(Err("x"))
+    let c: Option<Result<int, string>> = None
+    wok(a.transpose(), b.transpose(), c.transpose())
+    let d: Result<Option<int>, string> = Ok(Some(3))
+    let e: Result<Option<int>, string> = Ok(None)
+    wok(d.transpose(), e.transpose())
+    let f: Result<Result<int, string>, string> = Ok(Err("dalam"))
+    wok(f.flatten())
+}
+"#),
+    ("Result<_, Galat> sebagai anotasi, diteruskan lewat ?", r#"package main
+fn f(n: int) -> Result<int, Galat> { let v = tangkap(|| 10 / n)?; Ok(v * 2) }
+pub fn main() {
+    wok(f(5))
+    match f(0) { Ok(v) => wok(v), Err(g) => wok("gagal di baris", g.baris) }
+}
+"#),
+    // Ukuran enum = tipe yang dipancarkan (`{ i32, [n x i64] }`), bukan perataan muatannya: `Option<bool>`/`Option<i32>`
+    // dulu terhitung 8 byte padahal 16, jadi larik yang tumbuh menjawab nilai salah dan `<?>` dengan kode 0; di wasm32
+    // kotak `Option<P>` di dalam tuple ditulis melewati tempatnya dan tampilannya berulang sampai stack habis.
+    ("enum bermuatan kecil di larik dan kotak", r#"struct N { pub x: (bool, Option<N>) }
+fn main() {
+    var a = [Some(true), Some(false)]
+    for i in 0..5 { a = arr::push(a, Some(i % 2 == 0)) }
+    wok(a)
+    let n = N { x: (true, Some(N { x: (false, None) })) }
+    wok(n)
+    var b: []Option<i32> = []
+    for i in 0..4 { b = arr::push(b, Some(i as i32)) }
+    wok(b)
+}
+"#),
+    // `str::join` atas larik bukan teks jalan seperti `arr::join` (dulu ditolak LLVM saat kompilasi: literal `[1, 2]`
+    // dipaksa ke `[]string` sebelum sampai ke jalur lapis); larik kosong tetap bertipe teks.
+    ("str::join atas larik bukan teks", r#"package main
+pub fn main() {
+    wok(str::join([1, 2], "-"))
+    let a = [1.5, 2.25]
+    wok(str::join(a, "|"))
+    var b: []int = []
+    b = arr::push(b, 7)
+    wok(str::join(b, ","), str::join([], ","), str::join(["x", "y"], ""))
+    wok(str::join([[1], [2, 3]], ";"))
+}
+"#),
+    // #1053: pop berbagi penyangga hanya kalau `a` ditimpa tepat sesudahnya; `r[0]` yang dibaca lagi sesudah `a`
+    // diubah tetap nilai lama, parameter pinjaman tidak tersentuh, bentuk method `d.pop()` sama.
+    ("pop dua pernyataan berbagi penyangga", r#"package main
+fn kuras(a: []int) -> int {
+    var b = a
+    var n = 0
+    while len(b) > 0 {
+        let r = arr::pop(b)
+        b = r[0]
+        n += 1
+    }
+    return n
+}
+fn pinjam(a: []int) -> []int {
+    var x = a
+    let r = arr::pop(x)
+    x = r[0]
+    x = arr::push(x, 99)
+    return x
+}
+pub fn main() {
+    var a = [1, 2, 3, 4]
+    let r = arr::pop(a)
+    a = r[0]
+    a[0] = 9
+    wok(a, r[0], r[1])
+    var c = [5, 6, 7]
+    let q = arr::pop(c)
+    c = q[0]
+    c = arr::push(c, 70)
+    wok(c, q[1])
+    var d = [1, 2, 3]
+    let s = d.pop()
+    d = s[0]
+    d[1] = 42
+    wok(d, s[1])
+    let asli = [10, 20, 30]
+    wok(kuras(asli), asli)
+    wok(pinjam(asli), asli)
+    var e = [1, 2]
+    let t = arr::pop(e)
+    e = []
+    wok(e, t)
+}
+"#),
+    // `str::char_at` diturunkan di tempat dengan memo jumlah karakter per fungsi: teks Unicode, indeks negatif,
+    // teks yang berganti di tengah loop (memo lama tidak boleh terpakai untuk teks lain sepanjang sama).
+    ("str::char_at di tempat dengan memo lokal", r#"package main
+fn kode(s: string) -> int {
+    var n = 0
+    for i in 0..len(s) { n = n * 31 + (str::char_at(s, i) as int) % 1000 }
+    return n
+}
+pub fn main() {
+    wok(kode("halo"), kode("日本語"), kode("ab日c"))
+    var t = ["abc", "xyz", "日本x", "aé", "éa"]
+    var keluar = []
+    for _, s in t {
+        keluar = arr::push(keluar, str::char_at(s, 0))
+        keluar = arr::push(keluar, str::char_at(s, -1))
+        keluar = arr::push(keluar, str::char_at(s, len(s) - 1))
+    }
+    wok(keluar)
+    var s = "aaaa"
+    var acc = ""
+    for i in 0..4 {
+        acc = acc + str(str::char_at(s, i))
+        s = i % 2 == 0 $ "bbbb" : "日日日日"
+    }
+    wok(acc)
+}
+"#),
+    // `match` bulat berlengan literal/rentang diturunkan jadi satu `switch` LLVM: nilai kembar milik lengan pertama,
+    // rentang tertutup dan terbuka, alternatif, lengan yang tak pernah tercapai, literal negatif (jalur lama).
+    ("match bulat lewat switch", r#"package main
+fn k(v: int) -> int {
+    match v {
+        0 => 5,
+        1 | 2 | 3 => 7,
+        2 => 99,
+        4..=8 => 11,
+        9..12 => 12,
+        12 | 300 => 30,
+        _ => 13,
+    }
+}
+fn neg(v: int) -> int {
+    match v { -1 => 1, 0 => 2, 5 => 3, _ => 4 }
+}
+fn penuh(v: int) -> string {
+    match v { 0 => "nol", 1..=2 => "kecil" }
+}
+pub fn main() {
+    var keluar = []
+    for i in -2..15 { keluar = arr::push(keluar, k(i)) }
+    wok(keluar)
+    wok(k(300), k(299), k(9223372036854775807))
+    wok(neg(-1), neg(0), neg(5), neg(6))
+    wok(penuh(0), penuh(2))
+}
+"#),
     // Fase SEBAR-GENERIK: sebar di literal varian enum generik dari basis instans enum yang sama — dulu ditolak LLVM.
     ("sebar varian enum generik dari varian sama dan lain", r#"package main
 enum E<T> { V { a: T, b: int }, W { a: T } }
@@ -3218,6 +3458,10 @@ pub fn main() {
      "package main\npub fn main() { let d = {\"nama\": \"budi\", \"umur\": 17}\n wok(d[\"nama\"], d[\"umur\"], dict::len(d)) }"),
     ("any: dict campur lewat .kunci",
      "package main\npub fn main() { let d = {nama: \"siti\", umur: 20}\n wok(d[\"nama\"], d.umur) }"),
+    // AGI-20261118-02: kunci dict campur ditimpa nilai bertipe SAMA — dibaca lewat indeks, field, dan `dict::get`
+    // tetap benar (jalur `buka_terperiksa`, tag cocok). Yang ditimpa tipe LAIN ada di `BELUM_DIDUKUNG_LLVM`.
+    ("any: dict campur, kunci ditimpa tipe sama, baca tiga pintu",
+     "package main\npub fn main() { var d = {\"a\": 1, \"b\": \"teks\"}\n d[\"a\"] = 99\n d[\"b\"] = \"ganti\"\n wok(d[\"a\"], d[\"b\"], d.a, dict::get(d, \"a\")) }"),
     ("any: dict campur bersarang",
      "package main\npub fn main() { let b = {\"angka\": [1, 2], \"dalam\": {\"k\": \"v\"}}\n wok(b[\"angka\"][1], b[\"dalam\"][\"k\"]) }"),
     ("any: dict campur dengan nil",
@@ -4615,4 +4859,112 @@ pub fn main() {
      "fn cek(v) { if let Some(n) = v { return n } else { return 0 } }\nfn bagian(x) { match x { Some(a) | Ok(a) => a, n @ Some(_) => 1, _ => 9 } }\npub fn main() {\n  let d = {\"a\": 2}\n  wok(match d { Some(n) => n, _ => -1 })\n  let x = 5\n  wok(match x { Some(n) => n, Ok(k) => k, _ => -2 })\n  wok(match \"t\" { Some(n) => n + \"!\", _ => \"lain\" })\n  wok(match [1] { None => \"kosong\", _ => \"isi\" })\n  wok(cek(\"t\"), cek(3), bagian([1]))\n}\n"),
     ("json::keys/values/has/get atas struct membaca field-nya",
      "struct P { pub z: int, pub a: int, pub m: string = \"s\" }\npub fn main() {\n  let p = P { z: 1, a: 2 }\n  wok(json::keys(p), json::keys({\"b\": 1, \"a\": 2}))\n  wok(json::values(p), json::has(p, \"a\"), json::has(p, \"q\"), json::get(p, \"z\"), json::get(p, \"q\"))\n}\n"),
+    // Antrean B butir 4: `let b = a` atas lokal polos berbagi penyangga sampai salah satunya menulis — tiap bentuk
+    // tulis (indeks, `+=`, tumbuh, push, pop berbagi, `:=`, rantai, saling tukar) memisahkan dulu.
+    ("salin-saat-tulis lokal: tulisan lewat nama mana pun tidak terlihat nama lain", r#"package main
+fn ubah(x: []int) -> []int {
+    var y = x
+    y[0] = 100
+    return y
+}
+pub fn main() {
+    var a = [1, 2, 3]
+    var b = a
+    b[0] = 9
+    wok(a, b)
+    let c = a
+    a += [4]
+    wok(a, c)
+    var d = c
+    d = d + [5]
+    wok(c, d)
+    e := a
+    e[1] = 7
+    wok(a, e)
+    var f = a
+    f = arr::push(f, 6)
+    wok(a, f)
+    var g = a
+    let r = arr::pop(g)
+    g = r[0]
+    g += [8, 8]
+    wok(a, g)
+    var h = a
+    for i in 0..3 { h[i] = h[i] * 2 }
+    wok(a, h)
+    wok(ubah(a), a)
+    var k = a
+    var m = k
+    k = [0]
+    m[0] = -1
+    wok(a, k, m)
+    var p = a
+    a = p
+    p[0] = 55
+    wok(a, p)
+}
+"#),
+    ("tangkap: galat saat jalan jadi Err(Galat)", r#"package main
+fn dalam(n: int) -> int {
+    defer wok("defer dalam jalan")
+    let a = [1, 2]
+    return a[n]
+}
+fn bagi(a: int, b: int) -> int { return a / b }
+pub fn main() {
+    wok(tangkap(|| dalam(1)))
+    match tangkap(|| dalam(5)) {
+        Ok(v) => wok("tidak mungkin", v),
+        Err(g) => wok(g.pesan, str::ends_with(g.berkas, ".jrg"), g.baris, g.kolom),
+    }
+    match tangkap(|| panik("sengaja")) { Err(g) => wok(g.pesan, g.baris, g.kolom), Ok(_) => wok("?") }
+    match tangkap(|| { let d = {"a": 1}
+        d["b"] }) { Err(g) => wok(g.baris, g.pesan), Ok(_) => wok("?") }
+    match tangkap(|| bagi(1, 0)) { Err(g) => wok(g.baris), Ok(_) => wok("?") }
+    var n = 0
+    let r = tangkap(|| { n = 5
+        panik("x") })
+    wok(n, r.is_err())
+    match tangkap(|| tangkap(|| panik("dalam"))) { Ok(Err(g)) => wok("bersarang:", g.pesan), _ => wok("?") }
+    match tangkap(|| 40 + 2) { Ok(x) => wok(x), Err(_) => wok("?") }
+    let p = tangkap(|| assert_eq(1, 2))
+    wok(p.is_err(), typeof(p))
+}
+"#),
+    // Antrean B butir 4, langkah 2: lokal bersarang (`[][]int`, dict, tuple) dan literal berisi lokal (`[a, a]`,
+    // `(a, 5)`) berbagi penyangga; tulisan lewat nama mana pun memisahkan dulu, sampai ke dalam.
+    ("salin-saat-tulis bersarang dan lewat literal", r#"package main
+pub fn main() {
+    var a = [1, 2, 3]
+    let t = [a, a]
+    var u = t
+    u[0][1] = 99
+    wok(a, t, u)
+    var t2 = [a, [7]]
+    t2[1] += [8]
+    t2[0][0] = -1
+    wok(a, t2)
+    a[2] = 30
+    wok(a, t, t2)
+    var p = (a, 5)
+    p.0[0] = 11
+    wok(a, p)
+    var m: [][]int = [[1], [2]]
+    var n = m
+    n[0] += [5]
+    m[1][0] = 9
+    wok(m, n)
+    var d = {"x": [1]}
+    var e = d
+    e["x"] = [2]
+    d["y"] = [3]
+    wok(d, e)
+    var q = [a]
+    q = q + [[4]]
+    wok(a, q)
+    let r = [a]
+    a = [0]
+    wok(a, r)
+}
+"#),
 ];

@@ -60,6 +60,12 @@ pub fn register(vm: &mut Vm) {
         _ => Err("http::unduh(url: string, berkas: string)".to_string()),
     });
 
+    vm.def("http::tenggat", |a| match a {
+        [Int(n)] if (0..=86_400).contains(n) => { crate::dok::klien::atur_tenggat(*n as u64); Ok(Unit) }
+        [Int(n)] => Err(format!("http::tenggat: {} detik di luar 0..86400 (0 mematikannya)", n)),
+        [lain] => Err(format!("http::tenggat: butuh bilangan bulat detik, dapat `{}`", lain.type_name())),
+        _ => Err("http::tenggat(detik: int)".to_string()),
+    });
     vm.def("http::hanya_publik", |a| match a {
         [Bool(b)] => { crate::dok::klien::atur_hanya_publik(*b); Ok(Unit) }
         _ => Err("http::hanya_publik(aktif: bool)".to_string()),

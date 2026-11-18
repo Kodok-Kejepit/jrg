@@ -210,6 +210,14 @@ impl Compiler {
         }
     }
 
+    /// Bacaan `name` yang dideklarasikan `var name: T` tanpa nilai awal (tanpa nilai nol): diperiksa saat jalan.
+    pub(crate) fn periksa_isi(&mut self, name: &str) {
+        if super::compiler::belum_isi(name) {
+            let ni = self.chunk.add_name(name);
+            self.chunk.emit_arg(OpCode::PeriksaIsi, ni);
+        }
+    }
+
     /// Kompilasi sebuah ekspresi, sambil MENANDAI lokasinya.
     pub(crate) fn compile_expr(&mut self, expr: &Expr) -> CR<()> {
         let lama = self.chunk.masuk_span(expr.span());
@@ -234,14 +242,17 @@ impl Compiler {
                     if self.konsumsi_penerima.as_deref() == Some(name.as_str()) {
                         self.konsumsi_penerima = None;
                         self.chunk.emit_arg(OpCode::AmbilLokal, slot as u32);
+                        self.periksa_isi(name);
                         return Ok(());
                     }
                     self.chunk.emit_arg(OpCode::LoadLocal, slot as u32);
+                    self.periksa_isi(name);
                 } else if let Some(ui) = self.resolve_upval(name) {
                     // Binding dari scope pembuat closure. Dicek SETELAH
                     // lokal supaya `let` di dalam badan closure tetap
                     // membayangi tangkapan dengan nama sama.
                     self.chunk.emit_arg(OpCode::LoadUpval, ui as u32);
+                    self.periksa_isi(name);
                 } else if let Some(g) = self.resolve_saudara(name) {
                     // Fungsi bersarang: nama globalnya sudah di-mangle.
                     let ni = self.chunk.add_name(&g);
@@ -253,6 +264,7 @@ impl Compiler {
                     if jenis != Milik::Fungsi { self.catat_tingkat_atas(name); }
                     let ni = self.chunk.add_name(&global);
                     self.chunk.emit_arg(OpCode::LoadGlobal, ni);
+                    self.periksa_isi(name);
                 } else if let Some((enum_name, arity)) = enum_ctor_lookup(name) {
                     if arity == 0 {
                         // None, atau (kalau ada) variant unit lain yang
@@ -463,7 +475,7 @@ impl Compiler {
 
             // Index { obj, idx, span }
             Expr::Index { obj, idx, .. } => {
-                if let Some(slot) = self.lokal_berindeks_polos(obj, idx) {
+                if let Some(slot) = self.lokal_berindeks_polos(obj, idx).filter(|_| !matches!(&**obj, Expr::Ident(n, _) if super::compiler::belum_isi(n))) {
                     self.compile_expr(idx)?;
                     self.chunk.emit_arg(OpCode::IndeksLokal, slot as u32);
                     return Ok(());
@@ -718,9 +730,11 @@ impl Compiler {
             }
 
             // Semua ekspresi lain → emit Nil (placeholder)
-            Expr::Propagate { expr, .. } => {
+            // Arg = keluarga kembalian yang ditulis fungsi pemiliknya (`vm::sebar_lintas_keluarga`).
+            Expr::Propagate { expr, keluarga, .. } => {
                 self.compile_expr(expr)?;
-                self.chunk.emit(OpCode::Propagate);
+                let k = match keluarga { crate::parser::Keluarga::Bebas => 0, crate::parser::Keluarga::Option => 1, crate::parser::Keluarga::Result => 2 };
+                self.chunk.emit_arg(OpCode::Propagate, k);
             }
             Expr::Await { expr, .. } => {
                 self.compile_expr(expr)?;

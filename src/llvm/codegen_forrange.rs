@@ -165,7 +165,7 @@ impl Codegen {
             self.emit(format!("store %JrgAny {}, ptr {}", v.text, s));
         }
         self.push_loop(LoopCtx { label: label.clone(), continue_bb: pasca.clone(), break_bb: usai.clone() });
-        self.codegen_stmt_block(body)?;
+        self.badan_loop(body)?;
         self.pop_loop();
         self.pop_scope();
         if !self.is_terminated() { self.terminate(format!("br label %{}", pasca)); }
@@ -265,7 +265,7 @@ impl Codegen {
             self.emit(format!("store {} {}, ptr {}", ity.llvm_ty(), curv2.text, s));
         }
         self.push_loop(LoopCtx { label: label.clone(), continue_bb: post_lbl.clone(), break_bb: end_lbl.clone() });
-        self.codegen_stmt_block(body)?;
+        self.badan_loop(body)?;
         self.pop_loop();
         self.pop_scope();
         if !self.is_terminated() { self.terminate(format!("br label %{}", post_lbl)); }
@@ -325,7 +325,7 @@ impl Codegen {
             }
         }
         self.push_loop(LoopCtx { label: label.clone(), continue_bb: post_lbl.clone(), break_bb: end_lbl.clone() });
-        self.codegen_stmt_block(body)?;
+        self.badan_loop(body)?;
         self.pop_loop();
         self.pop_scope();
         if !self.is_terminated() { self.terminate(format!("br label %{}", post_lbl)); }
@@ -406,7 +406,7 @@ impl Codegen {
             }
         }
         self.push_loop(LoopCtx { label: label.clone(), continue_bb: post_lbl.clone(), break_bb: end_lbl.clone() });
-        self.codegen_stmt_block(body)?;
+        self.badan_loop(body)?;
         self.pop_loop();
         self.pop_scope();
         if !self.is_terminated() { self.terminate(format!("br label %{}", post_lbl)); }

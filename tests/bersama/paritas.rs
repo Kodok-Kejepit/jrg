@@ -2,6 +2,31 @@
 // dibaca `backend_parity.rs` dan `llvm_parity.rs` lewat `include!`, jadi satu tabel dua tes.
 
 const PARITAS: &[(&str, &str)] = &[
+    // Pembaca berkas bertahap: baris `\r\n`, baris akhir tanpa `\n`, potongan, `None`/kosong di ujung, galatnya.
+    ("fs::open dan pembaca bertahap", r#"package main
+pub fn main() {
+    let p = fs::join(fs::temp_dir(), "jrg-bertahap-" + str(proses::pid()) + ".txt")
+    fs::write(p, "satu\r\ndua\ntiga")
+    let n = fs::open(p)
+    var baris = []
+    loop {
+        match fs::read_line(n) { Some(b) => { baris = arr::push(baris, b) }, None => { break } }
+    }
+    wok(baris, fs::read_line(n))
+    fs::close(n)
+    let m = fs::open(p)
+    wok(fs::read_chunk(m, 4), fs::read_chunk(m, 100), fs::read_chunk(m, 3))
+    fs::close(m)
+    fs::delete(p)
+    wok(typeof(m))
+}
+"#),
+    // `dok::password_needs_rehash`: putaran tersimpan dibanding sasaran (bawaan 600000); hash rusak juga `true`.
+    ("dok::password_needs_rehash", "package main\npub fn main() {\n let lama = dok::password_hash(\"s\", 1000)\n \
+     wok(dok::password_needs_rehash(lama), dok::password_needs_rehash(lama, 1000), dok::password_needs_rehash(lama, 2000))\n \
+     wok(dok::password_needs_rehash(\"pbkdf2$sha256$600000$a$b\"), dok::password_needs_rehash(\"bukan-hash\"), \
+     dok::password_needs_rehash(\"pbkdf2$sha256$x$a$b\"))\n \
+     wok(dok::password_verify(\"s\", lama))\n}\n"),
     // Fase J4 (#976): `f.floor` atas bilangan dulu `<native fn>` di `--vm`; acuan dan LLVM membacanya sebagai nilai.
     ("method math:: atas bilangan tanpa kurung", "package main\npub fn main() { let f = 2.5\n let i = -3\n wok(f.floor, i.abs, f.round, (1.0).is_finite)\n wok(f.floor + 1.0) }"),
     // Fase REGEX-LINEAR (#841): `^.*x$` atas `abx` dulu `false` di dua mesin; `a+?` dibaca rakus.
@@ -2774,4 +2799,40 @@ pub fn main() {
      "pub fn main() {\n  let a = make_chan(int, 1)\n  let b = make_chan(int, 1)\n  let c = make_chan(int, 1)\n  var n = [0, 0, 0, 0]\n  for i in 0..600 {\n    a <- 1\n    b <- 2\n    select {\n      case x := <-a: { n[0] += 1\n        <-b }\n      case y := <-b: { n[1] += 1\n        <-a }\n      case c <- 9: { n[2] += 1\n        <-c\n        <-a\n        <-b }\n      default: { n[3] += 1 }\n    }\n  }\n  wok(\"tiap lengan siap terpilih 100+ dari 600, default tak pernah:\", n[0] > 100 && n[1] > 100 && n[2] > 100 && n[3] == 0)\n  var s = 0\n  for i in 0..10 {\n    a <- i\n    select {\n      case x := <-a: { if x == 5 { break }\n        s += x }\n      default: { s += 1000 }\n    }\n  }\n  wok(\"break di lengan:\", s)\n}\n"),
     ("select: ekspresi kanal dievaluasi sekali walau select menunggu",
      "package main\nvar N = 0\nfn kanal(c) { N = N + 1\n  return c }\npub fn main() {\n  let a = make_chan(int)\n  spawn { time::sleep_ms(50)\n    a <- 1 }\n  select { case x := <-kanal(a): { wok(\"dapat\", x) } }\n  wok(\"ekspresi kanal dievaluasi\", N == 1 $ \"sekali\" : \"berulang\")\n}\n"),
+    // `tangkap(f)` (surat 11.30): galat saat jalan jadi `Err(Galat)`, `defer` dulu, tulisan sebelum galat tetap,
+    // bersarang, stack habis juga tertangkap.
+    ("tangkap: galat saat jalan jadi Err(Galat)", r#"package main
+fn dalam(n: int) -> int {
+    defer wok("defer dalam jalan")
+    let a = [1, 2]
+    return a[n]
+}
+fn bagi(a: int, b: int) -> int { return a / b }
+pub fn main() {
+    wok(tangkap(|| dalam(1)))
+    match tangkap(|| dalam(5)) {
+        Ok(v) => wok("tidak mungkin", v),
+        Err(g) => wok(g.pesan, str::ends_with(g.berkas, ".jrg"), g.baris, g.kolom),
+    }
+    match tangkap(|| panik("sengaja")) { Err(g) => wok(g.pesan, g.baris, g.kolom), Ok(_) => wok("?") }
+    match tangkap(|| { let d = {"a": 1}
+        d["b"] }) { Err(g) => wok(g.baris, g.pesan), Ok(_) => wok("?") }
+    match tangkap(|| bagi(1, 0)) { Err(g) => wok(g.baris), Ok(_) => wok("?") }
+    var n = 0
+    let r = tangkap(|| { n = 5
+        panik("x") })
+    wok(n, r.is_err())
+    match tangkap(|| tangkap(|| panik("dalam"))) { Ok(Err(g)) => wok("bersarang:", g.pesan), _ => wok("?") }
+    match tangkap(|| 40 + 2) { Ok(x) => wok(x), Err(_) => wok("?") }
+    let p = tangkap(|| assert_eq(1, 2))
+    wok(p.is_err(), typeof(p))
+}
+"#),
+    ("tangkap: stack habis tertangkap dan berlokasi", r#"package main
+fn turun(n: int) -> int { return turun(n + 1) + 1 }
+pub fn main() {
+    match tangkap(|| turun(0)) { Err(g) => wok("stack habis tertangkap, berlokasi:", g.baris > 0), Ok(_) => wok("?") }
+    wok("lanjut")
+}
+"#),
 ];

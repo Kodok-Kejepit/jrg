@@ -4,6 +4,9 @@
 extern crate alloc;
 // Satu salinan tiap modul: biner ini memakai crate lib, jadi `static` (terminal, antrean
 // masukan, hitungan ulangan diag) tidak terbelah dua dan kompilatornya dibangun sekali.
+/// `eprintln!` dalam bahasa pesan yang berlaku.
+macro_rules! epesan { ($($a:tt)*) => { eprintln!("{}", jrgc::terjemah::t(&format!($($a)*))) } }
+
 use jrgc::lexer;
 use jrgc::diag;
 use jrgc::host;
@@ -87,6 +90,10 @@ struct Cli {
     #[arg(long = "emit-llvm")]
     emit_llvm: bool,
 
+    /// Mesin kelima: kompilasi jadi WebAssembly (WASI) lewat backend LLVM, lalu jalankan lewat node
+    #[arg(long = "emit-wasm", conflicts_with_all = ["emit_llvm", "jit", "apk"])]
+    emit_wasm: bool,
+
     /// Bungkus jadi aplikasi Android (lewat backend LLVM)
     #[arg(long = "apk", value_name = "BERKAS")]
     apk: Option<PathBuf>,
@@ -141,7 +148,15 @@ struct Cli {
     #[arg(long = "daftar-builtin", help_heading = "Penemuan")]
     daftar_builtin: bool,
 
+    /// (alat pengembang) terjemahkan tiap baris stdin ke bahasa Inggris lewat tabel pesan, satu baris JSON per baris
+    #[arg(long = "terjemah-baris", hide = true)]
+    terjemah_baris: bool,
+
     // ── Diagnostik ──────────────────────────────────────────────────────
+    /// Bahasa pesan untuk jalan ini: en|id (yang tetap: `jrgm language en|id`, atau JRG_BAHASA)
+    #[arg(long = "bahasa", alias = "language", value_name = "KODE", help_heading = "Diagnostik")]
+    bahasa: Option<String>,
+
     /// Nada pesan galat: sopan|galak|judes|hangat|cool|lawak
     #[arg(long = "nada", value_name = "NAMA", help_heading = "Diagnostik")]
     nada: Option<String>,
@@ -309,7 +324,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
     }
 
     if cli.verbose {
-        eprintln!("[jrgc] lexing: {}", nama);
+        jrgc::ecetak_t!("[jrgc] lexing: {}", nama);
     }
 
     // 2. Lexing
@@ -321,8 +336,8 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
     }
 
     if cli.verbose {
-        eprintln!("[jrgc] {} token(s) diproduksi", tokens.len());
-        eprintln!("[jrgc] parsing: {}", nama);
+        jrgc::ecetak_t!("[jrgc] {} token(s) diproduksi", tokens.len());
+        jrgc::ecetak_t!("[jrgc] parsing: {}", nama);
     }
 
     // 3. Parsing
@@ -350,7 +365,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
         return Err(Vec::new());
     }
 
-    if cli.emit_llvm || cli.apk.is_some() {
+    if cli.emit_llvm || cli.apk.is_some() || cli.emit_wasm {
         // `--uji`: `main` buatan yang menjalankan tiap tes (`llvm::uji`); tanpa tes, kalimat yang sama dengan acuan.
         let uji_ast;
         let ast = if cli.uji {
@@ -364,7 +379,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
         let effective_full_buffered_stdout = cli.full_buffered_stdout || cli.full_power;
         let effective_opt_level = if cli.full_power { 3 } else { cli.opt_level };
         if cli.verbose {
-            eprintln!("[jrgc] backend LLVM aktif — lowering AST ke LLVM IR...");
+            jrgc::ecetak_t!("[jrgc] backend LLVM aktif — lowering AST ke LLVM IR...");
         }
         let mut jalur_impor = vec![dir.clone()];
         jalur_impor.extend(cli.include_dirs.iter().cloned());
@@ -373,6 +388,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
             llvm::codegen::CodegenOptions {
                 fast_math: effective_fast_math,
                 full_buffered_stdout: effective_full_buffered_stdout,
+                ptr32: cli.emit_wasm,
             },
             &jalur_impor,
         ).map_err(|errs| {
@@ -386,6 +402,20 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
         })?;
         let ir = llvm::isi_situs(ir, &mut source_map);
 
+        if cli.emit_wasm {
+            // `-o` bawaan (`a.out`) jadi `<nama-sumber>.wasm` di folder kerja.
+            let berkas = if cli.output == std::path::Path::new("a.out") {
+                PathBuf::from(std::path::Path::new(nama).file_stem().unwrap_or_default()).with_extension("wasm")
+            } else { cli.output.clone() };
+            jrgc::wasm::kompilasi(&ir, &berkas, cli.verbose).map_err(|e| vec![format!("jrgc: --emit-wasm: {}", e)])?;
+            if cli.no_run {
+                jrgc::ecetak_t!("[jrgc] wasm: {} (jalankan: node {})", berkas.display(), jrgc::wasm::pemuat_untuk(&berkas).display());
+                return Ok(());
+            }
+            let kode = jrgc::wasm::jalankan(&berkas, &[]).map_err(|e| vec![format!("jrgc: {}", e)])?;
+            keluar(kode);
+        }
+
         if let Some(apk) = &cli.apk {
             let opsi = llvm::apk::OpsiApk {
                 abi: cli.apk_abi.split(',').map(|a| a.trim().to_string()).filter(|a| !a.is_empty()).collect(),
@@ -396,7 +426,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
             };
             let hasil = llvm::apk::bangun(Some(&ir), std::path::Path::new(nama), apk, &opsi, cli.verbose)
                 .map_err(|e| vec![format!("jrgc: --apk: {}", e)])?;
-            eprintln!("[jrgc] APK: {}", hasil.display());
+            jrgc::ecetak_t!("[jrgc] APK: {}", hasil.display());
             return Ok(());
         }
 
@@ -404,12 +434,12 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
         if is_ll_text {
             std::fs::write(&cli.output, &ir)
                 .map_err(|e| vec![format!("jrgc: gagal menulis {}: {}", cli.output.display(), crate::host::galat_io(&e))])?;
-            eprintln!("[jrgc] LLVM IR ditulis ke {}", cli.output.display());
+            jrgc::ecetak_t!("[jrgc] LLVM IR ditulis ke {}", cli.output.display());
             return Ok(());
         }
 
         if cli.verbose {
-            eprintln!("[jrgc] LLVM IR OK ({} baris) — mengompilasi ke native via clang -O{}...",
+            jrgc::ecetak_t!("[jrgc] LLVM IR OK ({} baris) — mengompilasi ke native via clang -O{}...",
                 ir.lines().count(), effective_opt_level);
         }
         let pgo = if let Some(path) = &cli.pgo_generate {
@@ -448,12 +478,12 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
             .map_err(|e| vec![format!("jrgc: {}", e)])?;
 
         if cli.no_run {
-            eprintln!("[jrgc] native binary: {}", binary.display());
+            jrgc::ecetak_t!("[jrgc] native binary: {}", binary.display());
             return Ok(());
         }
 
         if cli.verbose {
-            eprintln!("[jrgc] menjalankan {}...", binary.display());
+            jrgc::ecetak_t!("[jrgc] menjalankan {}...", binary.display());
         }
         let run_path = if binary.is_absolute() {
             binary.clone()
@@ -461,6 +491,8 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
             std::env::current_dir().map(|d| d.join(&binary)).unwrap_or(binary.clone())
         };
         let mut perintah = process::Command::new(&run_path);
+        // Biner memilih bahasa galatnya sendiri; yang dijalankan `jrgc` mengikuti pilihan jalan ini (`--bahasa`).
+        perintah.env("JRG_BAHASA", jrgc::terjemah::aktif().kode());
         let batas = batas_memori_anak(&mut perintah).map_err(|e| vec![e])?;
         let status = perintah.status();
         match status {
@@ -471,16 +503,16 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
 
     if cli.no_run {
         if cli.verbose {
-            eprintln!("[jrgc] syntax OK ({} top-level items) — --no-run: tidak dieksekusi",
+            jrgc::ecetak_t!("[jrgc] syntax OK ({} top-level items) — --no-run: tidak dieksekusi",
                 ast.items.len());
         } else {
-            eprintln!("[jrgc] syntax OK");
+            jrgc::ecetak_t!("[jrgc] syntax OK");
         }
         return Ok(());
     }
 
     if cli.verbose {
-        eprintln!("[jrgc] {} top-level items — memulai {}...",
+        jrgc::ecetak_t!("[jrgc] {} top-level items — memulai {}...",
             ast.items.len(),
             if cli.use_vm { "Bytecode VM" } else { "interpreter" });
     }
@@ -532,7 +564,7 @@ fn run_sumber(nama: &str, src: String, dir: PathBuf, cli: &Cli) -> Result<(), Ve
     })?;
 
     if cli.verbose {
-        eprintln!("[jrgc] eksekusi selesai: {}", nama);
+        jrgc::ecetak_t!("[jrgc] eksekusi selesai: {}", nama);
     }
 
     Ok(())
@@ -596,7 +628,7 @@ fn kode_anak_native(s: process::ExitStatus, batas_mib: Option<u64>) -> i32 {
                     Some(m) => format!("kemungkinan batas memori JRGC_BATAS_MEMORI ({} MiB) terlewati; selain itu, ", m),
                     None => String::new(),
                 };
-                eprintln!("error: program native berhenti oleh sinyal {} ({}) tanpa sempat melapor\n  \
+                epesan!("error: program native berhenti oleh sinyal {} ({}) tanpa sempat melapor\n  \
                     = catatan: {}kalau tidak lewat kode C (`extern`), ini cacat di backend LLVM; coba jalankan dengan --vm",
                     sig, nama, sebab);
             }
@@ -634,7 +666,7 @@ fn utama() {
         jrgm::utama(argumen);
         keluar(0);
     }
-    let mut cli = Cli::parse();
+    let mut cli: Cli = jrgc::terjemah::urai_cli(std::env::args().collect());
     if cli.jit {
         cli.use_vm = true;
         jrgc::jit::aktifkan();
@@ -642,6 +674,17 @@ fn utama() {
     if let Some(p) = &cli.profile_json {
         cli.profile = true;
         profiler::tulis_json_ke(p.clone());
+    }
+
+    // Bahasa pesan juga, sebelum apa pun sempat melapor.
+    if let Some(b) = &cli.bahasa {
+        match jrgc::terjemah::Bahasa::dari_nama(b) {
+            Some(b) => jrgc::terjemah::set(b),
+            None => {
+                epesan!("error: bahasa `{}` tidak ada. yang tersedia: en, id", b);
+                keluar(2);
+            }
+        }
     }
 
     // Nada diagnostik disetel sekali, sebelum apa pun sempat melapor.
@@ -653,7 +696,7 @@ fn utama() {
             // Diam-diam jatuh berarti seseorang menulis `--nada=hanget`
             // lalu heran kenapa tidak ada bedanya.
             None => {
-                eprintln!(
+                epesan!(
                     "error: nada `{}` tidak ada. yang tersedia: {}",
                     n, diag::Nada::SEMUA.join(", ")
                 );
@@ -666,6 +709,16 @@ fn utama() {
         diag::set_nada(diag::Nada::Galak);
     }
 
+    if cli.terjemah_baris {
+        use std::io::BufRead;
+        for l in std::io::stdin().lock().lines().map_while(Result::ok) {
+            // Masukannya JSON string per baris, supaya baris baru di dalam pesan ikut utuh.
+            let teks = match jrgc::json_inti::urai(&l) { Ok(jrgc::json_inti::Json::Str(s)) => s, _ => l };
+            println!("{}", jrgc::json_inti::sandi_teks(&jrgc::terjemah::terjemah_ke_en(&teks)));
+        }
+        return;
+    }
+
     // ── Daftar builtin ──────────────────────────────────────────────────────
     if cli.daftar_builtin {
         for n in vm::daftar_builtin() { println!("{}", n); }
@@ -676,7 +729,7 @@ fn utama() {
     if let Some(kata) = &cli.cari {
         let hasil = jrgc::bantu::cari(kata);
         if hasil.is_empty() {
-            eprintln!("tidak ada builtin yang namanya memuat `{}`", kata);
+            epesan!("tidak ada builtin yang namanya memuat `{}`", kata);
             keluar(1);
         }
         for h in &hasil { println!("{}", h); }
@@ -689,8 +742,8 @@ fn utama() {
                 let semua = vm::daftar_builtin();
                 let rujuk: Vec<&str> = semua.iter().map(|s| s.as_str()).collect();
                 match diag::saran_nama_terdekat(nama, rujuk.iter().copied()) {
-                    Some(m) => eprintln!("`{}` tidak terdaftar — maksudnya `{}`?", nama, m),
-                    None => eprintln!("`{}` tidak terdaftar. Coba `jrgc --cari {}`.", nama, nama),
+                    Some(m) => epesan!("`{}` tidak terdaftar — maksudnya `{}`?", nama, m),
+                    None => epesan!("`{}` tidak terdaftar. Coba `jrgc --cari {}`.", nama, nama),
                 }
                 keluar(1);
             }
@@ -713,7 +766,7 @@ fn utama() {
         match run_sumber(&utama, editor_src::utama().to_string(), PathBuf::from(module::AKAR_EDITOR), &cli) {
             Ok(()) => return,
             Err(errs) => {
-                for e in &errs { eprintln!("error: {}", e); }
+                for e in &errs { epesan!("error: {}", e); }
                 keluar(1);
             }
         }
@@ -733,13 +786,13 @@ fn utama() {
     // ── Inisialisasi profiler ───────────────────────────────────────────────
     if cli.profile {
         profiler::init(true);
-        eprintln!("[jrgc] profiler aktif\n");
+        jrgc::ecetak_t!("[jrgc] profiler aktif\n");
     }
 
     // ── Hot reload mode ─────────────────────────────────────────────────────
     if cli.watch {
         if cli.sources.len() != 1 {
-            eprintln!("error: --watch hanya mendukung satu source file");
+            epesan!("error: --watch hanya mendukung satu source file");
             keluar(1);
         }
         let entry = cli.sources[0].clone();
@@ -766,7 +819,7 @@ fn utama() {
         match run_file(source, &cli) {
             Ok(()) => {}
             Err(errors) => {
-                for e in &errors { eprintln!("error: {}", e); }
+                for e in &errors { epesan!("error: {}", e); }
                 had_error = true;
             }
         }

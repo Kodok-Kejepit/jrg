@@ -296,6 +296,8 @@ pub fn baca_modul(b: &[u8]) -> Result<Modul, String> {
                         for _ in 0..ulang { lokal.push(t); }
                     }
                     if sampai > b.len() { return Err("badan fungsi terpotong".to_string()); }
+                    // Deklarasi lokal yang melewati ukuran badannya: dulu `b[r.i..sampai]` panik (AGI-20261118-05).
+                    if r.i > sampai { return Err("deklarasi lokal sebuah fungsi melewati ukuran badannya".to_string()); }
                     let kode = b[r.i..sampai].to_vec();
                     r.i = sampai;
                     m.fungsi.push(Fungsi { tipe: idx_tipe_fungsi[k], lokal, kode });
@@ -369,6 +371,10 @@ pub struct Mesin {
     pub modul: Modul,
     pub memori: Vec<u8>,
     pub global: Vec<Nilai>,
+    /// Instruksi paling banyak per `wasm::panggil` (`wasm::batas_langkah`); 0 = tanpa batas. Tanpa ini modul berisi
+    /// `(loop br 0)` menggantung pemanggilnya, jadi `wasm::` tidak bisa dipakai sebagai kotak pasir (antrean B).
+    pub batas_langkah: u64,
+    sisa_langkah: u64,
 }
 
 #[derive(Clone, Copy)]
@@ -395,7 +401,7 @@ impl Mesin {
             memori[a..a + isi.len()].copy_from_slice(isi);
         }
         let global = modul.global.iter().map(|(_, _, v)| *v).collect();
-        Ok(Mesin { modul, memori, global })
+        Ok(Mesin { modul, memori, global, batas_langkah: 0, sisa_langkah: 0 })
     }
 
     pub fn tipe_ekspor(&self, nama: &str) -> Option<&TipeFungsi> {
@@ -410,6 +416,7 @@ impl Mesin {
             format!("modul wasm tidak mengekspor fungsi `{}` — yang ada: {}",
                     nama, if ada.is_empty() { "(tidak ada)".to_string() } else { ada.join(", ") })
         })?;
+        self.sisa_langkah = self.batas_langkah;
         self.panggil(idx, args, 0)
     }
 
@@ -603,6 +610,12 @@ impl Mesin {
 
         loop {
             if r.habis() { return Ok(()); }
+            if self.batas_langkah > 0 {
+                if self.sisa_langkah == 0 {
+                    return Err(format!("wasm: batas {} langkah (`wasm::batas_langkah`) habis", self.batas_langkah));
+                }
+                self.sisa_langkah -= 1;
+            }
             let op = r.byte()?;
             match op {
                 0x00 => return Err("wasm: `unreachable` tereksekusi".to_string()),
@@ -1254,6 +1267,22 @@ pub fn b_tulis_memori(a: &[Value]) -> Result<Value, String> {
     Ok(ok_value(Value::Int(b.len() as i128)))
 }
 
+/// `wasm::batas_langkah(h, n)`: tiap `wasm::panggil` sesudahnya berhenti `Err` sesudah `n` instruksi (0 = tanpa).
+pub fn b_batas_langkah(a: &[Value]) -> Result<Value, String> {
+    let [h, n] = a else { return Err("wasm::batas_langkah(modul, langkah)".to_string()) };
+    let id = id_dari(h)?;
+    let n = match n {
+        Value::Int(n) if (0..=1_000_000_000_000).contains(n) => *n as u64,
+        Value::Int(n) => return Err(format!("wasm::batas_langkah: {} di luar 0..1000000000000 (0 = tanpa batas)", n)),
+        lain => return Err(format!("wasm::batas_langkah: langkahnya harus bilangan bulat, dapat `{}`", lain.type_name())),
+    };
+    let mut reg = REGISTRI.lock().map_err(|_| "registri wasm rusak".to_string())?;
+    match reg.get_mut(id) {
+        Some(Some(m)) => { m.batas_langkah = n; Ok(ok_value(Value::Unit)) }
+        _ => Ok(err_value("modul wasm ini sudah ditutup")),
+    }
+}
+
 pub fn b_tutup(a: &[Value]) -> Result<Value, String> {
     if a.len() != 1 { return Err("wasm::tutup(modul)".to_string()); }
     let id = id_dari(a.first().ok_or("wasm::tutup(modul)")?)?;
@@ -1292,5 +1321,30 @@ mod tests {
         assert!(m.panggil_ekspor("f", &[]).err().unwrap().contains("br_table"));
         let pas = modul([leb(1), leb(50_000), vec![0x7e, 0x0b]].concat());
         assert!(Mesin::baru(baca_modul(&pas).unwrap()).unwrap().panggil_ekspor("f", &[]).is_ok());
+    }
+
+    /// AGI-20261118-05: badan berukuran 1 yang deklarasi lokalnya 3 byte dulu membuat `wasm::muat` panik.
+    #[test]
+    fn lokal_melewati_badan_jadi_err_bukan_panik() {
+        let w = [b"\0asm\x01\0\0\0".to_vec(), seksi(1, vec![1, 0x60, 0, 0]), seksi(3, vec![1, 0]),
+            seksi(10, [leb(1), leb(1), vec![1, 0, 0x7f]].concat())].concat();
+        assert!(baca_modul(&w).err().unwrap().contains("deklarasi lokal"));
+    }
+
+    /// `(loop br 0)` berhenti sesudah `batas_langkah` instruksi, dan batasnya diisi ulang tiap panggilan.
+    #[test]
+    fn batas_langkah_menghentikan_loop_tak_berujung() {
+        let abadi = modul([leb(0), vec![0x03, 0x40, 0x0c, 0x00, 0x0b, 0x0b]].concat());
+        let mut m = Mesin::baru(baca_modul(&abadi).unwrap()).unwrap();
+        m.batas_langkah = 10_000;
+        for _ in 0..2 {
+            assert!(m.panggil_ekspor("f", &[]).err().unwrap().contains("batas 10000 langkah"));
+        }
+        let pendek = modul([leb(0), vec![0x01, 0x01, 0x0b]].concat());
+        let mut p = Mesin::baru(baca_modul(&pendek).unwrap()).unwrap();
+        p.batas_langkah = 3;
+        assert!(p.panggil_ekspor("f", &[]).is_ok());
+        p.batas_langkah = 2;
+        assert!(p.panggil_ekspor("f", &[]).is_err());
     }
 }

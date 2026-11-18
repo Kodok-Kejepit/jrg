@@ -2,6 +2,7 @@
 // Celah yang ditutup sejak lahir: zip-slip, tautan simbolik, bom zip, nama ganda atau ambigu, CRC dan ukuran bohong.
 
 use std::collections::HashMap;
+#[cfg(not(unix))]
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
@@ -270,6 +271,7 @@ fn z_read(a: &[Value], teks: bool) -> Result<Value, String> {
 
 /// Folder `jalur` di bawah `akar`, dibuat bagian demi bagian; bagian yang sudah ada harus folder SUNGGUHAN,
 /// bukan tautan simbolik — tautan di folder tujuan adalah jalan zip-slip yang kedua.
+#[cfg_attr(unix, allow(dead_code))]
 pub fn siapkan_folder(akar: &Path, bagian: &[&str]) -> Result<PathBuf, String> {
     let mut p = akar.to_path_buf();
     for (i, b) in bagian.iter().enumerate() {
@@ -295,27 +297,39 @@ fn z_extract(a: &[Value]) -> Result<Value, String> {
     if let Err(e) = std::fs::create_dir_all(&akar) {
         return Ok(err_value(format!("zip::extract '{}': {}", tujuan, crate::host::galat_io(&e))));
     }
+    // Di Unix seluruh penulisan dianchor ke descriptor akar ini: komponen yang berubah jadi tautan setelah diperiksa
+    // ditolak kernel, bukan diikuti (TOCTOU, laporan AGI-20261118-01).
+    #[cfg(unix)]
+    let akar_fd = match aman::buka_akar(&akar) {
+        Ok(f) => f,
+        Err(e) => return Ok(err_value(format!("zip::extract '{}': {}", tujuan, e))),
+    };
     let mut ditulis = 0i128;
     for e in &d {
         let bagian: Vec<&str> = e.nama.trim_end_matches('/').split('/').collect();
+        let nama_sampai = |i: usize| bagian[..=i].join("/");
         let hasil = (|| -> Result<(), String> {
-            if e.folder { siapkan_folder(&akar, &bagian)?; return Ok(()); }
-            let folder = siapkan_folder(&akar, &bagian[..bagian.len() - 1])?;
-            let akhir = folder.join(bagian[bagian.len() - 1]);
-            let isi = isi_entri(&b, e)?;
-            // `create_new` (O_EXCL): gagal kalau jalurnya sudah ada, tautan simbolik sekalipun — tidak ada yang
-            // ditimpa dan tidak ada tautan yang diikuti.
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&akhir)
-                .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)))?;
-            let tulis = f.write_all(&isi).map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)));
-            drop(f);
-            if let Err(g) = tulis { let _ = std::fs::remove_file(&akhir); return Err(g); }
             #[cfg(unix)]
-            if e.exe {
-                use std::os::unix::fs::PermissionsExt;
-                let _ = std::fs::set_permissions(&akhir, std::fs::Permissions::from_mode(0o755));
+            {
+                use std::os::unix::io::AsRawFd;
+                let fd = akar_fd.as_raw_fd();
+                if e.folder { return aman::siapkan(fd, &bagian, nama_sampai); }
+                let isi = isi_entri(&b, e)?;
+                return aman::tulis(fd, &bagian, &isi, e.exe, nama_sampai);
             }
-            Ok(())
+            #[cfg(not(unix))]
+            {
+                if e.folder { siapkan_folder(&akar, &bagian)?; return Ok(()); }
+                let folder = siapkan_folder(&akar, &bagian[..bagian.len() - 1])?;
+                let akhir = folder.join(bagian[bagian.len() - 1]);
+                let isi = isi_entri(&b, e)?;
+                let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&akhir)
+                    .map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)))?;
+                let tulis = f.write_all(&isi).map_err(|g| format!("`{}`: {}", e.nama, crate::host::galat_io(&g)));
+                drop(f);
+                if let Err(g) = tulis { let _ = std::fs::remove_file(&akhir); return Err(g); }
+                Ok(())
+            }
         })();
         match hasil {
             Ok(()) => if !e.folder { ditulis += 1 },
@@ -326,7 +340,120 @@ fn z_extract(a: &[Value]) -> Result<Value, String> {
     Ok(ok_value(Value::Int(ditulis)))
 }
 
+/// Penulisan ekstraksi tahan race symlink (TOCTOU): tiap komponen dibuka relatif ke descriptor induk yang DIPEGANG
+/// dengan `openat(O_NOFOLLOW)`, jadi direktori yang diganti jadi tautan SESUDAH diperiksa ditolak kernel, bukan
+/// diikuti. Hanya Unix; non-Unix tetap jalur nama lama. Rancangan: `dokumentasi/src/stdlib/zip.md`, AGI-20261118-01.
+#[cfg(unix)]
+pub mod aman {
+    use std::ffi::CString;
+    use std::io::Write;
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+    use std::path::Path;
+
+    fn cstr(s: &str) -> Result<CString, String> {
+        CString::new(s.as_bytes()).map_err(|_| format!("`{}`: nama memuat byte NUL", s))
+    }
+
+    /// Buka direktori akar ekstraksi sebagai descriptor berpenjaga. `O_NOFOLLOW` menolak akar yang sendirinya tautan.
+    pub fn buka_akar(akar: &Path) -> Result<OwnedFd, String> {
+        let c = CString::new(akar.as_os_str().as_bytes()).map_err(|_| "folder tujuan memuat byte NUL".to_string())?;
+        let fd = unsafe {
+            libc::open(c.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC)
+        };
+        if fd < 0 { return Err(format!("membuka folder tujuan: {}", std::io::Error::last_os_error())); }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Buka subdirektori `komp` relatif ke `induk`, membuatnya kalau belum ada. Komponen yang ternyata tautan
+    /// simbolik atau bukan direktori ditolak (`O_NOFOLLOW`/`O_DIRECTORY`), itulah penangkal race-nya.
+    fn masuk_folder(induk: RawFd, komp: &str, nama_penuh: &str) -> Result<OwnedFd, String> {
+        let c = cstr(komp)?;
+        let bendera = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        let buka = |fd: RawFd| unsafe { libc::openat(fd, c.as_ptr(), bendera) };
+        let mut fd = buka(induk);
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            if e.raw_os_error() == Some(libc::ENOENT) {
+                if unsafe { libc::mkdirat(induk, c.as_ptr(), 0o777) } < 0 {
+                    let m = std::io::Error::last_os_error();
+                    if m.raw_os_error() != Some(libc::EEXIST) {
+                        return Err(format!("`{}`: {}", nama_penuh, crate::host::galat_io(&m)));
+                    }
+                }
+                fd = buka(induk);
+            }
+        }
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            // `openat(O_DIRECTORY|O_NOFOLLOW)` atas tautan menjawab ENOTDIR (tautannya tidak diikuti, jadi tak dilihat
+            // sebagai direktori), BUKAN ELOOP — jadi golongan sebenarnya dibaca dari `fstatat` no-follow, bukan errno.
+            if matches!(e.raw_os_error(), Some(libc::ENOTDIR) | Some(libc::ELOOP)) && tautan_simbolik(induk, &c) {
+                return Err(format!("`{}` di folder tujuan adalah tautan simbolik — tidak diikuti", nama_penuh));
+            }
+            return match e.raw_os_error() {
+                Some(libc::ENOTDIR) | Some(libc::ELOOP) =>
+                    Err(format!("`{}` di folder tujuan sudah ada dan bukan folder", nama_penuh)),
+                _ => Err(format!("`{}`: {}", nama_penuh, crate::host::galat_io(&e))),
+            };
+        }
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Apakah `komp` di dalam `induk` sebuah tautan simbolik? `fstatat` no-follow tidak membuka apa pun, jadi aman
+    /// dari pemblokiran berkas khusus — dipakai hanya untuk memilih kalimat galat sesudah `openat` gagal.
+    fn tautan_simbolik(induk: RawFd, komp: &std::ffi::CStr) -> bool {
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let r = unsafe { libc::fstatat(induk, komp.as_ptr(), &mut st, libc::AT_SYMLINK_NOFOLLOW) };
+        r == 0 && (st.st_mode & libc::S_IFMT) == libc::S_IFLNK
+    }
+
+    /// Telusuri `bagian` (semua komponen = folder), mengembalikan descriptor folder terdalam.
+    fn telusuri<'a>(akar: RawFd, bagian: &[&str], nama: impl Fn(usize) -> String) -> Result<OwnedFd, String> {
+        // Descriptor akar disalin agar rantainya seragam bertipe `OwnedFd` tanpa menutup akar aslinya.
+        let dup = unsafe { libc::dup(akar) };
+        if dup < 0 { return Err(format!("dup folder tujuan: {}", std::io::Error::last_os_error())); }
+        let mut kini = unsafe { OwnedFd::from_raw_fd(dup) };
+        for (i, b) in bagian.iter().enumerate() {
+            kini = masuk_folder(kini.as_raw_fd(), b, &nama(i))?;
+        }
+        Ok(kini)
+    }
+
+    /// Buat folder `bagian` di bawah `akar`, aman dari race. Dipakai untuk entri folder arsip.
+    pub fn siapkan(akar: RawFd, bagian: &[&str], nama: impl Fn(usize) -> String) -> Result<(), String> {
+        telusuri(akar, bagian, nama).map(|_| ())
+    }
+
+    /// Tulis `isi` ke `bagian` (komponen terakhir = berkas) di bawah `akar`. Folder induknya ditelusuri no-follow,
+    /// berkasnya dibuka `O_CREAT|O_EXCL|O_NOFOLLOW` relatif ke descriptor induk itu: tidak menimpa, tidak mengikuti tautan.
+    pub fn tulis(akar: RawFd, bagian: &[&str], isi: &[u8], exe: bool, nama: impl Fn(usize) -> String) -> Result<(), String> {
+        let (induk_bagian, berkas) = bagian.split_at(bagian.len() - 1);
+        let induk = telusuri(akar, induk_bagian, &nama)?;
+        let nama_penuh = nama(bagian.len() - 1);
+        let c = cstr(berkas[0])?;
+        let mode = if exe { 0o755 } else { 0o644 };
+        let fd = unsafe {
+            libc::openat(induk.as_raw_fd(), c.as_ptr(),
+                libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC, mode as libc::c_uint)
+        };
+        if fd < 0 {
+            let e = std::io::Error::last_os_error();
+            return Err(format!("`{}`: {}", nama_penuh, crate::host::galat_io(&e)));
+        }
+        let mut f = unsafe { std::fs::File::from_raw_fd(fd) };
+        let r = f.write_all(isi).map_err(|g| format!("`{}`: {}", nama_penuh, crate::host::galat_io(&g)));
+        // `O_EXCL` memastikan berkas ini milik kita; menghapusnya saat gagal aman dari race nama karena lewat `unlinkat`.
+        if r.is_err() {
+            let induk_raw = induk.as_raw_fd();
+            unsafe { libc::unlinkat(induk_raw, c.as_ptr(), 0); }
+        }
+        r
+    }
+}
+
 /// `zip::create(arsip, isi)` → `Result<int>`: `isi` adalah dict nama → teks atau array byte, ditulis urut nama.
+/// Nama diperiksa dengan aturan yang sama dengan pembacanya, jadi JRG tidak pernah membuat arsip zip-slip.
 /// Nama diperiksa dengan aturan yang sama dengan pembacanya, jadi JRG tidak pernah membuat arsip zip-slip.
 fn z_create(a: &[Value]) -> Result<Value, String> {
     let jalur = teks_arg(a, 0, "zip::create")?;
@@ -478,5 +605,29 @@ mod tes {
         let b = rakit(&[Rakit { ukuran: Some(10), ..entri("a.txt", b"halo") }]);
         let d = baca_daftar(&b).unwrap();
         assert!(isi_entri(&b, &d[0]).unwrap_err().contains("menyatakan 10"));
+    }
+
+    /// Penulisan ekstraksi menolak komponen direktori yang tautan simbolik lewat descriptor (`O_NOFOLLOW`), jadi
+    /// serangan race (direktori diganti tautan setelah diperiksa) tidak bisa menulis ke luar folder tujuan.
+    /// Deterministik: tautannya sudah ada saat `aman::tulis` dipanggil, yang membuktikan jalur no-follow-nya.
+    #[cfg(unix)]
+    #[test]
+    fn ekstraksi_tidak_mengikuti_tautan_di_folder_tujuan() {
+        use std::os::unix::io::AsRawFd;
+        let dir = std::env::temp_dir().join(format!("jrg_ziprace_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let tujuan = dir.join("tujuan");
+        let luar = dir.join("luar");
+        std::fs::create_dir_all(&tujuan).unwrap();
+        std::fs::create_dir_all(&luar).unwrap();
+        // `sub` di folder tujuan adalah tautan ke `../luar` — persis keadaan sesudah race menang.
+        std::os::unix::fs::symlink("../luar", tujuan.join("sub")).unwrap();
+        let fd = aman::buka_akar(&tujuan).unwrap();
+        let bagian = ["sub", "x.bin"];
+        let r = aman::tulis(fd.as_raw_fd(), &bagian, b"rahasia", false, |i| bagian[..=i].join("/"));
+        assert!(r.is_err(), "menulis lewat tautan direktori harus ditolak");
+        assert!(r.unwrap_err().contains("tautan simbolik"), "pesannya menyebut tautan");
+        assert!(!luar.join("x.bin").exists(), "tidak boleh ada berkas yang lolos ke luar folder tujuan");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

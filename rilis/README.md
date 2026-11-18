@@ -21,15 +21,15 @@ Folder ini berisi perkakas untuk membuat rilis. Rilisnya sendiri dibuat lewat ta
 cargo test --release -j 1 --no-fail-fast
 
 # 2. Naikkan versi di Cargo.toml, lalu ubah `## [Belum dirilis]` di CHANGELOG.md
-#    jadi `## [0.6.0] — <tanggal>`
+#    jadi `## [0.6.1] — <tanggal>`
 
 # 3. Coba bungkusannya di mesin sendiri
 sh rilis/bungkus.sh
-sh rilis/uji_asap.sh target/release 0.6.0
+sh rilis/uji_asap.sh target/release 0.6.1
 
 # 4. Buat tag dan dorong; workflow rilis membangun semua platform
-git tag -a v0.6.0 -m "v0.6.0"
-git push origin v0.6.0
+git tag -a v0.6.1 -m "v0.6.1"
+git push origin v0.6.1
 ```
 
 Langkah 3 menangkap kesalahan isi arsip sebelum sampai ke runner.

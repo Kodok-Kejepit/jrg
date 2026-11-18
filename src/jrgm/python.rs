@@ -67,7 +67,7 @@ pub(crate) fn resolve_and_ensure_python_deps(manifest: &Manifest, verbose: bool,
 
     let packages: Vec<String> = packages.into_iter().collect();
     if verbose {
-        eprintln!("[jrgm] python packages terdeteksi: {}", packages.join(", "));
+        crate::ecetak_t!("[jrgm] python packages terdeteksi: {}", packages.join(", "));
     }
     pasang_python(&packages, verbose, pasang)
 }
@@ -187,21 +187,21 @@ pub(crate) fn pasang_python(packages: &[String], verbose: bool, pasang: bool) ->
             return Err("jrgm: pemeriksa modul python gagal jalan (`python3 -c ..` keluar tidak 0)".to_string());
         };
         if !b.iter().any(|m| m == modul) {
-            if verbose { eprintln!("[jrgm] python: `{}` sudah terpasang", modul); }
+            if verbose { crate::ecetak_t!("[jrgm] python: `{}` sudah terpasang", modul); }
             continue;
         }
         if !pasang {
-            eprintln!("[jrgm] python: modul `{}` belum terpasang — `jrgm build` tidak memasang apa pun; \
+            crate::ecetak_t!("[jrgm] python: modul `{}` belum terpasang — `jrgm build` tidak memasang apa pun; \
                        `jrgm run` memasangnya, atau `python3 -m pip install {}`", modul, paket);
             continue;
         }
 
         if paket == modul {
-            eprintln!("[jrgm] python: memasang `{}`...", paket);
+            crate::ecetak_t!("[jrgm] python: memasang `{}`...", paket);
         } else {
             // Perbedaannya disebutkan, supaya yang membaca log tidak bingung
             // kenapa `py::import("cv2")` memasang sesuatu bernama lain.
-            eprintln!("[jrgm] python: memasang `{}` (untuk modul `{}`)...", paket, modul);
+            crate::ecetak_t!("[jrgm] python: memasang `{}` (untuk modul `{}`)...", paket, modul);
         }
         // Entri manifest dipakai UTUH kalau ia memuat batasan versi
         // (`numpy>=2.0`); pemetaan nama cuma berlaku untuk nama telanjang.
@@ -214,7 +214,7 @@ pub(crate) fn pasang_python(packages: &[String], verbose: bool, pasang: bool) ->
             // Termux biasanya tidak mengalami ini sama sekali, jadi percobaan pertama di …
             Ok(o) if String::from_utf8_lossy(&o.stderr).contains("externally-managed-environment") => {
                 if verbose {
-                    eprintln!("[jrgm] python: environment externally-managed, coba ulang dengan --break-system-packages");
+                    crate::ecetak_t!("[jrgm] python: environment externally-managed, coba ulang dengan --break-system-packages");
                 }
                 match pip_install(sasaran, &["--break-system-packages"]) {
                     Ok(o2) if o2.status.success() => Ok(()),
@@ -227,7 +227,7 @@ pub(crate) fn pasang_python(packages: &[String], verbose: bool, pasang: bool) ->
         };
 
         match result {
-            Ok(()) => eprintln!("[jrgm] python: `{}` terpasang", pkg),
+            Ok(()) => crate::ecetak_t!("[jrgm] python: `{}` terpasang", pkg),
             Err(reason) => {
                 return Err(format!("jrgm: gagal memasang python package `{}`: {}", pkg, reason));
             }

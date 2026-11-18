@@ -5,6 +5,59 @@ use crate::vm::vm::Vm;
 use crate::vm::value::VmValue;
 use std::sync::Arc;
 
+/// Berkas yang dibuka `fs::open`, menurut nomornya. Satu baris paling panjang `MAKS_BARIS` (sama dengan
+/// `dok::tcp_recv_line`), satu potongan paling banyak `MAKS_POTONG`.
+static TERBUKA: std::sync::Mutex<(i128, std::collections::BTreeMap<i128, std::io::BufReader<std::fs::File>>)> =
+    std::sync::Mutex::new((0, std::collections::BTreeMap::new()));
+const MAKS_BARIS: u64 = 16 * 1024 * 1024;
+const MAKS_POTONG: i128 = 16 * 1024 * 1024;
+
+fn tak_terbuka(nama: &str, n: i128) -> String {
+    format!("{}: tidak ada berkas terbuka bernomor {} — buka dulu lewat `fs::open`, atau ia sudah `fs::close`", nama, n)
+}
+
+fn buka_bertahap(p: &str) -> Result<i128, String> {
+    let f = std::fs::File::open(p).map_err(|e| format!("fs::open '{}': {}", p, crate::host::galat_io(&e)))?;
+    if f.metadata().map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(format!("fs::open '{}': itu direktori, bukan berkas", p));
+    }
+    let mut t = TERBUKA.lock().unwrap_or_else(|e| e.into_inner());
+    t.0 += 1;
+    let n = t.0;
+    t.1.insert(n, std::io::BufReader::new(f));
+    Ok(n)
+}
+
+fn baris_bertahap(n: i128) -> Result<VmValue, String> {
+    use std::io::{BufRead, Read};
+    let mut t = TERBUKA.lock().unwrap_or_else(|e| e.into_inner());
+    let r = t.1.get_mut(&n).ok_or_else(|| tak_terbuka("fs::read_line", n))?;
+    let mut b = Vec::new();
+    r.by_ref().take(MAKS_BARIS + 1).read_until(b'\n', &mut b)
+        .map_err(|e| format!("fs::read_line: {}", crate::host::galat_io(&e)))?;
+    if b.is_empty() { return Ok(VmValue::none()); }
+    if b.len() as u64 > MAKS_BARIS {
+        return Err(format!("fs::read_line: satu baris lebih dari {} MiB — baca sepotong-sepotong lewat `fs::read_chunk`",
+            MAKS_BARIS >> 20));
+    }
+    if b.last() == Some(&b'\n') { b.pop(); if b.last() == Some(&b'\r') { b.pop(); } }
+    let s = String::from_utf8(b).map_err(|_| "fs::read_line: barisnya bukan teks UTF-8 yang sah — baca byte-nya \
+        lewat `fs::read_chunk`".to_string())?;
+    Ok(VmValue::some(VmValue::Str(Arc::new(s))))
+}
+
+fn potong_bertahap(n: i128, k: i128) -> Result<VmValue, String> {
+    use std::io::Read;
+    if !(1..=MAKS_POTONG).contains(&k) {
+        return Err(format!("fs::read_chunk: maks {} di luar 1..{} (16 MiB)", k, MAKS_POTONG));
+    }
+    let mut t = TERBUKA.lock().unwrap_or_else(|e| e.into_inner());
+    let r = t.1.get_mut(&n).ok_or_else(|| tak_terbuka("fs::read_chunk", n))?;
+    let mut b = Vec::new();
+    r.by_ref().take(k as u64).read_to_end(&mut b).map_err(|e| format!("fs::read_chunk: {}", crate::host::galat_io(&e)))?;
+    Ok(VmValue::array(b.into_iter().map(|x| VmValue::Int(x as i128)).collect()))
+}
+
 pub fn register(vm: &mut Vm) {
     use VmValue::*;
 
@@ -106,6 +159,27 @@ pub fn register(vm: &mut Vm) {
             }
         }
         _ => Err("fs::chmod(path: string, mode: int)".to_string()),
+    });
+
+    // Pembaca bertahap: `fs::read` menolak di atas 256 MiB, jadi berkas sebesar itu dibaca lewat nomor berkas terbuka.
+    vm.def("fs::open", |a| match a {
+        [Str(p)] => buka_bertahap(p.as_str()).map(|n| Int(n as i128)),
+        _ => Err("fs::open(path: string) -> int".to_string()),
+    });
+    vm.def("fs::read_line", |a| match a {
+        [Int(n)] => baris_bertahap(*n),
+        _ => Err("fs::read_line(nomor: int) -> Option<string>".to_string()),
+    });
+    vm.def("fs::read_chunk", |a| match a {
+        [Int(n), Int(k)] => potong_bertahap(*n, *k),
+        _ => Err("fs::read_chunk(nomor: int, maks: int) -> array".to_string()),
+    });
+    vm.def("fs::close", |a| match a {
+        [Int(n)] => match TERBUKA.lock().unwrap_or_else(|p| p.into_inner()).1.remove(n) {
+            Some(_) => Ok(Unit),
+            None => Err(tak_terbuka("fs::close", *n)),
+        },
+        _ => Err("fs::close(nomor: int)".to_string()),
     });
 
     vm.def("fs::read", |a| match a.get(0) {

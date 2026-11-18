@@ -245,7 +245,12 @@ pub fn tcp_recv_all(args: &[Value]) -> Result<Value, String> {
         Some(cell) => {
             let mut reader = cell.lock().unwrap_or_else(|p| p.into_inner());
             let mut buf = Vec::new();
-            match reader.read_to_end(&mut buf) {
+            // Pihak seberang yang tidak pernah menutup dulu ditampung sampai memori mesinnya habis (Fase AMAN-69).
+            let maks = crate::host::MAKS_BACA_UTUH;
+            match std::io::Read::take(&mut *reader, maks + 1).read_to_end(&mut buf) {
+                Ok(_) if buf.len() as u64 > maks => Ok(err_value(format!(
+                    "dok::tcp_recv_all: pihak seberang mengirim lebih dari {} MiB tanpa menutup sambungan — baca \
+                     sepotong-sepotong lewat `dok::tcp_recv_bytes(sock, maks)`", maks >> 20))),
                 Ok(_) => Ok(match String::from_utf8(buf) {
                     Ok(t) => ok_value(Value::Str(std::sync::Arc::new(t))),
                     Err(_) => bukan_teks("dok::tcp_recv_all", "dok::tcp_recv_bytes"),

@@ -130,6 +130,13 @@ impl Nd {
         for &d in bentuk {
             if d < -1 { return Err(format!("reshape: panjang sumbu tidak boleh {}", d)); }
         }
+        if bentuk.len() > 32 {
+            return Err(format!("reshape: bentuknya {} dimensi, batasnya 32 — sama dengan numpy", bentuk.len()));
+        }
+        // Hasil kali sumbu bukan-nol diperiksa seperti `ke_bentuk`: dulu `product()` membungkus diam-diam di rilis,
+        // jadi bentuk raksasa lolos `perlu == n` lalu tampilannya panik (AGI-20261118-09).
+        bentuk.iter().filter(|&&d| d > 0).try_fold(1usize, |t, &d| t.checked_mul(d as usize))
+            .ok_or_else(|| "reshape: hasil kali bentuknya melebihi ukuran mesin".to_string())?;
         let mut shape: Vec<usize> = bentuk.iter().map(|&d| if d < 0 { 1 } else { d as usize }).collect();
         if let Some(&i) = auto.first() {
             let lain: usize = shape.iter().enumerate()
@@ -232,4 +239,23 @@ fn tulis(
         tulis(f, a, sisa, _depth + 1, kursor)?;
     }
     write!(f, "]")
+}
+
+#[cfg(test)]
+mod uji_bentuk {
+    use super::{Buf, Nd};
+
+    /// AGI-20261118-09: `reshape` yang hasil kali bentuknya meluap ditolak (dulu membungkus di rilis), dan `sum`
+    /// atas sumbu dalam berukuran 0 menjawab bentuk kosong yang sah.
+    #[test]
+    fn reshape_meluap_dan_jumlah_sumbu_kosong() {
+        let satu = Nd::baru(Buf::F64(vec![1.0]), vec![1]).unwrap();
+        assert!(satu.reshape(&[4294967296, 4294967296]).unwrap_err().contains("melebihi ukuran mesin"));
+        assert!(satu.reshape(&[274177, 67280421310721]).is_err());
+        assert!(satu.reshape(&[1; 33]).unwrap_err().contains("32"));
+        assert_eq!(satu.reshape(&[1, 1]).unwrap().shape, vec![1, 1]);
+        let nol = Nd::baru(Buf::F64(vec![]), vec![2, 0]).unwrap();
+        let h = super::reduce::per_sumbu(&nol, super::reduce::Reduksi::Jumlah, 0).unwrap();
+        assert_eq!((h.shape.clone(), h.size()), (vec![0], 0));
+    }
 }

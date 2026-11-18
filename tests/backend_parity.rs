@@ -175,6 +175,37 @@ fn konformans_semantik_nilai_jalan_di_dua_backend() {
 
 /// Program yang WAJIB ditolak oleh KEDUA backend, dengan alasan yang sama.
 const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
+    // 2026-11-18 (Bayu, parser pintar): bentuk dari bahasa lain dijawab padanan JRG-nya, bukan galat generik.
+    ("class jadi struct/enum/trait", "package main\nclass Foo { }\n", "`class` bukan bentuk JRG", "`class` bukan bentuk JRG"),
+    ("interface jadi trait", "package main\ninterface X { }\n", "`interface` bukan bentuk JRG", "`interface` bukan bentuk JRG"),
+    ("public jadi pub", "package main\npublic fn f() { }\n", "bukan pengubah di JRG", "bukan pengubah di JRG"),
+    ("=== jadi ==", "package main\npub fn main() { let a = 1\n let b = 2\n wok(a === b) }\n", "`===` bukan bentuk JRG", "`===` bukan bentuk JRG"),
+    ("!== jadi !=", "package main\npub fn main() { let a = 1\n let b = 2\n wok(a !== b) }\n", "`!==` bukan bentuk JRG", "`!==` bukan bentuk JRG"),
+    ("badan titik dua Python", "package main\nfn f() -> int: return 5\n", "dibuka kurung kurawal", "dibuka kurung kurawal"),
+    ("if titik dua Python", "package main\npub fn main() { if true: wok(1) }\n", "dibuka kurung kurawal", "dibuka kurung kurawal"),
+    // 2026-11-18 (surat Bayu–Agus): kebuntuan yang terlihat dilaporkan di dua mesin (`antrean::buntu`), seperti LLVM
+    // — dulu menggantung selamanya tanpa pesan.
+    ("kebuntuan: main menerima dari channel tanpa pengirim", "package main\npub fn main() { let c = make_chan(int)\n wok(<-c) }", "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    ("kebuntuan: main dan goroutine saling menunggu", "package main\npub fn main() { let a = make_chan(int)\n let b = make_chan(int)\n spawn { <-a\n b <- 1 }\n <-b\n a <- 1 }", "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    ("kebuntuan: goroutine buntu sesudah main selesai", "package main\npub fn main() { let c = make_chan(int)\n spawn { <-c }\n wok(\"main selesai\") }", "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    ("kebuntuan: menunggu Future yang menunggu channel", "package main\npub fn main() { let c = make_chan(int)\n let f = Future::new(|| <-c)\n wok(future::await(f)) }", "kebuntuan: semua goroutine sedang menunggu channel", "kebuntuan: semua goroutine sedang menunggu channel"),
+    // 2026-11-18 (surat Bayu–Agus): `var x: T` tanpa nilai nol yang dibaca sebelum diisi gagal saat jalan di dua
+    // mesin (dulu `nil` diam-diam), juga lewat closure, `var` modul dan sesudah cabang yang tidak mengisinya.
+    ("var struct dibaca sebelum diisi", "package main\nstruct D { x: int = 5 }\npub fn main() { var a: D\n wok(a) }", "`a` dibaca sebelum diisi", "`a` dibaca sebelum diisi"),
+    ("var Option dibaca sebelum diisi", "package main\npub fn main() { var a: Option<int>\n wok(\"awal\")\n wok(a) }", "`a` dibaca sebelum diisi", "`a` dibaca sebelum diisi"),
+    ("var enum dibaca sebelum diisi, lewat closure", "package main\nenum Warna { Merah, Hijau }\npub fn main() { var a: Warna\n let f = || a\n wok(f()) }", "`a` dibaca sebelum diisi", "`a` dibaca sebelum diisi"),
+    ("var modul dibaca sebelum diisi", "package main\nstruct D { pub x: int }\nvar G: D\nfn baca() -> int { return G.x }\npub fn main() { wok(baca()) }", "`G` dibaca sebelum diisi", "`G` dibaca sebelum diisi"),
+    ("var dibaca sesudah cabang yang tidak mengisinya", "package main\nstruct D { pub x: int }\npub fn main() { var d: D\n if len(\"ab\") > 5 { d = D { x: 1 } }\n wok(d.x) }", "`d` dibaca sebelum diisi", "`d` dibaca sebelum diisi"),
+    // Parser pintar 2026-11-18: bentuk dari bahasa lain dijawab padanannya (`antrean-fase.md` "Parser pintar").
+    ("parser: elif", "var x = 2\nif x == 1 {\n wok(1)\n} elif x == 2 {\n wok(2)\n}\n", "JRG tidak punya `elif`", "JRG tidak punya `elif`"),
+    ("parser: def gaya Python", "def tambah(a, b):\n    return a + b\n", "fungsi di JRG ditulis `fn nama(a, b)", "fungsi di JRG ditulis `fn nama(a, b)"),
+    ("parser: for gaya C", "for (var i = 0; i < 3; i += 1) { wok(i) }\nwok(\"sesudah\")\n", "`for (awal; syarat; langkah)` gaya C bukan bentuk JRG", "`for (awal; syarat; langkah)` gaya C bukan bentuk JRG"),
+    ("parser: ternary gaya C", "let x = 1\nlet y = x > 0 ? 2 : 3\nwok(y)\n", "ternary di JRG ditulis `syarat $ a : b`", "ternary di JRG ditulis `syarat $ a : b`"),
+    ("parser: = di kurung kepala if", "var x = 1\nif (x = 5) { wok(x) }\n", "`=` itu MENUGASKAN nilai, bukan membandingkan", "`=` itu MENUGASKAN nilai, bukan membandingkan"),
+    // Audit `Result`/`?` 2026-11-18: `?` yang mengubah keluarga kembalian yang DITULIS gagal saat jalan di dua mesin
+    // (dulu diam-diam `None` dari fungsi `-> Result`), satu kalimat (`pesan_sebar_keluarga`), juga lewat JIT.
+    ("? atas Option di fungsi -> Result", "fn f(o: Option<int>) -> Result<int, string> { let v = o?; Ok(v) }\nwok(f(Some(1)))\nwok(f(None))\n", "`?` pada Option butuh fungsi ini mengembalikan `Option<..>` juga", "`?` pada Option butuh fungsi ini mengembalikan `Option<..>` juga"),
+    ("? atas Result di fungsi -> Option", "fn f(r: Result<int, string>) -> Option<int> { let v = r?; Some(v) }\nwok(f(Ok(1)))\nwok(f(Err(\"x\")))\n", "`?` pada Result butuh fungsi ini mengembalikan `Result<..>` juga", "`?` pada Result butuh fungsi ini mengembalikan `Result<..>` juga"),
     // Fase AMAN-52 (#1041): broadcast dan `matmul` berbatas seperti pembangun — dua masukan 800 KB dulu minta 80 GB.
     ("wokwok broadcast kegedean", "wok(wokwok::mul(wokwok::ones([100000, 1]), wokwok::ones([1, 100000])))\n", "wokwok `*`: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)", "wokwok `*`: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)"),
     ("wokwok::matmul kegedean", "wok(wokwok::matmul(wokwok::ones([100000, 1]), wokwok::ones([1, 100000])))\n", "wokwok::matmul: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)", "wokwok::matmul: minta 10000000000 elemen (~76293 MiB) — batasnya 33554432 elemen (256 MiB)"),
@@ -212,6 +243,14 @@ const DITOLAK_DUA_BACKEND: &[(&str, &str, &str, &str)] = &[
     // Fase AMAN-8 (#871): sarang 300 kurung dulu SIGABRT di pengurai, tanpa pesan.
     ("sarang terlalu dalam ditolak, bukan crash",
      "package main\npub fn main() { wok(((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) }",
+     "sarang terlalu dalam — lebih dari 256 tingkat", "sarang terlalu dalam — lebih dari 256 tingkat"),
+    // #1063 (AGI-20261118-06): sarang di ANOTASI TIPE, POLA, dan generik dulu memutari batas 256 dan SIGABRT —
+    // `parse_type`/`parse_pattern` tidak memanggil `masuk_sarang`. Sekarang ditolak rapi, sama di semua mesin.
+    ("sarang tipe dalam ditolak, bukan crash",
+     "package main\npub fn main() { let x: [][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][][]int = 1 }",
+     "sarang terlalu dalam — lebih dari 256 tingkat", "sarang terlalu dalam — lebih dari 256 tingkat"),
+    ("sarang pola dalam ditolak, bukan crash",
+     "package main\npub fn main() { match 1 { ((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((((1)))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))))) => 1, _ => 0 } }",
      "sarang terlalu dalam — lebih dari 256 tingkat", "sarang terlalu dalam — lebih dari 256 tingkat"),
     // Fase AMAN-12 (#879): `pаypal` dengan `а` Kiril dan `admin` adalah dua nama yang tampak sama.
     ("homoglyph: nama mencampur Latin dan Kiril",
@@ -4714,6 +4753,7 @@ fn calon_method_enum_dan_skalar_lengkap() {
     assert!(semua.len() > 20, "cuma {} nama disapu — universumnya menyusut", semua.len());
 
     let mut salah = Vec::new();
+    let mut prelude_dilewati = 0usize;
     for (ekspr, dijanjikan) in &penerima {
         for nama in &semua {
             let src = format!("{}{}\n    wok(v.{}())\n}}\n", PRA, ekspr, nama);
@@ -4721,12 +4761,15 @@ fn calon_method_enum_dan_skalar_lengkap() {
             let v = jalankan_keluaran_penuh(&src, true);
             let ada_i = !i.contains(TAK_ADA);
             let ada_v = !v.contains(TAK_ADA);
+            if prelude_belum_di_vm(ekspr, nama, ada_i, ada_v) { prelude_dilewati += 1; continue; }
             if ada_i != ada_v {
                 salah.push(format!("  {}.{}(): ada di interp={} vm={} — satu nama, dua nasib",
                     ekspr, nama, ada_i, ada_v));
                 continue;
             }
-            let dijanji = dijanjikan.contains(nama);
+            // Method prelude `Option`/`Result` (`src/opsi.jrg`) ikut disarankan (`opsi::method_milik`).
+            let tipe = ekspr.split("::").next().unwrap_or("");
+            let dijanji = dijanjikan.contains(nama) || jrgc::opsi::method_milik(tipe).iter().any(|m| m == nama);
             if ada_i && !dijanji {
                 salah.push(format!("  {}.{}(): METHOD-nya ada tapi tidak ada di daftar calon \
                     — salah ketiknya tidak akan pernah disarankan", ekspr, nama));
@@ -4738,6 +4781,8 @@ fn calon_method_enum_dan_skalar_lengkap() {
     }
     assert!(salah.is_empty(), "{} ketidakcocokan daftar calon:\n{}",
         salah.len(), salah.join("\n"));
+    assert!(!PRELUDE_OPSI_BELUM_DI_VM || prelude_dilewati > 0,
+        "`--vm` sudah melayani method prelude `Option`/`Result`: jadikan PRELUDE_OPSI_BELUM_DI_VM `false`");
 }
 
 /// **Satu nama HOF, satu kontrak — bentuk namespace dan bentuk method.**
@@ -5031,6 +5076,7 @@ fn method_ada_di_dua_mesin_atau_tidak_sama_sekali() {
 
     let mut salah = Vec::new();
     let mut diperiksa = 0usize;
+    let mut prelude_dilewati = 0usize;
     for (tipe, ekspr) in penerima {
         for n in &nama {
             if lewati(tipe, n) { continue; }
@@ -5039,6 +5085,7 @@ fn method_ada_di_dua_mesin_atau_tidak_sama_sekali() {
             let i = jalankan_keluaran_penuh(&src, false);
             let v = jalankan_keluaran_penuh(&src, true);
             let (ada_i, ada_v) = (!i.contains(TAK_ADA), !v.contains(TAK_ADA));
+            if prelude_belum_di_vm(ekspr, n, ada_i, ada_v) { prelude_dilewati += 1; continue; }
             if ada_i != ada_v {
                 if *tipe == "channel" {
                     if let Some(k) = DIVERGEN_KANAL.iter().position(|d| d == n) {
@@ -5056,6 +5103,8 @@ fn method_ada_di_dua_mesin_atau_tidak_sama_sekali() {
     assert!(diperiksa > 1500, "cuma {} kasus — sapuannya sepertinya tidak berjalan", diperiksa);
     assert!(salah.is_empty(), "{} dari {} pintu method cuma ada di satu mesin:\n{}",
         salah.len(), diperiksa, salah.join("\n"));
+    assert!(!PRELUDE_OPSI_BELUM_DI_VM || prelude_dilewati > 0,
+        "`--vm` sudah melayani method prelude `Option`/`Result`: jadikan PRELUDE_OPSI_BELUM_DI_VM `false`");
     // Arah sebaliknya: kalau salah satunya sudah sama, entrinya HARUS dihapus.
     // Sebuah daftar pengecualian yang cuma diperiksa satu arah jadi basi tanpa
     // ada yang memerah.
@@ -5697,6 +5746,106 @@ fn proses_keluaran_opsi_di_dua_mesin() {
         let k = jalankan_keluaran_penuh(program, vm);
         assert!(k.starts_with("dari stdin true false\nfalse true true\n/\n"), "vm={}: {}", vm, k);
         assert!(k.contains("opsi `batas` tidak dikenal") && k.contains("`batas_ms`"), "vm={}: {}", vm, k);
+    }
+}
+
+/// `http::tenggat(detik)`: server yang menetes satu byte per detik dihentikan sesudah tenggatnya (antrean B), dulu
+/// cuma batas 30 detik per bacaan yang tidak pernah tercapai.
+#[test]
+fn tenggat_klien_http_di_dua_mesin() {
+    use std::io::{Read, Write};
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || {
+                let mut s = s;
+                let mut b = [0u8; 1024];
+                let _ = s.read(&mut b);
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n");
+                while s.write_all(b"x").is_ok() { std::thread::sleep(std::time::Duration::from_millis(500)); }
+            });
+        }
+    });
+    let dir = crate::bersama::dir_unik("jrg-tenggat");
+    std::fs::create_dir_all(&dir).unwrap();
+    let berkas = dir.join("t.jrg");
+    std::fs::write(&berkas, format!("package main\npub fn main() {{\n    http::tenggat(2)\n    let t0 = time::now_ms()\n    \
+        match http::get(\"http://127.0.0.1:{}/\") {{ Ok(r) => wok(\"diterima\"), Err(e) => wok(e) }}\n    \
+        wok(time::now_ms() - t0 < 6000)\n    http::tenggat(-1)\n}}\n", port)).unwrap();
+    for vm in [false, true] {
+        let mut c = Command::new(jrgc());
+        c.arg(&berkas).env("JRG_SOPAN", "1");
+        if vm { c.arg("--vm"); }
+        let o = c.output().unwrap();
+        let k = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+        assert!(k.contains("tenggat `http::tenggat` 2 detik habis") && k.contains("\ntrue\n"), "vm={}: {}", vm, k);
+        assert!(k.contains("http::tenggat: -1 detik di luar 0..86400"), "vm={}: {}", vm, k);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `dok::tcp_recv_all` atas pihak seberang yang tidak pernah menutup berhenti di 256 MiB (Fase AMAN-69).
+#[test]
+fn tcp_recv_all_berbatas_di_dua_mesin() {
+    use std::io::Write;
+    let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = l.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            std::thread::spawn(move || { let mut s = s; let nol = vec![0u8; 1 << 16]; while s.write_all(&nol).is_ok() {} });
+        }
+    });
+    let dir = crate::bersama::dir_unik("jrg-recv-all");
+    std::fs::create_dir_all(&dir).unwrap();
+    let berkas = dir.join("t.jrg");
+    std::fs::write(&berkas, format!("package main\npub fn main() {{\n    let c = dok::tcp_connect(\"127.0.0.1\", {})\
+        .unwrap()\n    match dok::tcp_recv_all(c) {{ Ok(v) => wok(\"diterima\", len(v)), Err(e) => wok(e) }}\n}}\n", port)).unwrap();
+    for vm in [false, true] {
+        let mut c = Command::new(jrgc());
+        c.arg(&berkas).env("JRG_SOPAN", "1");
+        if vm { c.arg("--vm"); }
+        let o = c.output().unwrap();
+        let k = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+        assert!(k.contains("lebih dari 256 MiB tanpa menutup sambungan"), "vm={}: {}", vm, k);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `tok()` atas masukan tanpa baris baru gagal berkalimat sesudah 256 MiB (Fase AMAN-68): dulu `jrgc` mati SIGABRT.
+#[test]
+fn baris_masukan_berbatas_di_dua_mesin() {
+    if !cfg!(unix) { return; }
+    let dir = crate::bersama::dir_unik("jrg-tok-batas");
+    std::fs::create_dir_all(&dir).unwrap();
+    let berkas = dir.join("t.jrg");
+    std::fs::write(&berkas, "package main\npub fn main() {\n    wok(\"mulai\")\n    let s = tok()\n    wok(len(s))\n}\n").unwrap();
+    for vm in [false, true] {
+        let mut c = Command::new(jrgc());
+        c.arg(&berkas).env("JRG_SOPAN", "1").stdin(std::fs::File::open("/dev/zero").unwrap());
+        if vm { c.arg("--vm"); }
+        let o = c.output().unwrap();
+        let k = String::from_utf8_lossy(&o.stdout).to_string() + &String::from_utf8_lossy(&o.stderr);
+        assert_eq!(o.status.code(), Some(1), "vm={}: {}", vm, k);
+        assert!(k.starts_with("mulai\n") && k.contains("tok: satu baris masukan lebih dari 256 MiB"), "vm={}: {}", vm, k);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// Keluaran anak di atas 256 MiB menghentikan programnya dengan `Err` (Fase AMAN-59): dulu `jrgc` mati SIGABRT.
+#[test]
+fn keluaran_proses_berbatas_di_dua_mesin() {
+    if !cfg!(unix) { return; }
+    let program = "package main\npub fn main() {\n\
+        let t0 = time::now_ms()\n\
+        match proses::keluaran(\"head\", [\"-c\", \"300000000\", \"/dev/zero\"]) { Ok(v) => wok(\"diterima\"), Err(e) => wok(e) }\n\
+        match proses::jalankan(\"head\", [\"-c\", \"300000000\", \"/dev/zero\"]) { Ok(v) => wok(\"diterima\"), Err(e) => wok(e) }\n\
+        match proses::keluaran(\"head\", [\"-c\", \"1000\", \"/dev/zero\"]) { Ok(v) => wok(len(v.keluaran)), Err(e) => wok(e) }\n}\n";
+    for vm in [false, true] {
+        let k = jalankan_keluaran_penuh(program, vm);
+        assert_eq!(k.matches("melewati 256 MiB, jadi programnya dihentikan").count(), 2, "vm={}: {}", vm, k);
+        assert!(k.contains("proses::keluaran: keluaran `head`") && k.contains("proses::jalankan: keluaran `head`"), "vm={}: {}", vm, k);
+        assert!(k.contains("\n1000\n"), "vm={}: {}", vm, k);
     }
 }
 
@@ -7458,6 +7607,11 @@ fn penjaga_bentuk_asing_tidak_menolak_yang_sah() {
         ("for x in [1, 2] { wok_(x) }", "01"),
         ("let f = 2\n wok(f)", "2"),
         ("wok(\"\"\"x ${1}\"\"\")", "x 1"),
+        // `class`/`public`/`interface` sebagai NAMA biasa tetap sah — penjaga bentuk asing tidak boleh menyitanya.
+        ("let class = 5\n wok(class)", "5"),
+        ("var public = 3\n wok(public)", "3"),
+        ("fn interface() { return 7 }\n wok(interface())", "7"),
+        ("let a = 1\n let b = 1\n wok(a == b)", "true"),
     ];
     let mut salah = Vec::new();
     for (badan, harap) in sah {
@@ -8104,6 +8258,31 @@ class Titik(val x: Double, val y: Double) {
             assert!(i.contains(harus), "hilang `{}` dari:\n{}", harus, i.trim());
         }
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// AGI-20261118-10: JNI tidak memeriksa jenis argumen objek, jadi `Date` ke parameter `Integer` dulu dibaca di
+    /// offset yang salah (jawaban karangan atau SIGSEGV). Sekarang ditolak lewat `IsInstanceOf`, di dua mesin.
+    #[test]
+    fn objek_java_kelas_lain_ditolak_sebelum_jni() {
+        if !Command::new("java").arg("-version").output().map(|o| o.status.success()).unwrap_or(false) {
+            eprintln!("LEWAT: `java` tidak ada");
+            return;
+        }
+        let src = "package main\n\
+             fn buka(r) { return r.unwrap_or(nil) }\n\
+             pub fn main() {\n\
+             wok(jvm::mulai([]))\n\
+             let n = buka(jvm::baru(\"java.lang.Integer\", \"(I)V\", [5]))\n\
+             let m = buka(jvm::baru(\"java.lang.Integer\", \"(I)V\", [9]))\n\
+             let d = buka(jvm::baru(\"java.util.Date\", \"()V\", []))\n\
+             wok(jvm::panggil(n, \"compareTo\", \"(Ljava/lang/Integer;)I\", [m]))\n\
+             wok(jvm::panggil(n, \"compareTo\", \"(Ljava/lang/Integer;)I\", [d]))\n\
+             }\n";
+        let i = jalankan_keluaran_penuh(src, false);
+        let v = jalankan_keluaran_penuh(src, true);
+        assert_eq!(i, v, "dua mesin harus sama");
+        assert!(i.contains("Ok(-1)"), "pembanding sah hilang:\n{i}");
+        assert!(i.contains("butuh objek `java.lang.Integer`, dapat objek `java.util.Date`"), "{i}");
     }
 
     /// Kegagalan classpath yang paling sering: `kotlin-stdlib.jar` lupa
@@ -9747,5 +9926,32 @@ fn nilai_bersarang_sejuta_tingkat_tidak_mematikan_proses() {
     for vm in [false, true] {
         let j = jalankan_keluaran_penuh(src, vm);
         assert!(j.contains("2200002 true false 2200002"), "{}: {}", if vm { "--vm" } else { "interpreter" }, j);
+    }
+}
+
+/// Method prelude `Option`/`Result` (`src/opsi.jrg`) yang interpreter layani dan `--vm` BELUM (sisi VM: Agus,
+/// surat 2026-11-18 06.00). Diperiksa dua arah: begitu `--vm` melayaninya, tes yang memakainya gagal dan
+/// meminta konstanta ini jadi `false` (lalu dihapus bersama pemakainya).
+const PRELUDE_OPSI_BELUM_DI_VM: bool = false;
+
+fn prelude_belum_di_vm(ekspr: &str, nama: &str, ada_i: bool, ada_v: bool) -> bool {
+    let tipe = if ekspr.starts_with("Option::") { "Option" } else if ekspr.starts_with("Result::") { "Result" } else { return false };
+    PRELUDE_OPSI_BELUM_DI_VM && ada_i && !ada_v && jrgc::opsi::nama_fungsi(tipe, nama).is_some()
+}
+
+/// Satu salah tulis dari bahasa lain = SATU galat: bentuknya dilompati utuh, tidak berantai (parser pintar).
+#[test]
+fn bentuk_asing_jadi_satu_galat() {
+    let kasus = [
+        "pub fn main() {\n    for (var i = 0; i < 3; i += 1) {\n        wok(i)\n    }\n    wok(\"x\")\n}\n",
+        "pub fn main() {\n    var x = 2\n    if x == 1 {\n        wok(1)\n    } elif x == 2 {\n        wok(2)\n    }\n}\n",
+        "pub fn main() {\n    var x = 1\n    if (x = 5) {\n        wok(5)\n    } else {\n        wok(0)\n    }\n    wok(x)\n}\n",
+    ];
+    // Mode skrip (tanpa `package`) memulihkan galat lewat jalurnya sendiri.
+    let skrip = ["var x = 1\nif (x = 5) {\n    wok(5)\n} else if x == 2 {\n    wok(2)\n}\nwok(x)\n"];
+    for src in kasus.iter().map(|s| format!("package main\n{}", s)).chain(skrip.iter().map(|s| s.to_string())) {
+        let k = jalankan_keluaran_penuh(&src, false);
+        let n = k.matches("error[").count();
+        assert_eq!(n, 1, "satu salah tulis harus satu galat, dapat {}:\n{}", n, k);
     }
 }

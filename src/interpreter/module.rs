@@ -25,7 +25,9 @@ impl Interpreter {
         // ── Cari sumbernya DULU: identitas modul adalah sumbernya, bukan namanya ──
         // Berkunci nama, `b` yang mengimpor `y/util` dulu menerima `x/util` milik `main`.
         enum Sumber { Std(&'static str), Berkas(std::path::PathBuf) }
-        let (id, sumber) = match crate::module::ModuleResolver::std_module_name(import_path) {
+        let (id, sumber) = if import_path == crate::opsi::NAMA {
+            (crate::opsi::NAMA.to_string(), Sumber::Std(crate::opsi::SUMBER))
+        } else { match crate::module::ModuleResolver::std_module_name(import_path) {
             Some(nama) => match crate::interpreter::stdlib_src::source_of(nama) {
                 Some(src) => (crate::module::identitas_std(nama), Sumber::Std(src)),
                 // Dulu APA PUN yang diawali `std/` dianggap "sudah bawaan" lalu dilewati
@@ -55,7 +57,7 @@ impl Interpreter {
                     .ok_or_else(|| RuntimeError::new(resolver.pesan_tak_ketemu(import_path)))?;
                 (crate::module::identitas(&file_path), Sumber::Berkas(file_path))
             }
-        };
+        } };
         self.alias_dikenal.insert(mod_name.clone());
         self.impor_tipe.push((mod_name.clone(), id.clone()));
         let asli = crate::module::ModuleResolver::module_name(import_path);

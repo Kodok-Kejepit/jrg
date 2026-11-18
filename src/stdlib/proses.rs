@@ -64,19 +64,20 @@ fn b_jalankan(a: &[Value]) -> Result<Value, String> {
     if a.is_empty() || a.len() > 2 {
         return Err("proses::jalankan(program, args?) -> Result".to_string());
     }
-    let prog = teks(&a[0], "proses::jalankan", 0)?;
-    let mut c = siapkan(a, "proses::jalankan")?;
-    match c.output() {
-        Err(e) => Ok(crate::interpreter::err_value(galat_spawn(&prog, e))),
-        Ok(o) => {
-            let mut s = String::from_utf8_lossy(&o.stdout).to_string();
-            if !o.stderr.is_empty() {
-                s.push_str(&String::from_utf8_lossy(&o.stderr));
-            }
-            Ok(crate::interpreter::ok_value(Value::Str(std::sync::Arc::new(s))))
-        }
-    }
+    let o = match tunggu_selesai(a, "proses::jalankan", Opsi::default())? {
+        Err(e) => return Ok(crate::interpreter::err_value(e)),
+        Ok(o) => o,
+    };
+    let mut s = String::from_utf8_lossy(&o.keluar).to_string();
+    if !o.galat.is_empty() { s.push_str(&String::from_utf8_lossy(&o.galat)); }
+    Ok(crate::interpreter::ok_value(Value::Str(std::sync::Arc::new(s))))
 }
+
+/// Keluaran satu aliran yang ditampung paling banyak segini; lebih dari itu programnya dihentikan. Dulu anak yang
+/// menulis 3 GB membuat `jrgc` mati SIGABRT karena alokasinya gagal (Fase AMAN-59).
+const MAKS_KELUARAN: usize = 256 * 1024 * 1024;
+
+struct Selesai { keluar: Vec<u8>, galat: Vec<u8>, status: Option<std::process::ExitStatus>, habis: bool }
 
 /// Opsi `proses::keluaran`: batas waktu, isi stdin, direktori kerja, dan variabel lingkungan.
 #[derive(Default)]
@@ -136,16 +137,32 @@ fn b_keluaran(a: &[Value]) -> Result<Value, String> {
     if a.is_empty() || a.len() > 3 {
         return Err("proses::keluaran(program, args?, opsi?) -> Result".to_string());
     }
-    let prog = teks(&a[0], "proses::keluaran", 0)?;
     let o = opsi(a.get(2), "proses::keluaran")?;
-    let mut c = siapkan(a, "proses::keluaran")?;
+    let Selesai { keluar: k, galat: g, status, habis } = match tunggu_selesai(a, "proses::keluaran", o)? {
+        Err(e) => return Ok(crate::interpreter::err_value(e)),
+        Ok(o) => o,
+    };
+    let mut f: HashMap<String, Value> = HashMap::new();
+    f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&k).to_string())));
+    f.insert("galat".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&g).to_string())));
+    f.insert("kode".into(), Value::Int(status.and_then(|s| s.code()).unwrap_or(-1) as i128));
+    f.insert("sukses".into(), Value::Bool(!habis && status.map_or(false, |s| s.success())));
+    f.insert("habis_waktu".into(), Value::Bool(habis));
+    Ok(crate::interpreter::ok_value(Value::Struct { name: "ProsesHasil".to_string(), fields: f.into() }))
+}
+
+/// Jalankan sampai selesai dengan tiga pipa dikuras; `Ok(Err(..))` kalau tidak bisa dimulai atau keluarannya
+/// melewati `MAKS_KELUARAN`.
+fn tunggu_selesai(a: &[Value], nama: &str, o: Opsi) -> Result<Result<Selesai, String>, String> {
+    let prog = teks(&a[0], nama, 0)?;
+    let mut c = siapkan(a, nama)?;
     if let Some(d) = &o.dir { c.current_dir(d); }
     for (k, v) in &o.env { c.env(k, v); }
     atur_kelompok(&mut c, o.kelompok);
     use std::process::Stdio;
     c.stdin(if o.masukan.is_some() { Stdio::piped() } else { Stdio::null() }).stdout(Stdio::piped()).stderr(Stdio::piped());
     let mut anak = match c.spawn() {
-        Err(e) => return Ok(crate::interpreter::err_value(galat_spawn(&prog, e))),
+        Err(e) => return Ok(Err(galat_spawn(&prog, e))),
         Ok(x) => x,
     };
     // Tiga pipa dikuras di utasnya sendiri: program yang menulis banyak tidak boleh macet menunggu dibaca.
@@ -153,10 +170,20 @@ fn b_keluaran(a: &[Value]) -> Result<Value, String> {
         use std::io::Write;
         let _ = p.write_all(t.as_bytes());
     }));
-    fn kuras<R: std::io::Read + Send + 'static>(r: Option<R>) -> std::thread::JoinHandle<Vec<u8>> {
-        std::thread::spawn(move || { let mut b = Vec::new(); if let Some(mut r) = r { let _ = std::io::Read::read_to_end(&mut r, &mut b); } b })
-    }
-    let (keluar, galat) = (kuras(anak.stdout.take()), kuras(anak.stderr.take()));
+    let lebih = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let kuras = |r: Option<Box<dyn std::io::Read + Send>>| {
+        let lebih = lebih.clone();
+        std::thread::spawn(move || {
+            let mut b = Vec::new();
+            if let Some(r) = r {
+                let _ = std::io::Read::read_to_end(&mut std::io::Read::take(r, MAKS_KELUARAN as u64 + 1), &mut b);
+                if b.len() > MAKS_KELUARAN { b.truncate(MAKS_KELUARAN); lebih.store(true, std::sync::atomic::Ordering::SeqCst); }
+            }
+            b
+        })
+    };
+    let keluar = kuras(anak.stdout.take().map(|x| Box::new(x) as Box<dyn std::io::Read + Send>));
+    let galat = kuras(anak.stderr.take().map(|x| Box::new(x) as Box<dyn std::io::Read + Send>));
     let mulai = std::time::Instant::now();
     let mut habis = false;
     let status = loop {
@@ -164,6 +191,10 @@ fn b_keluaran(a: &[Value]) -> Result<Value, String> {
             Ok(Some(s)) => break Some(s),
             Ok(None) => {}
             Err(_) => break None,
+        }
+        if lebih.load(std::sync::atomic::Ordering::SeqCst) {
+            matikan(&mut anak, o.kelompok);
+            break anak.wait().ok();
         }
         if o.batas_ms.map_or(false, |b| mulai.elapsed().as_millis() as u64 >= b) {
             habis = true;
@@ -174,13 +205,12 @@ fn b_keluaran(a: &[Value]) -> Result<Value, String> {
     };
     if let Some(t) = tulis { let _ = t.join(); }
     let (k, g) = (keluar.join().unwrap_or_default(), galat.join().unwrap_or_default());
-    let mut f: HashMap<String, Value> = HashMap::new();
-    f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&k).to_string())));
-    f.insert("galat".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&g).to_string())));
-    f.insert("kode".into(), Value::Int(status.and_then(|s| s.code()).unwrap_or(-1) as i128));
-    f.insert("sukses".into(), Value::Bool(!habis && status.map_or(false, |s| s.success())));
-    f.insert("habis_waktu".into(), Value::Bool(habis));
-    Ok(crate::interpreter::ok_value(Value::Struct { name: "ProsesHasil".to_string(), fields: f.into() }))
+    if lebih.load(std::sync::atomic::Ordering::SeqCst) {
+        return Ok(Err(format!("{}: keluaran `{}` melewati {} MiB, jadi programnya dihentikan\n  bantuan: tulis keluarannya \
+            ke berkas lewat programnya sendiri, atau baca sedikit-sedikit lewat `proses::mulai` dan `proses::baca`",
+            nama, prog, MAKS_KELUARAN >> 20)));
+    }
+    Ok(Ok(Selesai { keluar: k, galat: g, status, habis }))
 }
 
 /// Proses yang dimulai `proses::mulai` dan masih bisa ditanya: pipanya dikuras utas ke penampung,
@@ -210,6 +240,11 @@ fn tampung<R: std::io::Read + Send + 'static>(r: Option<R>) -> (Penampung, Optio
         while let Ok(n) = std::io::Read::read(&mut r, &mut b) {
             if n == 0 { break; }
             q.lock().unwrap_or_else(|e| e.into_inner()).extend_from_slice(&b[..n]);
+            // Penampung yang tidak dibaca berhenti dikuras: programnya menunggu di pipanya, tidak ada yang hilang.
+            while q.lock().unwrap_or_else(|e| e.into_inner()).len() >= MAKS_KELUARAN {
+                if std::sync::Arc::strong_count(&q) == 1 { return; }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
         }
     }));
     (p, utas)
@@ -296,9 +331,19 @@ fn b_baca(a: &[Value]) -> Result<Value, String> {
         j.masukan = None;
         // Sisa kelompoknya (pekerjaan latar sebuah shell) masih memegang pipanya; tanpa ini `join` di bawah menunggu selamanya.
         if j.kelompok { matikan(&mut j.anak, true); }
+        // Penampung dikuras sambil menunggu pembacanya: yang penuh menahan pembacanya sampai dikosongkan.
+        let (mut k, mut g) = (Vec::new(), Vec::new());
+        let kuras = |p: &Penampung, ke: &mut Vec<u8>| ke.append(&mut p.lock().unwrap_or_else(|e| e.into_inner()));
+        while !j.pembaca.iter().all(|u| u.is_finished()) {
+            kuras(&j.keluar, &mut k);
+            kuras(&j.galat, &mut g);
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
         for u in j.pembaca.drain(..) { let _ = u.join(); }
-        f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(ambil(&j.keluar, true))));
-        f.insert("galat".into(), Value::Str(std::sync::Arc::new(ambil(&j.galat, true))));
+        kuras(&j.keluar, &mut k);
+        kuras(&j.galat, &mut g);
+        f.insert("keluaran".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&k).to_string())));
+        f.insert("galat".into(), Value::Str(std::sync::Arc::new(String::from_utf8_lossy(&g).to_string())));
         f.insert("selesai".into(), Value::Bool(true));
         f.insert("kode".into(), Value::Int(s.code().unwrap_or(-1) as i128));
         f.insert("sukses".into(), Value::Bool(!j.habis && s.success()));

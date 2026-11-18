@@ -355,11 +355,14 @@ impl Interpreter {
         // Didaftarkan SEBELUM utasnya lahir: kalau sesudah, laporan bisa
         // terlanjur dicetak sebelum penghitungnya naik.
         crate::profiler::utas_baru();
+        // Dihitung SEBELUM utasnya lahir: main yang langsung `<-c` tidak boleh melihat dirinya sendirian.
+        let aktor = crate::antrean::buntu::lahir();
         let spawn_result = std::thread::Builder::new()
             .name("jrg-goroutine".to_string())
             // Stack sebesar utas utama: dengan bawaan 2 MB rekursi ±150 tingkat sudah mematikan proses.
             .stack_size(super::Interpreter::INTERPRETER_STACK_SIZE)
             .spawn(move || {
+                let _aktor = aktor;
                 super::catat_puncak_stack();
                 // Badan goroutine dilaporkan sebagai `<goroutine>`, nama yang SAMA dengan
                 // yang dipakai VM.

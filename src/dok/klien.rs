@@ -4,8 +4,8 @@
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpStream, ToSocketAddrs};
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use super::tls::Tls;
 
@@ -37,23 +37,64 @@ pub fn urai_url(url: &str) -> Result<Url, String> {
     Ok(Url { https, host, port, jalur })
 }
 
-pub enum Sambungan {
-    Polos(TcpStream),
-    Tls(Box<Tls>),
+pub struct Sambungan {
+    isi: Isi,
+    /// Salinan soketnya, untuk memasang batas tunggu tiap baca/tulis (juga di bawah TLS).
+    soket: TcpStream,
+    /// Akhir tenggat `http::tenggat`, kalau dipasang.
+    akhir: Option<Instant>,
+}
+
+enum Isi { Polos(TcpStream), Tls(Box<Tls>) }
+
+/// Tenggat total satu permintaan klien dalam detik (`http::tenggat`); 0 = tanpa. Batas 30 detik per `read` saja
+/// membiarkan server yang menetes satu byte tiap 29 detik menahan pemanggilnya selama ia mau (Fase antrean B).
+static TENGGAT: AtomicU64 = AtomicU64::new(0);
+
+/// `http::tenggat(detik)`: berlaku untuk permintaan sesudahnya, sejak sambungannya dibuka.
+pub fn atur_tenggat(detik: u64) { TENGGAT.store(detik, Ordering::SeqCst) }
+
+fn galat_tenggat() -> std::io::Error {
+    std::io::Error::other(format!("tenggat `http::tenggat` {} detik habis", TENGGAT.load(Ordering::SeqCst)))
+}
+
+impl Sambungan {
+    fn tunggu(&self, tulis: bool) -> std::io::Result<()> {
+        let Some(akhir) = self.akhir else { return Ok(()) };
+        let sisa = akhir.saturating_duration_since(Instant::now());
+        if sisa.is_zero() { return Err(galat_tenggat()); }
+        let d = Some(sisa.min(Duration::from_secs(30)));
+        if tulis { self.soket.set_write_timeout(d) } else { self.soket.set_read_timeout(d) }
+    }
+
+    /// Batas tunggu soket dipasang sebesar SISA tenggat, jadi bacaan yang habis waktunya tepat di ujung tenggat adalah
+    /// tenggat itu sendiri — dulu kalimatnya ikut waktu: "belum ada yang siap" kalau habisnya di tengah `read`.
+    fn di_tenggat<T>(&self, r: std::io::Result<T>) -> std::io::Result<T> {
+        use std::io::ErrorKind as K;
+        match r {
+            Err(e) if matches!(e.kind(), K::WouldBlock | K::TimedOut)
+                && self.akhir.is_some_and(|a| Instant::now() + Duration::from_millis(50) >= a) => Err(galat_tenggat()),
+            r => r,
+        }
+    }
 }
 
 impl Read for Sambungan {
     fn read(&mut self, b: &mut [u8]) -> std::io::Result<usize> {
-        match self { Sambungan::Polos(s) => s.read(b), Sambungan::Tls(t) => t.read(b) }
+        self.tunggu(false)?;
+        let r = match &mut self.isi { Isi::Polos(s) => s.read(b), Isi::Tls(t) => t.read(b) };
+        self.di_tenggat(r)
     }
 }
 
 impl Write for Sambungan {
     fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
-        match self { Sambungan::Polos(s) => s.write(b), Sambungan::Tls(t) => t.write(b) }
+        self.tunggu(true)?;
+        let r = match &mut self.isi { Isi::Polos(s) => s.write(b), Isi::Tls(t) => t.write(b) };
+        self.di_tenggat(r)
     }
     fn flush(&mut self) -> std::io::Result<()> {
-        match self { Sambungan::Polos(s) => s.flush(), Sambungan::Tls(t) => t.flush() }
+        match &mut self.isi { Isi::Polos(s) => s.flush(), Isi::Tls(t) => t.flush() }
     }
 }
 
@@ -75,7 +116,14 @@ pub fn alamat_internal(ip: IpAddr) -> Option<&'static str> {
             if a.is_unspecified() { return Some("tak bertentu (::)"); }
             if s[..6] == [0; 6] { return internal_v4(v4(s[6], s[7])); }
             if s[0] == 0x64 && s[1] == 0xff9b && s[2..6] == [0; 4] { return internal_v4(v4(s[6], s[7])); }
+            // SIIT `::ffff:0:a.b.c.d` (RFC 6145) juga membawa IPv4 di 32 bit terakhir.
+            if s[..4] == [0; 4] && s[4] == 0xffff && s[5] == 0 { return internal_v4(v4(s[6], s[7])); }
             if s[0] == 0x2002 { return internal_v4(v4(s[1], s[2])); }
+            // NAT64 lokal (RFC 8215): letak IPv4-nya menurut panjang awalan pilihan operator, jadi seluruhnya ditolak.
+            if s[0] == 0x64 && s[1] == 0xff9b && s[2] == 1 { return Some("NAT64 lokal (64:ff9b:1::/48)"); }
+            if s[0] == 0x2001 && s[1] == 0 { return Some("Teredo (2001::/32)"); }
+            if s[0] == 0x2001 && s[1] == 0xdb8 { return Some("dokumentasi IPv6 (2001:db8::/32)"); }
+            if s[0] == 0x100 && s[1..4] == [0; 3] { return Some("discard IPv6 (100::/64)"); }
             if s[0] & 0xfe00 == 0xfc00 { return Some("privat IPv6 (fc00::/7)"); }
             if s[0] & 0xffc0 == 0xfe80 { return Some("link-local IPv6 (fe80::/10)"); }
             if s[0] & 0xffc0 == 0xfec0 { return Some("site-local IPv6 (fec0::/10)"); }
@@ -101,6 +149,7 @@ fn internal_v4(a: Ipv4Addr) -> Option<&'static str> {
 /// Nama diurai SEKALI dan yang disambungi alamat yang diperiksa itu juga — dua kali mengurai bisa menjawab
 /// dua alamat (DNS rebinding). Satu alamat internal di antara jawabannya cukup untuk menolak semuanya.
 pub fn sambung(u: &Url) -> Result<Sambungan, String> {
+    let batas_akhir = match TENGGAT.load(Ordering::SeqCst) { 0 => None, d => Some(Instant::now() + Duration::from_secs(d)) };
     let alamat = format!("{}:{}", u.host, u.port);
     let gagal = |e: &std::io::Error| format!("tidak bisa tersambung ke {}: {}", alamat, crate::host::galat_io(e));
     let daftar: Vec<SocketAddr> = alamat.to_socket_addrs().map_err(|e| gagal(&e))?.collect();
@@ -123,7 +172,9 @@ pub fn sambung(u: &Url) -> Result<Sambungan, String> {
     let tcp = tcp.ok_or_else(|| gagal(&akhir))?;
     tcp.set_read_timeout(Some(Duration::from_secs(30))).ok();
     tcp.set_write_timeout(Some(Duration::from_secs(30))).ok();
-    if u.https { Ok(Sambungan::Tls(Box::new(Tls::sambung(tcp, &u.host)?))) } else { Ok(Sambungan::Polos(tcp)) }
+    let soket = tcp.try_clone().map_err(|e| gagal(&e))?;
+    let isi = if u.https { Isi::Tls(Box::new(Tls::sambung(tcp, &u.host)?)) } else { Isi::Polos(tcp) };
+    Ok(Sambungan { isi, soket, akhir: batas_akhir })
 }
 
 fn kepala_host(u: &Url) -> String {
@@ -137,7 +188,35 @@ pub fn minta(metode: &str, url: &str, badan: &[u8], kepala: &[(String, String)],
     periksa_permintaan(&u, metode, kepala, agen)?;
     let mut s = sambung(&u)?;
     kirim(&mut s, &u, metode, badan, kepala, agen)?;
-    baca_berbatas(&mut s, &u.host, MAKS_JAWABAN)
+    let jawab = baca_berbatas(&mut s, &u.host, MAKS_JAWABAN)?;
+    bingkai(jawab, metode, &u.host)
+}
+
+/// Jawaban dipotong sesuai pembingkaiannya (RFC 9112 §6.3). Dulu `Content-Length` tidak dibaca: sambungan yang
+/// putus di tengah (atau dipotong penyerang di TLS, yang penutupan tanpa `close_notify`-nya dianggap selesai)
+/// menjawab badan yang lebih pendek tanpa suara, dan byte sesudah badannya ikut tertempel (Fase AMAN-61).
+fn bingkai(mut jawab: Vec<u8>, metode: &str, host: &str) -> Result<Vec<u8>, String> {
+    let Some(p) = jawab.windows(4).position(|w| w == b"\r\n\r\n") else { return Ok(jawab) };
+    let kepala = String::from_utf8_lossy(&jawab[..p]).to_string();
+    let status: u16 = kepala.split_whitespace().nth(1).and_then(|s| s.parse().ok()).unwrap_or(0);
+    let awal = p + 4;
+    if metode.eq_ignore_ascii_case("HEAD") || (100..200).contains(&status) || status == 204 || status == 304 {
+        jawab.truncate(awal);
+        return Ok(jawab);
+    }
+    let nilai = |nama: &str| kepala.lines().skip(1).filter_map(|l| l.split_once(':'))
+        .filter(|(k, _)| k.trim().eq_ignore_ascii_case(nama)).map(|(_, v)| v.trim().to_string()).collect::<Vec<_>>();
+    if nilai("transfer-encoding").iter().any(|v| v.to_ascii_lowercase().contains("chunked")) { return Ok(jawab); }
+    let panjang = nilai("content-length");
+    let Some(pertama) = panjang.first() else { return Ok(jawab) };
+    let n: u64 = match pertama.parse() {
+        Ok(n) if pertama.bytes().all(|b| b.is_ascii_digit()) && panjang.iter().all(|v| v == pertama) => n,
+        _ => return Err(format!("jawaban dari {} membawa Content-Length yang tidak sah atau berbeda-beda: {:?}", host, panjang)),
+    };
+    let ada = (jawab.len() - awal) as u64;
+    if ada < n { return Err(format!("jawaban dari {} terpotong: badannya {} dari {} byte", host, ada, n)); }
+    jawab.truncate(awal + n as usize);
+    Ok(jawab)
 }
 
 /// Jawaban yang disimpan di memori berbatas; yang lebih besar diunduh ke berkas (`http::unduh`).
@@ -328,6 +407,21 @@ mod tes {
     use super::*;
 
     #[test]
+    fn jawaban_dibingkai_menurut_content_length() {
+        let j = |t: &str| t.as_bytes().to_vec();
+        let ok = |t: &str, m: &str| String::from_utf8(bingkai(j(t), m, "h").unwrap()).unwrap();
+        assert!(ok("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nokSISIP", "GET").ends_with("\r\n\r\nok"));
+        assert!(bingkai(j("HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nok"), "GET", "h").unwrap_err().contains("terpotong"));
+        assert!(bingkai(j("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 3\r\n\r\nok!"), "GET", "h").is_err());
+        assert!(bingkai(j("HTTP/1.1 200 OK\r\nContent-Length: +2\r\n\r\nok"), "GET", "h").is_err());
+        assert!(ok("HTTP/1.1 200 OK\r\nContent-Length: 2\r\nContent-Length: 2\r\n\r\nok", "GET").ends_with("ok"));
+        assert!(ok("HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n", "HEAD").ends_with("\r\n\r\n"));
+        assert!(ok("HTTP/1.1 304 Not Modified\r\nContent-Length: 99\r\n\r\n", "GET").ends_with("\r\n\r\n"));
+        assert!(ok("HTTP/1.1 200 OK\r\n\r\nsampai tutup", "GET").ends_with("sampai tutup"));
+        assert!(ok("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 1\r\n\r\n2\r\nok\r\n0\r\n\r\n", "GET").contains("2\r\nok"));
+    }
+
+    #[test]
     fn permintaan_tidak_bisa_disisipi() {
         // CVE-2019-9740 di Python: jalur URL ber-CRLF menyisipkan baris permintaan.
         assert!(urai_url("http://a.b/x HTTP/1.1\r\nX-Sisip: 1").unwrap_err().contains("spasi"));
@@ -341,10 +435,11 @@ mod tes {
     fn alamat_internal_dikenali_dalam_tiap_bungkusnya() {
         for ip in ["127.0.0.1", "10.1.2.3", "172.16.0.1", "192.168.1.1", "169.254.169.254", "0.0.0.0", "100.64.0.1",
                    "224.0.0.1", "255.255.255.255", "::1", "::", "::ffff:127.0.0.1", "::ffff:169.254.169.254",
-                   "::127.0.0.1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "fd00::1", "fe80::1", "ff02::1"] {
+                   "::127.0.0.1", "64:ff9b::a9fe:a9fe", "2002:7f00:1::", "fd00::1", "fe80::1", "ff02::1",
+                   "::ffff:0:7f00:1", "64:ff9b:1::a9fe:a9fe", "2001:0:4136:e378:8000:63bf:80ff:fffe", "2001:db8::1", "100::1"] {
             assert!(alamat_internal(ip.parse().unwrap()).is_some(), "{} harus internal", ip);
         }
-        for ip in ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:8.8.8.8"] {
+        for ip in ["8.8.8.8", "1.1.1.1", "172.32.0.1", "100.128.0.1", "2606:4700::1111", "::ffff:8.8.8.8", "2001:4860::8888"] {
             assert!(alamat_internal(ip.parse().unwrap()).is_none(), "{} harus publik", ip);
         }
     }

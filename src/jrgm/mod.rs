@@ -16,6 +16,7 @@ mod python;
 mod cli;
 mod jalankan;
 mod rangka;
+mod rangka_en;
 mod perintah;
 mod android;
 mod bahasa;
@@ -32,7 +33,7 @@ use rangka::cmd_new;
 
 /// Badan `jrgm`, juga dipakai `jrgc --jrgm ...` (APK dan Ubuntu di HP cuma membawa `jrgc`).
 pub fn utama(argumen: Vec<String>) {
-    let cli = Cli::parse_from(singkatan_bahasa(argumen));
+    let cli: Cli = crate::terjemah::urai_cli(singkatan_bahasa(argumen));
 
     // Nada disetel sekali, sebelum apa pun sempat melapor — sama persis
     // dengan urutan di `jrgc`.
@@ -40,7 +41,7 @@ pub fn utama(argumen: Vec<String>) {
         match crate::diag::Nada::dari_nama(n) {
             Some(nd) => crate::diag::set_nada(nd),
             None => {
-                eprintln!(
+                crate::ecetak_t!(
                     "error: nada `{}` tidak ada. yang tersedia: {}",
                     n, crate::diag::Nada::SEMUA.join(", ")
                 );
@@ -108,16 +109,43 @@ pub fn utama(argumen: Vec<String>) {
 
         JrgmCommand::Publish { dry_run }
             => git::cmd_publish(dry_run),
+
+        JrgmCommand::Language { kode } => cmd_language(kode.as_deref()),
     };
 
     if let Err(e) = result {
         // String KOSONG berarti diagnostiknya sudah dicetak lengkap di tempat
         // kejadian (dengan sapaan, cuplikan sumber, dan caret).
         if !e.is_empty() {
-            eprintln!("error: {}", e);
+            crate::ecetak_t!("error: {}", e);
         }
         process::exit(1);
     }
+}
+
+/// `jrgm language [en|id]`: simpan bahasa pesan, atau tampilkan yang berlaku dan asalnya.
+fn cmd_language(kode: Option<&str>) -> Result<(), String> {
+    use crate::terjemah::{self, Bahasa};
+    let Some(kode) = kode else {
+        let b = terjemah::aktif();
+        let asal = if std::env::var("JRG_BAHASA").ok().and_then(|v| Bahasa::dari_nama(&v)).is_some() {
+            "JRG_BAHASA".to_string()
+        } else if let Some(p) = terjemah::berkas_setelan().filter(|p| p.exists()) {
+            p.display().to_string()
+        } else {
+            terjemah::pilih("bawaan", "default").to_string()
+        };
+        crate::cetak_t!("{} ({})", b.kode(), asal);
+        return Ok(());
+    };
+    let b = Bahasa::dari_nama(kode).ok_or_else(|| format!("bahasa `{}` tidak ada. yang tersedia: en, id", kode))?;
+    let p = terjemah::simpan_setelan(b)?;
+    terjemah::set(b);
+    println!("{}", terjemah::t(&format!("bahasa pesan JRG sekarang `{}` (disimpan di {})", b.kode(), p.display())));
+    if std::env::var("JRG_BAHASA").ok().and_then(|v| Bahasa::dari_nama(&v)).is_some_and(|v| v != b) {
+        eprintln!("{}", terjemah::t("catatan: JRG_BAHASA di lingkungan ini masih menang atas setelan ini"));
+    }
+    Ok(())
 }
 
 /// `jrgm new app --c` = `jrgm new app --bahasa c` (juga `--python`, `--js`, `--cpp`, ...).

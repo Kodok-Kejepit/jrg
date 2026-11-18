@@ -182,7 +182,8 @@ pub fn per_sumbu(a: &Nd, r: Reduksi, sumbu: i64) -> Hasil<Nd> {
         return Err(kosong(r.nama()));
     }
     let luar: usize = a.shape[..s].iter().product();
-    let dalam: usize = a.shape[s + 1..].iter().product::<usize>().max(1);
+    // Hasil kali kosong sudah 1; `.max(1)` dulu mengubah sumbu dalam berukuran 0 jadi 1 dan membaca buffer kosong.
+    let dalam: usize = a.shape[s + 1..].iter().product();
     let bentuk_hasil: Vec<usize> = a.shape.iter().enumerate()
         .filter(|(i, _)| *i != s).map(|(_, &d)| d).collect();
 

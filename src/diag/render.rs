@@ -99,7 +99,8 @@ impl Diagnostic {
     ) -> String {
         if self.jejak.is_empty() { return String::new(); }
         let mut out = String::new();
-        let sambung = " ".repeat(lebar_gutter + "jejak: ".len());
+        let kata_jejak = crate::terjemah::pilih("jejak:", "trace:");
+        let sambung = " ".repeat(lebar_gutter + kata_jejak.chars().count() + 1);
         // Bingkai tanpa lokasi dibuang, di SATU tempat untuk kedua backend.
         let tampak: Vec<&BingkaiJejak> =
             self.jejak.iter().filter(|f| f.span.is_some()).collect();
@@ -109,22 +110,23 @@ impl Diagnostic {
         for (i, fr) in tampak.iter().enumerate() {
             let posisi = match fr.span.and_then(|sp| map.locate(sp)) {
                 Some(loc) => format!(
-                    " dipanggil di {}:{}:{}", loc.file_name, loc.line_no, loc.col
+                    "{}{}:{}:{}", crate::terjemah::pilih(" dipanggil di ", " called at "),
+                    loc.file_name, loc.line_no, loc.col
                 ),
                 None => String::new(),
             };
             if i == 0 {
                 out.push_str(&format!(
-                    "\n{gutter}{sian}jejak:{reset} `{}`{}", fr.nama, posisi
+                    "\n{gutter}{sian}{kata_jejak}{reset} `{}`{}", fr.nama, posisi
                 ));
             } else {
                 out.push_str(&format!("\n{sambung}`{}`{}", fr.nama, posisi));
             }
         }
         if self.jejak_sisa > 0 {
-            out.push_str(&format!(
+            out.push_str(&crate::terjemah::t(&format!(
                 "\n{sambung}… dan {} panggilan lagi", self.jejak_sisa
-            ));
+            )));
         }
         out
     }
@@ -167,6 +169,9 @@ impl Diagnostic {
 
         let located = self.span.and_then(|s| map.locate(s));
         let kunci = kunci_error(self.code.as_deref(), &self.message);
+        let tr = crate::terjemah::t;
+        let kata_bantuan = crate::terjemah::pilih("bantuan:", "help:");
+        let kata_catatan = crate::terjemah::pilih("catatan:", "note:");
         if nada != Nada::Sopan {
             let baris_omelan = omelan(nada, self.fase, located.as_ref().map(|l| l.line_no), kunci, hitungan);
             if !baris_omelan.is_empty() {
@@ -179,7 +184,7 @@ impl Diagnostic {
         if let Some(code) = &self.code {
             let _ = write!(out, "{dim}[{}]{reset}", code);
         }
-        let _ = write!(out, "{bold}: {}{reset}", self.message);
+        let _ = write!(out, "{bold}: {}{reset}", tr(&self.message));
 
         if let Some(loc) = located {
             let gutter_w = loc.line_no.to_string().len();
@@ -205,24 +210,24 @@ impl Diagnostic {
             let carets = "^".repeat(loc.caret_width);
             let _ = write!(out, "\n{pad} {biru}|{reset} {}{utama}{}{reset}", caret_pad, carets);
             if let Some(label) = &self.label {
-                let _ = write!(out, " {utama}{}{reset}", label);
+                let _ = write!(out, " {utama}{}{reset}", tr(label));
             }
             let _ = write!(out, "\n{pad} {biru}|{reset}");
             for help in &self.helps {
-                let _ = write!(out, "\n{pad} {biru}={reset} {hijau}bantuan:{reset} {}", help);
+                let _ = write!(out, "\n{pad} {biru}={reset} {hijau}{kata_bantuan}{reset} {}", tr(help));
             }
             for note in &self.notes {
-                let _ = write!(out, "\n{pad} {biru}={reset} {sian}catatan:{reset} {}", note);
+                let _ = write!(out, "\n{pad} {biru}={reset} {sian}{kata_catatan}{reset} {}", tr(note));
             }
             let gut = format!("{pad} {biru}={reset} ");
             let _ = write!(out, "{}", self.render_jejak(
                 map, &gut, pad.chars().count() + 3, sian, reset));
         } else {
             for help in &self.helps {
-                let _ = write!(out, "\n  {biru}={reset} {hijau}bantuan:{reset} {}", help);
+                let _ = write!(out, "\n  {biru}={reset} {hijau}{kata_bantuan}{reset} {}", tr(help));
             }
             for note in &self.notes {
-                let _ = write!(out, "\n  {biru}={reset} {sian}catatan:{reset} {}", note);
+                let _ = write!(out, "\n  {biru}={reset} {sian}{kata_catatan}{reset} {}", tr(note));
             }
             let gut = format!("  {biru}={reset} ");
             let _ = write!(out, "{}", self.render_jejak(map, &gut, 4, sian, reset));
@@ -259,7 +264,8 @@ impl Diagnostic {
             let biru  = if warna { "\x1b[34m" } else { "" };
             let reset = if warna { "\x1b[0m" } else { "" };
             teks.push_str(&format!(
-                "\n{pad} {biru}={reset} {hijau}bantuan:{reset} {}", bantuan_tambahan(kunci)
+                "\n{pad} {biru}={reset} {hijau}{}{reset} {}",
+                crate::terjemah::pilih("bantuan:", "help:"), bantuan_tambahan(kunci)
             ));
         }
         crate::host::galat(&format!("{}{}\n\n", pembatas(self.severity, warna), teks));
@@ -282,7 +288,7 @@ impl Diagnostic {
         let Some(tujuan) = std::env::var_os("JRG_GALAT_KE") else { return };
         if tujuan.is_empty() { return; }
         let Some(loc) = self.span.and_then(|s| map.locate(s)) else { return };
-        let pesan = self.message.replace(['\t', '\n', '\r'], " ");
+        let pesan = crate::terjemah::t(&self.message).replace(['\t', '\n', '\r'], " ");
         let baris = format!("{}\t{}\t{}\t{}\n", loc.file_name, loc.line_no, loc.col, pesan);
         if let Ok(mut f) = std::fs::OpenOptions::new().append(true).create(true).open(&tujuan) {
             let _ = std::io::Write::write_all(&mut f, baris.as_bytes());
@@ -297,7 +303,8 @@ pub(crate) fn ringkas_jumlah(n: usize) -> String {
     let merah = if warna { "\x1b[1;31m" } else { "" };
     let tebal = if warna { "\x1b[1m" } else { "" };
     let reset = if warna { "\x1b[0m" } else { "" };
-    format!("{merah}error{reset}{tebal}:{reset} {tebal}{n} error menghentikan kompilasi{reset}")
+    let ekor = crate::terjemah::pilih(" error menghentikan kompilasi", " errors stopped compilation");
+    format!("{merah}error{reset}{tebal}:{reset} {tebal}{n}{ekor}{reset}")
 }
 
 /// Apakah keluaran diagnostik boleh berwarna?
@@ -317,10 +324,11 @@ pub(crate) fn pembatas(sev: Severity, warna: bool) -> String {
     if !warna { return String::new(); }
     let pertama = !SUDAH_ADA_PEMBATAS.swap(true, std::sync::atomic::Ordering::Relaxed);
     let lebar = lebar_terminal().min(100);
+    let pilih = crate::terjemah::pilih;
     let (kode, label) = match sev {
-        Severity::Error   => ("\x1b[1;31m", " ada yang salah "),
-        Severity::Warning => ("\x1b[1;33m", " perhatian "),
-        _                 => ("\x1b[1;36m", " catatan "),
+        Severity::Error   => ("\x1b[1;31m", pilih(" ada yang salah ", " something went wrong ")),
+        Severity::Warning => ("\x1b[1;33m", pilih(" perhatian ", " heads up ")),
+        _                 => ("\x1b[1;36m", pilih(" catatan ", " note ")),
     };
     let dim = "\x1b[2m";
     let reset = "\x1b[0m";

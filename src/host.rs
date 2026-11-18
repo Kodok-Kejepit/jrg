@@ -1,11 +1,11 @@
 // src/host.rs — yang disediakan lingkungan: keluaran, masukan, jam, keacakan,
-// tidur, dan keluar. Di mesin biasa ini std apa adanya; di peramban (wasm) std
-// diam atau panik untuk semuanya, jadi tiap-tiapnya diminta ke JavaScript.
+// tidur, dan keluar. Di mesin biasa dan WASI ini std apa adanya; di peramban (Praktik,
+// `wasm32-unknown-unknown`) std diam atau panik, jadi tiap-tiapnya diminta ke JavaScript.
 
 use std::io;
 use std::time::Duration;
 
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 mod imp {
     use std::collections::VecDeque;
     use std::io::{self, BufRead, Write};
@@ -83,6 +83,11 @@ mod imp {
                 }
                 baris.extend(q.drain(..));
             }
+            // Masukan tanpa baris baru (`/dev/zero`, berkas biner lewat pipa) dulu ditampung sampai alokasinya gagal
+            // dan prosesnya mati SIGABRT (Fase AMAN-68).
+            if baris.len() as u64 > crate::host::MAKS_BACA_UTUH {
+                return Err(io::Error::other(crate::host::pesan_baris_kepanjangan()));
+            }
             match tarik(&mut kunci) {
                 Ok(0) => break,
                 Ok(_) => {}
@@ -97,7 +102,7 @@ mod imp {
         // Sama dengan `BufRead::read_line`: byte yang bukan UTF-8 adalah galat, dan
         // `buf` tidak disentuh.
         let teks = String::from_utf8(baris).map_err(|_| io::Error::new(
-            io::ErrorKind::InvalidData, "stream did not contain valid UTF-8"))?;
+            io::ErrorKind::InvalidData, crate::host::PESAN_MASUKAN_BUKAN_UTF8))?;
         buf.push_str(&teks);
         Ok(teks.len())
     }
@@ -106,7 +111,16 @@ mod imp {
         static AWAL: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
         AWAL.get_or_init(std::time::Instant::now).elapsed()
     }
+    #[cfg(not(target_os = "wasi"))]
     pub fn acak(_: usize) -> Option<Vec<u8>> { None }
+    // WASI tidak punya `/dev/urandom`; sumber acaknya `random_get` (preview1).
+    #[cfg(target_os = "wasi")]
+    pub fn acak(n: usize) -> Option<Vec<u8>> {
+        #[link(wasm_import_module = "wasi_snapshot_preview1")]
+        extern "C" { fn random_get(p: *mut u8, n: usize) -> i32; }
+        let mut buf = vec![0u8; n];
+        (unsafe { random_get(buf.as_mut_ptr(), n) } == 0).then_some(buf)
+    }
     pub fn tidur(d: Duration) { std::thread::sleep(d) }
     pub fn keluar(kode: i32) -> ! {
         // `process::exit` tidak menjalankan `Drop` milik `static`, jadi terminal yang
@@ -127,7 +141,7 @@ mod imp {
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 mod imp {
     use std::io;
     use std::time::Duration;
@@ -199,6 +213,12 @@ pub fn skrip_tanpa_penafsir(prog: &std::path::Path) -> Option<String> {
 /// Batas satu bacaan berkas utuh — angka yang sama dengan jawaban `http::` dan bom `gzip::`. Kalimatnya
 /// sama dengan lapis LLVM (`-100002`): `/dev/zero`, FIFO tanpa ujung atau jalur dari luar dulu memakan RAM mesin.
 pub const MAKS_BACA_UTUH: u64 = 256 << 20;
+
+/// Kalimat `tok()` di tiga mesin; LLVM menyisipkannya saat kompilasi (runtime-nya cuma menjawab kode).
+pub const PESAN_MASUKAN_BUKAN_UTF8: &str = "masukan bukan teks UTF-8 yang sah";
+pub fn pesan_baris_kepanjangan() -> String {
+    format!("satu baris masukan lebih dari {} MiB tanpa baris baru — yang dialirkan bukan teks berbaris?", MAKS_BACA_UTUH >> 20)
+}
 pub const PESAN_BACA_UTUH: &str = "isinya lebih dari 256 MiB, batas satu bacaan utuh \
     (berkas raksasa atau perangkat tanpa ujung seperti /dev/zero tidak dibaca ke memori)";
 
@@ -334,7 +354,7 @@ pub fn sejak_epoch() -> Option<Duration> { imp::sejak_epoch() }
 /// Jam yang cuma maju, untuk mengukur selisih; `std::time::Instant` panik di peramban.
 pub fn monoton() -> Duration { imp::monoton() }
 /// `n` byte dari sumber acak lingkungan; `None` kalau lingkungan ini tidak
-/// menyediakannya sendiri (di mesin biasa: pakai `/dev/urandom`).
+/// menyediakannya sendiri (di mesin biasa: pakai `/dev/urandom`; WASI dan peramban menyediakannya).
 pub fn acak(n: usize) -> Option<Vec<u8>> { imp::acak(n) }
 /// Tunggu sekurang-kurangnya `d`.
 pub fn tidur(d: Duration) { imp::tidur(d) }

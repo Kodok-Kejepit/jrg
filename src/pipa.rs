@@ -68,6 +68,7 @@ pub fn parse_error_help(msg: &str) -> Option<String> {
 
 /// Lex `sf`; galatnya dilaporkan dengan lokasi dan caret.
 pub fn lex_dilaporkan(sf: &SourceFile, peta: &diag::SourceMap) -> Option<Vec<Token>> {
+    diag::daftarkan_utama(sf);
     lex(sf).map_err(|e| {
         let mut baris = e.msg.lines();
         let d = diag::Diagnostic::error(baris.next().unwrap_or_default().to_string())

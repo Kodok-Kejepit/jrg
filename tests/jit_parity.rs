@@ -3567,3 +3567,1045 @@ fn sesi_hof_sama_dengan_vm() {
         assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
     }
 }
+
+const JIR: (&str, &str) = ("JRG_JIT_JIR", "paksa");
+
+/// JIR-1 (`src/jit/jir/`, langkah 85): seluruh `PARITAS` di mode stres dengan JIR dipaksa untuk unit yang dicakupnya.
+#[test]
+fn paritas_lewat_jir() {
+    let mut gagal = Vec::new();
+    for (nama, src) in PARITAS {
+        let i = jalankan(src, &[], &[]);
+        let j = jit_sama(src, &i, &[STRES, JIR]);
+        if i.sukses != j.sukses || i.stdout != j.stdout {
+            gagal.push(format!("  {nama}\n     interpreter ({}): {:?}\n     jir stres   ({}): {:?}",
+                i.sukses, i.stdout, j.sukses, j.stdout));
+        }
+    }
+    assert!(gagal.is_empty(), "{} kasus PARITAS beda lewat JIR:\n{}", gagal.len(), gagal.join("\n"));
+}
+
+/// Penurun langsung tetap jalan untuk semuanya dengan `JRG_JIT_JIR=mati` (JIR bawaan sejak langkah 101): seluruh
+/// `PARITAS` sama lewat penurun langsung di mode stres, supaya jalur yang jadi cadangan JIR tidak kehilangan instrumen.
+#[test]
+fn paritas_lewat_penurun_langsung() {
+    let mut gagal = Vec::new();
+    for (nama, src) in PARITAS {
+        let i = jalankan(src, &[], &[]);
+        let j = jit_sama(src, &i, &[STRES, ("JRG_JIT_JIR", "mati")]);
+        if i.sukses != j.sukses || i.stdout != j.stdout {
+            gagal.push(format!("  {nama}\n     interpreter ({}): {:?}\n     langsung stres ({}): {:?}",
+                i.sukses, i.stdout, j.sukses, j.stdout));
+        }
+    }
+    assert!(gagal.is_empty(), "{} kasus PARITAS beda lewat penurun langsung:\n{}", gagal.len(), gagal.join("\n"));
+}
+
+/// JIR bawaan sejak langkah 101: tanpa variabel apa pun unit lewat JIR, dan `mati` mematikannya.
+#[test]
+fn jir_bawaan_dan_bisa_dimatikan() {
+    let prog = "fn jumlah(n: int) -> int {\n    var t = 0\n    for i in 0..n { t = t + i }\n    return t\n}\nfn main() { wok(jumlah(1000)) }\n";
+    // Nilai kosong = bawaan, juga saat suite sendiri dijalankan dengan `JRG_JIT_JIR=mati`.
+    let bawaan = jalankan(prog, &["--jit"], &[STRES, ("JRG_JIT_LOG", "ringkas"), ("JRG_JIT_JIR", "")]);
+    assert!(bawaan.stderr.contains("jir: ") && !bawaan.stderr.contains("jir: 0 "), "JIR tidak dipakai bawaan:\n{}", bawaan.stderr);
+    let mati = jalankan(prog, &["--jit"], &[STRES, ("JRG_JIT_LOG", "ringkas"), ("JRG_JIT_JIR", "mati")]);
+    assert!(!mati.stderr.contains("jir: "), "JRG_JIT_JIR=mati masih lewat JIR:\n{}", mati.stderr);
+    assert_eq!(bawaan.stdout, mati.stdout);
+}
+
+/// JIR-1 benar-benar dipakai: loop dan cabang bulat, jaga luapan yang deopt lalu VM menghitung di 128 bit, geseran
+/// yang membuang bit, dan pembagi nol (kalimat dan jejak dari VM).
+const JIR_DASAR: &str = r#"fn jumlah(n: int) -> int {
+    var t = 0
+    for i in 0..n { if i % 3 == 0 { t = t + i * 2 } else { t = t - 1 } }
+    return t
+}
+fn geser(x: int, k: int) -> int { return (x << k) >> 1 }
+fn bagi(a: int, b: int) -> int { return a / b + a % b }
+fn main() {
+    var x = 0
+    for k in 0..300 { x = x + jumlah(k) }
+    wok(x, geser(3, 4), bagi(17, 5))
+    // Luapan 64 bit di tengah loop: deopt, lalu VM menghitung di 128 bit.
+    var y = 1
+    for k in 0..70 { y = y * 2 + jumlah(3) }
+    wok(y)
+    // Geseran yang membuang bit dan pembagi nol: deopt, VM yang melapor.
+    wok(geser(1, 62))
+    wok(bagi(1, 0))
+}
+"#;
+
+#[test]
+fn jir_sama_dengan_vm() {
+    let v = jalankan(JIR_DASAR, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 3, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_DASAR, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_DASAR, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "ringkas")]);
+    assert!(r.stderr.contains("[jit] jir: "), "JIR tidak dipakai:\n{}", r.stderr);
+}
+
+/// JIR-1b (langkah 86): panggilan langsung ke callee bulat (rekursi dalam, `ULANG` dan deopt di dalam callee) dan
+/// intrinsik `int`/`uint`/`float` atas bulat.
+const JIR_PANGGIL: &str = r#"fn fib(n: int) -> int { if n < 2 { return n } return fib(n - 1) + fib(n - 2) }
+fn rata(n: int) -> float {
+    var s = 0.0
+    var i = 0
+    while i < n { s = s + (i as float) * 0.5; i = i + 1 }
+    return s / 2.0
+}
+fn jumlah_u(n: int) -> int { var t = 0  for i in 0..n { t = t + int(i as uint) } return t }
+fn dalam(n: int) -> int { if n == 0 { return 0 } return 1 + dalam(n - 1) }
+fn main() {
+    wok(fib(24), rata(1000), jumlah_u(500))
+    wok(dalam(5000))
+    var x = 0
+    for k in 0..40 { x = x + fib(k % 20) }
+    wok(x)
+}
+"#;
+
+#[test]
+fn jir_panggil_sama_dengan_vm() {
+    let v = jalankan(JIR_PANGGIL, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.lines().count() == 3, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_PANGGIL, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_PANGGIL, &["--jit"], &[JIR, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("[jit] jir fib:\nb0") && r.stderr.contains("= panggil #"), "fib tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1c (langkah 87): nilai milik VM di JIR — bukaan berjaga yang gagal saat jenisnya berganti, pembantu `lambat`
+/// (`muat`, `simpan`, `buang`, `benar`, `taruh`), langkah VM, hasil milik VM.
+const JIR_NILAI: &str = r#"fn sapa(nama, n: int) {
+    var s = ""
+    var i = 0
+    while i < n {
+        if nama == "" { s = s + "?" } else { s = s + nama }
+        i = i + 1
+    }
+    return s
+}
+fn tambah(a, b) { return a + b }
+fn main() {
+    wok(sapa("ab", 3), sapa("", 2))
+    var t = 0
+    for i in 0..500 { t = tambah(t, i) }
+    wok(t)
+    // Jenis nilai VM berganti: bukaan spekulasi gagal, lalu VM.
+    wok(tambah(1.5, 2), tambah("x", "y"))
+    // Galat yang lahir di langkah VM: teks + bulat.
+    wok(tambah("z", 1))
+}
+"#;
+
+#[test]
+fn jir_nilai_sama_dengan_vm() {
+    let v = jalankan(JIR_NILAI, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.lines().count() == 4, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_NILAI, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_NILAI, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("= buka "), "bukaan nilai VM tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1d (langkah 88): fungsi bawaan dan hasil berspekulasinya (`PUNCAK_VM`), operator atas nilai VM, tangkapan closure
+/// yang dibaca dan ditulis, cabang yang diputuskan VM, `str(n)`.
+const JIR_BAWAAN: &str = r#"fn teks(n: int) {
+    var s = ""
+    for i in 0..n { s = s + str(i % 10) + str::upper("a") }
+    return len(s)
+}
+fn bandingkan(a, b) { return a < b }
+fn main() {
+    wok(teks(30))
+    var k = 3
+    let tambah = |x| { k = k + x  return k * 2 }
+    var t = 0
+    for i in 0..400 { t = t + tambah(i % 5) }
+    wok(t, k)
+    var n = 0
+    for i in 0..300 { if bandingkan(str(i), "15") { n = n + 1 } }
+    wok(n)
+    // Hasil bawaan yang dispekulasikan bulat lalu berganti jenis: deopt di instruksi sesudahnya.
+    var u = 0
+    for i in 0..300 { u = u + math::abs(i - 150) }
+    wok(u, math::abs(-2.5))
+    wok(bandingkan([1], "x"))
+}
+"#;
+
+#[test]
+fn jir_bawaan_sama_dengan_vm() {
+    let v = jalankan(JIR_BAWAAN, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 4, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_BAWAAN, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_BAWAAN, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("muat tangkapan") && r.stderr.contains("biner-vm"), "tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1e (langkah 89): tepi ke titik temu yang dilebarkan jadi milik VM (blok stub `tulis-vm`, keadaan tepi dipakai
+/// sebelum titik temu) dan literal struct, larik, tuple, varian (`Inst::Bangun`).
+const JIR_TEPI: &str = r#"struct T { pub a: int, pub b: string }
+enum E { A(int), B }
+fn campur(n: int) {
+    var x = 0
+    for i in 0..n {
+        // Di titik temu `x` kadang teks: posisinya dilebarkan jadi milik VM di tepi.
+        if i % 7 == 0 { x = "t" } else { x = i }
+    }
+    return x
+}
+fn susun(n: int) {
+    var t = T { a: 0, b: "" }
+    var xs = []
+    for i in 0..n {
+        t = T { a: i, b: str(i) }
+        xs = [i, i * 2]
+        let p = (i, "p")
+        let e = if i % 2 == 0 { E::A(i) } else { E::B }
+    }
+    return [t.a, len(xs), 0]
+}
+fn main() {
+    wok(campur(50), campur(8))
+    wok(susun(40))
+}
+"#;
+
+#[test]
+fn jir_tepi_sama_dengan_vm() {
+    let v = jalankan(JIR_TEPI, &["--vm"], &[]);
+    assert!(v.sukses && v.stdout.lines().count() == 2, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_TEPI, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_TEPI, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("tulis-vm"), "tepi pelebar tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1f (langkah 90): salinan lokal maya, `Muat` atas lokal yang isinya salinan (membaca lokal ASALNYA — sempat
+/// menjawab `nil` dan lengan `match` yang salah tanpa suara sebelum dibetulkan), `Salin`, `Tukar`, `Metode`,
+/// iterator milik VM.
+const JIR_SALINAN: [&str; 2] = [r#"package main
+struct P { pub a: int }
+impl P {
+  fn ubah(self) {
+    var g = self
+    g.a = 9
+    return g
+  }
+  fn salin(self) {
+    let x = self
+    x
+  }
+}
+pub fn main() {
+  wok(P { a: 1 }.ubah(), P { a: 2 }.salin())
+  for _, i in [1, 2, 3] {
+    if i == 2 {
+      continue
+    }
+    wok(i)
+  }
+}"#, r#"fn k(v) { match v { 2 => 7, _ => 13 } }
+fn f(v) { match v { 2.0 => 7, _ => 13 } }
+fn s(v) { match v { "a" => 1, "x" => 2, _ => 3 } }
+fn n(v) { match v { -5 => 1, 0 => 2, _ => 3 } }
+fn c(v) { match v { 'a' => 1, 97 => 2, _ => 3 } }
+fn b(v) { match v { true => 1, 1 => 2, _ => 3 } }
+wok(k(2.0), k(2), f(2), f(2.0), f(2.5))
+wok(s("a"), s("x"), s(1))
+wok(n(-5), n(-5.0), n(0.0), n(nil))
+wok(c('a'), c(97), c(97.0))
+wok(b(true), b(1), b(1.0), b(false))
+let x = 2.0
+wok(match x { 1 | 2 | 3 => "dua", 4..=8 => "rentang", _ => "lain" })
+"#];
+
+#[test]
+fn jir_salinan_sama_dengan_vm() {
+    for src in JIR_SALINAN {
+        let v = jalankan(src, &["--vm"], &[]);
+        assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+        for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+            let j = jalankan(src, &["--jit"], env);
+            assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+        }
+        let r = jalankan(src, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "ringkas")]);
+        assert!(r.stderr.contains("[jit] jir: "), "JIR tidak dipakai:\n{}", r.stderr);
+    }
+}
+
+/// JIR-1g (langkah 91): panggilan langsung (`Cara::Langsung`: argumen nilai VM, callee ringan, hasil angka dari register
+/// atau dibuka berjaga, deopt di dalam callee) dan `len` atas nilai VM dan lokal.
+const JIR_LANGSUNG: &str = r#"fn panjang(s, k: int) -> int { return len(s) + k }
+fn sambung(a, b) { return a + "-" + b }
+fn skala(x, f: float) -> float { return x * f }
+fn kerja(n: int) {
+    var t = 0
+    var s = ""
+    var f = 0.0
+    for i in 0..n {
+        t = t + panjang("abc", i)
+        if i % 50 == 0 { s = sambung(s, str(i)) }
+        f = f + skala(i, 0.5)
+    }
+    return [t, len(s), f]
+}
+fn main() {
+    wok(kerja(400))
+    // Argumen berganti jenis: callee deopt, hasilnya bukan bulat lagi.
+    wok(skala(2.5, 2.0), panjang([1, 2], 3))
+    wok(panjang(5, 1))
+}
+"#;
+
+#[test]
+fn jir_langsung_sama_dengan_vm() {
+    let v = jalankan(JIR_LANGSUNG, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 2, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_LANGSUNG, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_LANGSUNG, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("langsung #") && r.stderr.contains("= panjang"), "tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1h (langkah 92): `Inst::Pembantu` untuk field nilai VM, pola dan payload enum (atas nilai VM dan salinan lokal),
+/// global, indeks wadah milik VM; tepi atas salinan maya (dimuat dari lokal asalnya di stub).
+const JIR_PEMBANTU: &str = r#"package main
+struct Titik { pub x: int, pub nama: string }
+enum Bentuk { Kotak(int), Lingkar(float), Kosong }
+var HITUNG = 0
+fn luas(b) -> float {
+    match b {
+        Bentuk::Kotak(s) => (s * s) as float,
+        Bentuk::Lingkar(r) => 3.0 * r * r,
+        Bentuk::Kosong => 0.0,
+    }
+}
+fn jalan(n: int) {
+    var t = 0
+    var nama = ""
+    let ps = [Titik { x: 1, nama: "a" }, Titik { x: 2, nama: "b" }]
+    let d = {"k": 5}
+    for i in 0..n {
+        let p = ps[i % 2]
+        t = t + p.x + d["k"]
+        nama = p.nama
+        HITUNG = HITUNG + 1
+    }
+    return [t, len(nama), HITUNG]
+}
+fn main() {
+    var s = 0.0
+    for i in 0..300 {
+        let b = if i % 3 == 0 { Bentuk::Kotak(i) } else if i % 3 == 1 { Bentuk::Lingkar(1.5) } else { Bentuk::Kosong }
+        s = s + luas(b)
+    }
+    wok(s, jalan(200))
+    // Field yang tidak ada: galat dari VM sesudah deopt.
+    wok(jalan(2)[0], Titik { x: 1, nama: "z" }.y)
+}
+"#;
+
+#[test]
+fn jir_pembantu_sama_dengan_vm() {
+    let v = jalankan(JIR_PEMBANTU, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 1, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_PEMBANTU, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_PEMBANTU, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    // `match` atas lokal itu jadi rantai lengan sejak langkah 98 (dulu `PolaLokal` per lengan).
+    assert!(["Field [", "rantai #", "PayloadLokal [", "MuatGlobal [", "Indeks ["].iter().all(|k| r.stderr.contains(k)),
+        "tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1i (langkah 93): elemen larik lokal (`IndeksLokal`, `GetIndex` atas salinan maya, `TulisIndexLokal`) lewat
+/// `lambat::baca`/`baca_pecahan`/`tulis` berjaga spekulasi; elemen berganti jenis dan indeks di luar batas.
+const JIR_LARIK: &str = r#"fn urut(n: int) {
+    var a = [0; 64]
+    var f = [0.0; 8]
+    for i in 0..n {
+        a[i % 64] = (i * 7919) % 101
+        f[i % 8] = f[i % 8] + 0.5
+    }
+    var t = 0
+    for i in 0..64 { t = t + a[i] }
+    var g = 0.0
+    for i in 0..8 { g = g + f[i] }
+    return [t, a[3], g]
+}
+fn main() {
+    wok(urut(1000))
+    // Elemen berganti jenis: spekulasi gagal, VM melanjutkan.
+    var b = [1, 2, 3]
+    for i in 0..300 { b[i % 3] = b[i % 3] + 1 }
+    b[1] = "x"
+    var s = ""
+    for i in 0..3 { s = s + str(b[i]) }
+    wok(s)
+    // Indeks di luar batas: galat dari VM.
+    wok(urut(10)[0], b[7])
+}
+"#;
+
+#[test]
+fn jir_larik_sama_dengan_vm() {
+    let v = jalankan(JIR_LARIK, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 2, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_LARIK, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_LARIK, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("  Baca "), "baca larik tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1j (langkah 94): bulat 128 bit (`Jenis::Lebar`) di register JIR — konstanta, `+ - *` berjaga luapan, banding,
+/// bagi/sisa berspekulasi 64 bit, operasi bit, geser (tetap dan berjaga), `math::wrap_*`, `int` atasnya, bulat yang
+/// bertemu `Lebar` di titik temu, kembali sebagai milik VM, dan luapan 128 bit yang dilaporkan VM.
+const JIR_LEBAR: &str = r#"fn hash(n: int) {
+    var h = 1469598103934665603
+    for i in 0..n {
+        h = math::wrap_mul(h ^ (i & 255), 1099511628211)
+    }
+    return h % 1000003
+}
+fn besar(n: int) {
+    var x = 9223372036854775807
+    var s = 0
+    for i in 0..n {
+        x = x + 1
+        if x > 9223372036854775900 { s = s + 1 }
+        s = s + (x % 7)
+    }
+    return s
+}
+fn geser(n: int) {
+    var v = 18446744073709551615
+    var c = 0
+    for i in 0..n {
+        let w = (v >> 3) & 255
+        c = c + int(w)
+        v = (v << 1) ^ i
+        v = v & 18446744073709551615
+    }
+    return c
+}
+fn main() {
+    wok(hash(500), besar(300), geser(400))
+    // Luapan 128 bit: galat dari VM.
+    var m = 170141183460469231731687303715884105000
+    for i in 0..1000 { m = m + 1 }
+    wok(m)
+}
+"#;
+
+#[test]
+fn jir_lebar_sama_dengan_vm() {
+    let v = jalankan(JIR_LEBAR, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 1, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_LEBAR, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_LEBAR, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("LGeserKanan") && r.stderr.contains("KeLU"), "bulat 128 bit tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1k (langkah 95): cara gabungan `TipeLipat`/`TipeSama`/`PayloadSama`/`PayloadPanjang`, `Jenis::Rune` dan
+/// `str::char_at` (`KarakterLokal`/`Karakter`, −1 = deopt) di JIR.
+const JIR_JENIS: &str = r#"enum Bentuk { Titik, Garis(int), Kotak(int, int), Nama(string) }
+fn nilai(b: Bentuk) {
+    match b {
+        Bentuk::Titik => 0,
+        Bentuk::Garis(p) => p,
+        Bentuk::Kotak(a, c) => a * c,
+        Bentuk::Nama(s) => len(s),
+    }
+}
+fn jenis(x) {
+    if typeof(x) == "int" { return x }
+    if typeof(x) == "float" { return int(x) }
+    if typeof(x) == "string" { return len(x) }
+    return -1
+}
+fn huruf(s: string) {
+    var v = 0
+    for i in 0..len(s) {
+        let c = str::char_at(s, i)
+        if c == 'a' { v = v + 10 } else { v = v + int(c) % 7 }
+    }
+    return v
+}
+fn main() {
+    var t = 0
+    let daftar = [Bentuk::Titik, Bentuk::Garis(3), Bentuk::Kotak(2, 5), Bentuk::Nama("halo")]
+    for i in 0..400 { t = t + nilai(daftar[i % 4]) }
+    var u = 0
+    let campur = [1, 2.5, "abc", true]
+    for i in 0..400 { u = u + jenis(campur[i % 4]) }
+    wok(t, u, huruf("banana jaya raya"))
+}
+"#;
+
+/// Bulat 128 bit yang disimpan ke lokal milik VM: ditulis ke stack VM dulu (dulu lokalnya jadi `nil`).
+const JIR_SIMPAN_LEBAR: &str = r#"fn fnv(h: uint, s: str) -> uint {
+    var acc: uint = h
+    for i in 0..len(s) {
+        acc = math::wrap_mul(acc ^ (str::char_at(s, i) as uint), 1099511628211)
+    }
+    return acc
+}
+
+fn main() {
+    var hash: uint = 1469598103934665603
+    for r in 0..30 { hash = fnv(hash, "abcdefgh") }
+    wok(hash)
+}
+"#;
+
+#[test]
+fn jir_jenis_sama_dengan_vm() {
+    for (nama, prog) in [("jenis", JIR_JENIS), ("simpan lebar", JIR_SIMPAN_LEBAR)] {
+        let v = jalankan(prog, &["--vm"], &[]);
+        assert!(v.sukses, "{nama}: {}{}", v.stdout, v.stderr);
+        for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+            let j = jalankan(prog, &["--jit"], env);
+            assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{nama} {env:?}");
+        }
+    }
+    let r = jalankan(JIR_JENIS, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("PayloadJenisSama") && r.stderr.contains("KarakterLokal"), "cara gabungan tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-1l (langkah 96): `?` (`Cara::Sebar`, `Inst::Sebar`): `Ok`/`Some` dibuka di tempat, `Err`/`None` pulang dengan
+/// nilainya; `TumbuhIndexLokal` atas angka native dan `PeriksaArgMetode` atas method yang diketahui.
+const JIR_SEBAR: &str = r#"fn bagi(a: float, b: float) -> Result<float, string> {
+    if b == 0.0 { return Err("bagi nol") }
+    return Ok(a / b)
+}
+fn rata(total: float, n: float, k: float) -> Result<float, string> {
+    let r = bagi(total, n)?
+    let h = bagi(r, k)?
+    return Ok(h)
+}
+fn pertama(xs: []int) -> Option<int> {
+    let a = xs.first()?
+    return Some(a * 2)
+}
+fn main() {
+    var s = 0.0
+    var gagal = 0
+    for i in 0..400 {
+        match rata(100.0, (i % 5) as float, 2.0) {
+            Ok(v) => { s = s + v }
+            Err(e) => { gagal = gagal + 1 }
+        }
+    }
+    var t = 0
+    for i in 0..300 {
+        let xs = if i % 4 == 0 { [] } else { [i] }
+        match pertama(xs) {
+            Some(v) => { t = t + v }
+            None => { t = t - 1 }
+        }
+    }
+    wok(s, gagal, t)
+}
+"#;
+
+#[test]
+fn jir_sebar_sama_dengan_vm() {
+    let v = jalankan(JIR_SEBAR, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_SEBAR, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_SEBAR, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("  sebar") && r.stderr.contains("pulang"), "`?` tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-2a (langkah 97): elemen larik lokal sebaris di penurunan JIR (`turun::baca_sebaris`/`tulis_sebaris` dengan
+/// tembolok penyimpanan per wilayah); larik yang dibagi (disalin ke larik lain, ditugasi ulang) lewat pembantu.
+const JIR_LARIK_SEBARIS: &str = r#"fn ubah(n: int) {
+    var a = [1, 2, 3, 4, 5, 6, 7, 8]
+    var simpan = []
+    var t = 0
+    for i in 0..n {
+        if i % 50 == 0 { simpan = simpan + [a] }
+        a[i % 8] = a[i % 8] * 3 % 1000003
+        t = t + a[(i + 3) % 8]
+        if i % 97 == 0 { a = [9, 9, 9, 9, 9, 9, 9, 9] }
+    }
+    var s = 0
+    for _, b in simpan { s = s + b[0] + b[7] }
+    return [t, s, a[2]]
+}
+fn main() {
+    wok(ubah(2000))
+    var f = [0.5, 1.5, 2.5]
+    var g = f
+    for i in 0..300 { f[i % 3] = f[i % 3] + 0.25 }
+    wok(f, g)
+}
+"#;
+
+#[test]
+fn jir_larik_sebaris_sama_dengan_vm() {
+    let v = jalankan(JIR_LARIK_SEBARIS, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_LARIK_SEBARIS, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}
+
+/// JIR-2b (langkah 98): rantai lengan `match` (`Inst::Rantai`, satu `pola_pilih` per rantai, indeksnya di slot stack)
+/// dan payload angka atas salinan lokal (`payload_angka_lokal`, angkanya langsung ke register).
+const JIR_RANTAI: &str = r#"enum Op { Tambah(int), Kali(int), Skala(float), Nol, Pasang(int, int) }
+fn jalan(ops: []Op, n: int) {
+    var x = 1
+    var f = 1.0
+    for i in 0..n {
+        let o = ops[i % len(ops)]
+        match o {
+            Op::Tambah(k) => { x = (x + k) % 1000003 }
+            Op::Kali(k) => { x = (x * k) % 1000003 }
+            Op::Skala(s) => { f = f * s }
+            Op::Nol => { x = x + 1 }
+            Op::Pasang(a, b) => { x = (x + a * b) % 1000003 }
+        }
+    }
+    return [x, int(f * 1000.0)]
+}
+fn salah(o: Op) {
+    match o {
+        Op::Tambah(k) => k,
+        Op::Nol => 0,
+        Op::Pasang(a) => a,
+        _ => -1,
+    }
+}
+fn main() {
+    let ops = [Op::Tambah(3), Op::Kali(7), Op::Skala(1.0001), Op::Nol, Op::Pasang(2, 5)]
+    wok(jalan(ops, 5000))
+    var t = 0
+    for i in 0..300 { t = t + salah(if i % 2 == 0 { Op::Tambah(i) } else { Op::Nol }) }
+    wok(t)
+    wok(salah(Op::Pasang(1, 2)))
+}
+"#;
+
+#[test]
+fn jir_rantai_sama_dengan_vm() {
+    let v = jalankan(JIR_RANTAI, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_RANTAI, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_RANTAI, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("rantai #") && r.stderr.contains("PayloadAngkaLokal"), "rantai/payload angka tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-2c (langkah 99): `Inst::Rumus`, `LoadLocal; GetField` sebagai satu `Pb::FieldLokal`, hasil langsung berjenis
+/// lain dibuka sesudahnya. Field berspekulasi selain bulat/pecahan dulu berkode pecahan: deopt membaca posisi yang
+/// tak ada (`dokumentasi/jit/jir-rencana.md`, JIR-2c).
+const JIR_RUMUS: &str = r#"struct P { pub x: f64, pub v: f64, pub nama: string, pub n: int }
+
+impl P {
+    fn maju(self, dt: f64) -> P {
+        return P { x: self.x + self.v * dt, v: self.v - self.x * 0.5, nama: self.nama, n: self.n }
+    }
+    fn setel(self, k: f64) -> P {
+        return P { x: -self.x, v: k / 4.0, nama: self.nama, n: self.n }
+    }
+}
+
+// Pembaruan biasa di loop panas.
+fn biasa() {
+    var p = P { x: 1.0, v: 0.5, nama: "a", n: 3 }
+    for i in 0..3000 { p = p.maju(0.01) }
+    wok(p.x, p.v, p.nama, p.n)
+}
+
+// Salinan yang dibagi tidak ikut berubah.
+fn dibagi() {
+    var q = P { x: 2.0, v: 1.0, nama: "b", n: 4 }
+    var simpan = []
+    for i in 0..3000 {
+        if i % 1000 == 0 { simpan = simpan + [q] }
+        q = q.maju(0.02)
+    }
+    wok(q.x, simpan[0].x, simpan[1].x, simpan[2].x)
+}
+
+// Field bulat yang dibaca rumus: spekulasinya gagal di tengah jalan.
+fn bulat(x0) {
+    var r = P { x: 1.0, v: 2.0, nama: "c", n: 5 }
+    for i in 0..3000 {
+        if i == 2000 { r = P { x: x0, v: 2.0, nama: "c", n: 5 } }
+        r = r.maju(0.001)
+    }
+    wok(r.x, r.v)
+}
+
+// Field bulat yang cuma ditulis: diganti pecahan.
+fn tulis_saja() {
+    var w = P { x: 1.5, v: 7.0, nama: "d", n: 6 }
+    for i in 0..3000 {
+        if i == 2000 { w = P { x: 1.5, v: 7, nama: "d", n: 6 } }
+        w = w.setel(1.0)
+    }
+    wok(w.x, w.v, typeof(w.v))
+}
+
+// Lokal yang ditangkap closure: lewat sel, closure melihat pembaruannya.
+fn tangkap() {
+    var c = P { x: 3.0, v: 1.0, nama: "e", n: 7 }
+    let lihat = || c.x
+    for i in 0..3000 { c = c.maju(0.0001) }
+    wok(lihat(), c.x)
+}
+
+// Hasil ke lokal lain: penerimanya disalin, asalnya tetap.
+fn lain() {
+    let a = P { x: 1.0, v: 1.0, nama: "f", n: 8 }
+    var t = 0.0
+    for i in 0..3000 { let b = a.maju(0.1); t = t + b.x }
+    wok(a.x, t)
+}
+
+fn main() {
+    biasa()
+    dibagi()
+    bulat(1)
+    tulis_saja()
+    tangkap()
+    lain()
+}
+"#;
+
+#[test]
+fn jir_rumus_sama_dengan_vm() {
+    let v = jalankan(JIR_RUMUS, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_RUMUS, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    // Tanpa stres: rumus direncanakan dari profil, yang belum ada kalau semua dikompilasi seketika.
+    let r = jalankan(JIR_RUMUS, &["--jit"], &[JIR, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains("rumus #") && r.stderr.contains("FieldLokal ["), "rumus/field_lokal tidak lewat JIR:\n{}", r.stderr);
+}
+
+/// JIR-2d (langkah 100): tembolok bacaan field angka per blok (`Pembangun::cse_field`), dibuang sesudah instruksi
+/// tidak murni, dan benih dari struct yang baru dibangun dari angka native; field dibaca ulang sesudah ditulis.
+const JIR_CSE_FIELD: &str = r#"struct T { pub a: int, pub b: float }
+fn baca(n: int) {
+    var t = T { a: 1, b: 0.5 }
+    var s = 0.0
+    for i in 0..n {
+        s = s + t.b + t.b * 2.0
+        let k = t.a + t.a
+        t.b = t.b + 0.25
+        s = s + t.b + (k as float)
+        t = T { a: i, b: s / 1000.0 }
+        s = s + t.b + (t.a as float)
+    }
+    return s
+}
+fn ganti(n: int) {
+    var t = T { a: 1, b: 1.5 }
+    var u = t
+    var s = 0
+    for i in 0..n {
+        s = s + t.a
+        t = T { a: t.a + 1, b: t.b }
+        s = s + t.a + u.a
+        if i == n / 2 { t = T { a: 1000, b: 0.0 } }
+    }
+    return s
+}
+fn main() {
+    wok(baca(500), ganti(400))
+}
+"#;
+
+#[test]
+fn jir_cse_field_sama_dengan_vm() {
+    let v = jalankan(JIR_CSE_FIELD, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_CSE_FIELD, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}
+
+/// JIR-3a (langkah 102): callee panggilan langsung disisipkan di JIR pemanggil; jaga di dalamnya membawa keadaan
+/// pemanggil (`Keadaan::induk`), dan deopt menyusun dua bingkai VM (`SISIP`). Spekulasi yang gagal dan galat di
+/// dalam callee yang disisipkan, enum dan struct milik VM sebagai argumen dan hasil.
+const JIR_SISIP: &str = r#"enum Op { Tambah(int), Kali(int), Skala(float), Diam }
+struct Titik { pub x: int, pub y: int }
+
+fn jalan(o: Op, acc: int) -> int {
+    match o {
+        Op::Tambah(k) => acc + k,
+        Op::Kali(k) => (acc * k) % 1000003,
+        Op::Skala(f) => acc + 2,
+        Op::Diam => acc,
+    }
+}
+fn geser(p: Titik, d: int) -> Titik {
+    return Titik { x: p.x + d, y: p.y - d }
+}
+fn bagi(a: int, b: int) -> int { return a / b }
+
+fn main() {
+    var acc = 1
+    for i in 0..3000 {
+        let o = if i % 4 == 0 { Op::Tambah(i % 97) } else if i % 4 == 1 { Op::Kali(3) } else if i % 4 == 2 { Op::Diam } else { Op::Skala(1.5) }
+        acc = jalan(o, acc)
+        // Spekulasi di dalam callee yang disisipkan gagal di tengah jalan: payload berganti jenis.
+        if i == 2500 { acc = jalan(Op::Tambah(9223372036854775000), acc) % 1000003 }
+    }
+    var p = Titik { x: 0, y: 0 }
+    for i in 0..2000 { p = geser(p, i % 5) }
+    var t = 0
+    for i in 0..500 { t = t + bagi(1000000, i + 1) }
+    wok(acc, p.x, p.y, t)
+    // Galat di dalam callee yang disisipkan: dilaporkan VM dengan jejak yang sama.
+    wok(bagi(5, 0))
+}
+"#;
+
+#[test]
+fn jir_sisip_sama_dengan_vm() {
+    let v = jalankan(JIR_SISIP, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 1, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..]] {
+        let j = jalankan(JIR_SISIP, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let r = jalankan(JIR_SISIP, &["--jit"], &[JIR, ("JRG_JIT_LOG", "jir")]);
+    assert!(r.stderr.contains(" < fid"), "tidak ada callee yang disisipkan:\n{}", r.stderr);
+}
+
+/// JIR-3b langkah 1 (bayangan varian): varian yang dibangun di cabang berbeda bertemu, lalu `match` di callee yang
+/// disisipkan dan di pemanggil dilipat dari penandanya. Payload bulat/pecahan/tuple, varian tanpa payload,
+/// payload milik VM, varian yang lolos (larik, cetak, callee lain), dan varian yang dibawa loop.
+const JIR_BAYANG: &str = r#"enum Op { Tambah(int), Skala(float), Rentang(int, int), Diam, Balik }
+
+fn jalan(o: Op, acc: int) -> int {
+    match o {
+        Op::Tambah(k) => acc + k,
+        Op::Skala(f) => int(f * 2.0) + acc,
+        Op::Rentang(lo, hi) => {
+            if acc < lo { return lo }
+            if acc > hi { return hi }
+            return acc
+        }
+        Op::Diam => acc,
+        Op::Balik => 0 - acc,
+    }
+}
+
+fn nol(o: Op) -> bool {
+    match o {
+        Op::Tambah(0) => true,
+        _ => false,
+    }
+}
+
+fn main() {
+    let xs = [3, 4, 5]
+    var acc = 1
+    var simpan = []
+    var lama = Op::Diam
+    var nolnya = 0
+    for i in 0..20000 {
+        let s = i % 7
+        var op = Op::Diam
+        if s == 0 { op = Op::Tambah(i % 13) }
+        else if s == 1 { op = Op::Skala(1.25) }
+        else if s == 2 { op = Op::Rentang(-50, 50) }
+        else if s == 3 { op = Op::Balik }
+        else if s == 4 { op = Op::Tambah(xs[i % 3]) }
+        else if s == 5 { op = Op::Tambah(0) }
+        acc = jalan(op, acc) % 100003
+        match op {
+            Op::Tambah(k) => { if k > 11 { acc = acc + 1 } }
+            Op::Skala(f) => { if f > 2.0 { acc = 0 } }
+            _ => {}
+        }
+        if nol(op) { nolnya += 1 }
+        if i % 5000 == 0 { simpan = simpan + [op]; wok(op) }
+        acc = jalan(lama, acc)
+        lama = op
+    }
+    wok(acc, nolnya, simpan)
+    wok(jalan(Op::Tambah(170141183460469231731687303715884105727), 1))
+}
+"#;
+
+#[test]
+fn jir_bayang_varian_sama_dengan_vm() {
+    let v = jalankan(JIR_BAYANG, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 5, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..], &[JIR, STRES, ("JRG_JIT_BAYANG", "mati")][..]] {
+        let j = jalankan(JIR_BAYANG, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let rantai = |bayang: &str| jalankan(JIR_BAYANG, &["--jit"], &[JIR, STRES, ("JRG_JIT_LOG", "jir"), ("JRG_JIT_BAYANG", bayang)])
+        .stderr.matches(" = rantai #").count();
+    let (dengan, tanpa) = (rantai(""), rantai("mati"));
+    assert!(dengan < tanpa, "tidak ada rantai yang dilipat bayangan: {dengan} lawan {tanpa}");
+}
+
+/// JIR-3b langkah 105: payload tuple dibaca per elemen dari bayangan di callee yang disisipkan (`PayloadLokal` +
+/// `Baca` dilipat), tuple-nya diwujudkan cuma saat deopt atau dibaca utuh (`wok`), varian yang lolos ke larik.
+const JIR_TUPLE: &str = r#"enum Bentuk { Kotak(int, int), Garis(int, int, int), Skala(int), Kosong }
+
+fn luas(b: Bentuk, acc: int) -> int {
+    match b {
+        Bentuk::Kotak(p, l) => (acc + p * l) % 1000003,
+        Bentuk::Garis(a, c, d) => {
+            if acc < a { return a }
+            return acc - c + d
+        }
+        Bentuk::Skala(f) => { if f > 1 { return acc + f }
+            return acc }
+        Bentuk::Kosong => acc,
+    }
+}
+
+fn main() {
+    var acc = 0
+    var simpan = []
+    for i in 0..20000 {
+        let s = i % 4
+        var b = Bentuk::Kosong
+        if s == 0 { b = Bentuk::Kotak(i % 7, 3) }
+        else if s == 1 { b = Bentuk::Garis(i % 5, 2, 9) }
+        else if s == 2 { b = Bentuk::Skala(i % 3) }
+        acc = luas(b, acc)
+        if i % 6000 == 1 { simpan = simpan + [b]
+            wok(b) }
+    }
+    wok(acc, simpan)
+    wok(luas(Bentuk::Kotak(170141183460469231731687303715884105727, 2), 1))
+}
+"#;
+
+#[test]
+fn jir_payload_tuple_sama_dengan_vm() {
+    let v = jalankan(JIR_TUPLE, &["--vm"], &[]);
+    assert!(!v.sukses && v.stdout.lines().count() == 5, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..], &[JIR, STRES, ("JRG_JIT_BAYANG", "mati")][..]] {
+        let j = jalankan(JIR_TUPLE, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    let pl = |bayang: &str| jalankan(JIR_TUPLE, &["--jit"], &[JIR, ("JRG_JIT_LOG", "jir"), ("JRG_JIT_BAYANG", bayang)])
+        .stderr.matches("PayloadLokal").count();
+    let (dengan, tanpa) = (pl(""), pl("mati"));
+    assert!(dengan < tanpa, "tidak ada PayloadLokal yang dilipat: {dengan} lawan {tanpa}");
+}
+
+/// JIR-3b: slot payload yang jenisnya bercampur antar-varian (bulat di `Kotak`, pecahan di `Titik`) dibawa sebagai bit
+/// lewat titik temu (`BitF`/`DariBit`, jenis per penanda di `TabelVarian`); pola tunggal (`PolaLokal`) dilipat; lengan
+/// payload tunggal tidak dilipat sebagai tuple (dulu deopt tiap putaran).
+const JIR_CAMPUR: &str = r#"enum B { Kotak(int, int), Titik(float, float), Skala(float), Diam }
+
+fn nilai(b: B, acc: int) -> int {
+    match b {
+        B::Kotak(p, l) => (acc + p * l) % 1000003,
+        B::Titik(x, y) => { if x > y { return acc + 2 }
+            return acc + 1 }
+        B::Skala(f) => { if f > 1.0 { return acc + 3 }
+            return acc }
+        B::Diam => acc,
+    }
+}
+
+fn main() {
+    var acc = 0
+    var simpan = []
+    for i in 0..20000 {
+        let s = i % 4
+        var b = B::Diam
+        if s == 0 { b = B::Kotak(i % 7, 3) }
+        else if s == 1 { b = B::Titik(1.5, 0.25) }
+        else if s == 2 { b = B::Skala(1.25) }
+        acc = nilai(b, acc)
+        if i % 6000 == 1 { simpan = simpan + [b]
+            wok(b) }
+    }
+    wok(acc, simpan)
+}
+"#;
+
+#[test]
+fn jir_payload_campur_sama_dengan_vm() {
+    let v = jalankan(JIR_CAMPUR, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..], &[JIR, ACAK][..]] {
+        let j = jalankan(JIR_CAMPUR, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+    // Tanpa badai deopt: lengan `Skala` (payload tunggal) tidak dijaga sebagai tuple.
+    let r = jalankan(JIR_CAMPUR, &["--jit"], &[JIR, ("JRG_JIT_LOG", "ringkas")]);
+    let deopt: usize = r.stderr.lines().find_map(|l| l.strip_prefix("[jit] deopt: ")).and_then(|n| n.trim().parse().ok()).unwrap_or(0);
+    assert!(deopt < 50, "deopt {deopt} kali:\n{}", r.stderr);
+}
+
+/// A2 (langkah 107): callee berhasil struct milik VM disisipkan. `StrukturUlang` callee (pakai ulang lokal sebentuk)
+/// jadi `Struktur` di salinannya, karena bingkainya bingkai pemanggil: `p` yang masih dibaca tidak boleh ditimpa.
+/// `baru` (struct dari angka, tanpa argumen struct) yang memicu pakai ulang: `p.maju(..)` sendiri tidak, `p` dibagi dua.
+const JIR_STRUCT_SISIP: &str = r#"package main
+struct P { pub x: f64, pub y: f64 }
+impl P {
+    fn maju(self, d: f64) -> P { return P { x: self.x + d, y: self.y * 1.5 } }
+}
+fn baru(x: f64) -> P { return P { x: x, y: 2.0 } }
+pub fn main() {
+    var p: P = P { x: 1.0, y: 1.0 }
+    var t: f64 = 0.0
+    for i in 0..3000 {
+        let q = p.maju(0.5)
+        t = t + q.x + p.x
+        let r = baru(t * 0.001)
+        t = t + r.x + p.x + q.y
+        if i % 3 == 0 { p = q } else { p = p.maju(0.25) }
+        if p.y > 1000.0 { p = P { x: p.x, y: 1.0 } }
+    }
+    wok(t, p.x, p.y)
+}
+"#;
+
+#[test]
+fn jir_struct_disisipkan_sama_dengan_vm() {
+    let v = jalankan(JIR_STRUCT_SISIP, &["--vm"], &[]);
+    assert!(v.sukses, "{}{}", v.stdout, v.stderr);
+    for env in [&[JIR][..], &[JIR, STRES][..], &[JIR, STRES, ACAK][..], &[JIR, ACAK][..]] {
+        let j = jalankan(JIR_STRUCT_SISIP, &["--jit"], env);
+        assert_eq!((v.sukses, &v.stdout, &v.stderr), (j.sukses, &j.stdout, &j.stderr), "{env:?}");
+    }
+}

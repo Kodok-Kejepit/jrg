@@ -46,6 +46,8 @@ pub(crate) struct IfExprValue {
 pub struct CodegenOptions {
     pub fast_math: bool,
     pub full_buffered_stdout: bool,
+    /// Sasaran berpenunjuk 32 bit (`--emit-wasm`, wasm32): ukuran tipe yang isinya penunjuk mengikutinya.
+    pub ptr32: bool,
 }
 
 /// Keadaan `defer` satu fungsi.
@@ -151,9 +153,21 @@ pub struct Codegen {
 
     // ---- per-function state (reset in `begin_function`) ----
     pub(crate) locals: Vec<HashMap<String, (String, JrgType)>>, // stack of scopes: name -> (ptr register, type)
+    /// Lokal yang boleh berbagi penyangga lewat `let b = a` (`capture::calon_bagi`), dan bendera
+    /// "milik sendiri" tiap slot lokal itu (`codegen_bagi.rs`).
+    pub(crate) calon_bagi: std::collections::HashSet<String>,
+    pub(crate) milik_lokal: HashMap<String, String>,
+    /// `codegen_arena::fungsi_bersih`, per nama fungsi.
+    pub(crate) fungsi_bersih_memo: HashMap<String, bool>,
     pub(crate) cur_label: String,
     pub(crate) cur_lines: Vec<String>,
     pub(crate) entry_allocas: Vec<String>,
+    /// Memo jumlah karakter per fungsi (`jumlah_karakter`): tempat ptr, panjang, jumlah di blok masuk.
+    pub(crate) memo_teks_lokal: Option<(String, String, String)>,
+    /// `a` di `let r = arr::pop(a)` yang ditimpa pernyataan berikutnya (`capture::pindah_sebelum_ditimpa`).
+    pub(crate) pop_pindah: Option<String>,
+    /// `(a, r)`: `a = r[0]` sesudah pop berbagi itu boleh memindah `r.0`, karena sisa blok cuma membaca `r[1]`.
+    pub(crate) pop_tugas_pindah: Option<(String, String)>,
     pub(crate) finished_blocks: Vec<(String, Vec<String>)>,
     pub(crate) terminated: bool,
     pub(crate) loop_stack: Vec<LoopCtx>,
@@ -260,12 +274,18 @@ pub struct Codegen {
     pub(crate) jemb_terpancar: usize,
     /// Adaptor nilai fungsi yang sudah dibuat, per pasangan tipe.
     pub(crate) adaptor_ada: HashMap<String, String>,
+    pub(crate) desk_fn: Vec<super::codegen_desk::DeskFn>,
+    pub(crate) situs_bernama: Vec<super::codegen_desk::SitusBernama>,
+    pub(crate) situs_sebar: Vec<super::codegen_desk::SitusSebar>,
+    pub(crate) pakai_desk: bool,
+    pub(crate) desk_metode: Option<Vec<crate::parser::FnParam>>,
     /// Fungsi bantu per tipe berulang (`tampil.tipe.T`, …) yang sudah diantre.
     pub(crate) bantu_tipe_ada: std::collections::HashSet<String>,
     /// Tipe yang badan fungsi bantunya sedang dibangun: tingkat pertamanya diturunkan sebaris.
     pub(crate) sebaris_sekali: Option<String>,
     pub(crate) pakai_jemb_buram: bool,
     pub(crate) pakai_sama_buram: bool,
+    pub(crate) pakai_aritas_buram: bool,
 
     /// Slot kapasitas tiap variabel yang pernah ditumbuhkan di tempat: slot variabel -> slot
     /// `{ pemilik, kap }`. Lihat `codegen_tumbuh.rs`.
@@ -352,7 +372,7 @@ impl Codegen {
     pub fn new_with_options(tables: GlobalTables, options: CodegenOptions) -> Self {
         Codegen {
             tables,
-            types: TypeTable::new(),
+            types: TypeTable { lebar_ptr: if options.ptr32 { 4 } else { 8 }, ..TypeTable::new() },
             options,
             option_args: HashMap::new(),
             result_args: HashMap::new(),
@@ -366,6 +386,9 @@ impl Codegen {
             antrian_fn: VecDeque::new(),
             next_id: 0,
             locals: Vec::new(),
+            calon_bagi: std::collections::HashSet::new(),
+            milik_lokal: HashMap::new(),
+            fungsi_bersih_memo: HashMap::new(),
             cur_label: String::new(),
             tunda: None,
             tangkapan: std::collections::HashSet::new(),
@@ -387,6 +410,9 @@ impl Codegen {
             var_global_baris: Vec::new(),
             cur_lines: Vec::new(),
             entry_allocas: Vec::new(),
+            memo_teks_lokal: None,
+            pop_pindah: None,
+            pop_tugas_pindah: None,
             finished_blocks: Vec::new(),
             terminated: false,
             loop_stack: Vec::new(),
@@ -422,10 +448,16 @@ impl Codegen {
             sama_terpancar: 0,
             jemb_terpancar: 0,
             adaptor_ada: HashMap::new(),
+            desk_fn: Vec::new(),
+            situs_bernama: Vec::new(),
+            situs_sebar: Vec::new(),
+            pakai_desk: false,
+            desk_metode: None,
             bantu_tipe_ada: std::collections::HashSet::new(),
             sebaris_sekali: None,
             pakai_jemb_buram: false,
             pakai_sama_buram: false,
+            pakai_aritas_buram: false,
             kap_tumbuh: HashMap::new(),
             opsi_tertunda: Default::default(),
             struct_instans: HashMap::new(),
@@ -687,6 +719,7 @@ impl Codegen {
             return self.kotak_lokal(name, &ty);
         }
         let reg = self.alloca_typed("local.", &ty);
+        self.pasang_bendera_milik(name, &reg, &ty);
         self.define_local(name, reg.clone(), ty);
         reg
     }
@@ -986,6 +1019,7 @@ impl Codegen {
         self.finished_blocks.clear();
         self.cur_lines.clear();
         self.entry_allocas.clear();
+        self.memo_teks_lokal = None;
         self.cur_label = "entry".to_string();
         self.terminated = false;
         self.loop_stack.clear();
@@ -1152,12 +1186,16 @@ impl Codegen {
         if self.pakai_sama_buram {
             out.push_str(&self.definisi_sama_buram());
         }
+        if self.pakai_sama_buram || self.pakai_aritas_buram {
+            out.push_str(&self.definisi_aritas_buram());
+        }
         if self.pakai_jemb_buram {
             out.push_str(&self.definisi_buram_jembatan());
         }
         out.push_str(&self.definisi_metode_dinamis());
         out.push_str(&self.definisi_keluarga());
         out.push_str(&super::situs::definisi(&self.situs));
+        out.push_str(&super::terjemah::definisi(&self.string_globals, self.declared_externs.contains("jrg_jembatan")));
         if self.pakai_uji { out.push_str(&super::situs::definisi_baris(self.situs.len())); }
         out.push_str("!0 = !{!\"branch_weights\", i32 1, i32 2000}\n");
         out.push_str("!1 = !{!\"branch_weights\", i32 2000, i32 1}\n");

@@ -113,8 +113,8 @@ pub(crate) fn tanya(teks: &str, ya: bool) -> bool {
 
 fn pilih(teks: &str, pilihan: &[(String, String)], ya: bool) -> usize {
     if ya || !std::io::stdin().is_terminal() { return 0; }
-    eprintln!("{}", teks);
-    for (i, (a, b)) in pilihan.iter().enumerate() { eprintln!("  {}) {}  {}", i + 1, a, b); }
+    crate::ecetak_t!("{}", teks);
+    for (i, (a, b)) in pilihan.iter().enumerate() { crate::ecetak_t!("  {}) {}  {}", i + 1, a, b); }
     eprint!("pilih [1]: ");
     let _ = std::io::stderr().flush();
     let mut s = String::new();
@@ -163,7 +163,7 @@ fn tujuan(sdk: &Path, p: &Paket) -> PathBuf {
 /// Unduh (sekali, ditembolok), periksa sidiknya, buka ke tempatnya di SDK.
 fn pasang(sdk: &Path, p: &Paket) -> Result<(), String> {
     let ke = tujuan(sdk, p);
-    if ke.join("source.properties").is_file() { eprintln!("[jrgm] {} sudah ada", p.jalur); return Ok(()); }
+    if ke.join("source.properties").is_file() { crate::ecetak_t!("[jrgm] {} sudah ada", p.jalur); return Ok(()); }
     let t = tembolok();
     std::fs::create_dir_all(&t).map_err(|e| format!("{}: {}", t.display(), crate::host::galat_io(&e)))?;
     let zip = t.join(&p.url);
@@ -190,7 +190,7 @@ fn pasang(sdk: &Path, p: &Paket) -> Result<(), String> {
     let _ = std::fs::remove_dir_all(&ke);
     std::fs::rename(&akar, &ke).map_err(|e| format!("memindah {} ke {}: {}", akar.display(), ke.display(), crate::host::galat_io(&e)))?;
     let _ = std::fs::remove_dir_all(&sementara);
-    eprintln!("[jrgm] {} terpasang di {}", p.jalur, ke.display());
+    crate::ecetak_t!("[jrgm] {} terpasang di {}", p.jalur, ke.display());
     Ok(())
 }
 
@@ -256,12 +256,12 @@ pub(crate) fn android(o: &Opsi) -> Result<(), String> {
     let mut rencana = vec![platform, terbaru(&semua, "build-tools;").ok_or("katalog tanpa build-tools")?.clone()];
     if !o.tanpa_ndk { rencana.push(terbaru(&semua, "ndk;").ok_or("katalog tanpa NDK")?.clone()); }
     rencana.retain(|p| !tujuan(&sdk, p).join("source.properties").is_file());
-    if rencana.is_empty() { eprintln!("[jrgm] perkakas Android di {} sudah lengkap", sdk.display()); }
+    if rencana.is_empty() { crate::ecetak_t!("[jrgm] perkakas Android di {} sudah lengkap", sdk.display()); }
     else {
         let total: u64 = rencana.iter().map(|p| p.ukuran).sum();
-        eprintln!("[jrgm] akan dipasang di {} ({} MB diunduh):", sdk.display(), total / 1_000_000);
-        for p in &rencana { eprintln!("  {}  ({} MB)", p.jalur, p.ukuran / 1_000_000); }
-        eprintln!("  Lisensinya Android Software Development Kit License Agreement: https://developer.android.com/studio/terms");
+        crate::ecetak_t!("[jrgm] akan dipasang di {} ({} MB diunduh):", sdk.display(), total / 1_000_000);
+        for p in &rencana { crate::ecetak_t!("  {}  ({} MB)", p.jalur, p.ukuran / 1_000_000); }
+        crate::ecetak_t!("  Lisensinya Android Software Development Kit License Agreement: https://developer.android.com/studio/terms");
         if !tanya("Setuju dengan lisensinya dan pasang sekarang?", o.ya) { return Err("dibatalkan; tidak ada yang dipasang".into()); }
         for p in &rencana { pasang(&sdk, p)?; }
     }
@@ -273,14 +273,14 @@ pub(crate) fn android(o: &Opsi) -> Result<(), String> {
             if !st.success() { return Err("`rustup target add` gagal".into()); }
         }
     } else {
-        eprintln!("[jrgm] catatan: rustup tidak ada; `jrgm apk` butuh Rust (https://rustup.rs) untuk membangun runtime Android");
+        crate::ecetak_t!("[jrgm] catatan: rustup tidak ada; `jrgm apk` butuh Rust (https://rustup.rs) untuk membangun runtime Android");
     }
     let bawaan = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Android").join("Sdk"));
     if bawaan.as_deref() != Some(sdk.as_path()) && std::env::var_os("ANDROID_HOME").is_none() {
-        eprintln!("[jrgm] set `export ANDROID_HOME={}` supaya `jrgm apk` menemukannya", sdk.display());
+        crate::ecetak_t!("[jrgm] set `export ANDROID_HOME={}` supaya `jrgm apk` menemukannya", sdk.display());
     }
-    if sasaran != 34 { eprintln!("[jrgm] tulis `target_sdk = {}` di [android] jrgm.toml untuk memakainya", sasaran); }
-    eprintln!("[jrgm] siap: jalankan `jrgm apk`");
+    if sasaran != 34 { crate::ecetak_t!("[jrgm] tulis `target_sdk = {}` di [android] jrgm.toml untuk memakainya", sasaran); }
+    crate::ecetak_t!("[jrgm] siap: jalankan `jrgm apk`");
     Ok(())
 }
 

@@ -1,7 +1,9 @@
 // runtime/src/lib.rs — jrgrt — JawaRustGo++ native runtime
 
 // `no_std` for the real (staticlib) build only.
-#![cfg_attr(not(test), no_std)]
+#![cfg_attr(all(not(test), not(jrg_gabung)), no_std)]
+// Pustaka gabungan wasm: alokator bump dan kalimat-kalimatnya tidak dipakai (std yang memegang).
+#![cfg_attr(jrg_gabung, allow(unused, dead_code, unreachable_code))]
 
 extern crate alloc;
 
@@ -22,6 +24,7 @@ extern "C" {
     fn write(fd: i32, buf: *const u8, count: usize) -> isize;
     fn read(fd: i32, buf: *mut u8, count: usize) -> isize;
     fn exit(code: i32) -> !;
+    fn getenv(nama: *const u8) -> *const u8;
     fn atexit(cb: extern "C" fn()) -> i32;
     fn malloc(size: usize) -> *mut u8;
     fn realloc(ptr: *mut u8, size: usize) -> *mut u8;
@@ -46,15 +49,84 @@ const UKURAN_CHUNK: usize = 1 << 20; // 1 MiB
 /// Batas ruang lebih di belakang alokasi raksasa.
 const RUANG_LEBIH_MAKS: usize = 64 << 20;
 
+/// `repr(C)` dan diekspor sebagai `jrg_arena`: IR membaca `kursor` (field 0) dan `chunk` (field 3) langsung di titik
+/// simpan loop (`codegen_arena::simpan_putaran`), jadi putaran yang tidak mengalokasi tidak memanggil runtime.
+#[repr(C)]
 struct Arena {
     kursor: usize,
     ujung: usize,
     /// Awal alokasi terakhir — dipakai `dealloc`/`realloc` untuk memundurkan
     /// kursor kalau yang dilepas memang yang paling baru.
     terakhir: usize,
+    /// Awal chunk yang sedang dipakai; tiap chunk menyimpan awal chunk sebelumnya di kepalanya (`chunk_baru`),
+    /// jadi `jrg_arena_pulih` bisa melepas chunk yang lahir sesudah titik simpannya.
+    chunk: usize,
 }
 
-static mut ARENA: Arena = Arena { kursor: 0, ujung: 0, terakhir: 0 };
+#[export_name = "jrg_arena"]
+static mut ARENA: Arena = Arena { kursor: 0, ujung: 0, terakhir: 0, chunk: 0 };
+
+/// Generasi arena: naik tiap `jrg_arena_pulih`, jadi catatan berkunci ALAMAT (tabel kapasitas di `primitif.c`) yang
+/// lahir sebelum pemulihan tidak berlaku untuk penyangga baru yang kebetulan beralamat sama.
+#[no_mangle]
+pub static mut jrg_arena_gen: u64 = 0;
+
+struct TitikArena { kursor: usize, chunk: usize }
+
+/// Ujung putaran loop yang MENGALOKASI (IR sudah membandingkan kursor dan chunk-nya dengan titik simpan): semua yang
+/// dialokasi sesudah `(kursor, chunk)` sampah. Dipancarkan di badan yang terbukti tidak meloloskan nilai berpenyangga
+/// (`codegen_arena.rs`).
+#[no_mangle]
+pub unsafe extern "C" fn jrg_arena_pulih_ke(kursor: usize, chunk: usize) {
+    let t = TitikArena { kursor, chunk };
+    // Arena cadangan (memori sudah habis) tidak pernah dipulihkan: programnya sedang melapor lalu berhenti.
+    if CADANGAN_TERPAKAI { return; }
+    let a = &mut *core::ptr::addr_of_mut!(ARENA);
+    if a.chunk == t.chunk && a.kursor == t.kursor { return; }
+    let racun = racun_arena();
+    if a.chunk == t.chunk {
+        if racun && t.kursor < a.kursor { core::ptr::write_bytes(t.kursor as *mut u8, 0xDB, a.kursor - t.kursor); }
+        a.kursor = t.kursor;
+        a.terakhir = t.kursor;
+    } else {
+        // Chunk terbaru dipertahankan dan dipakai dari awal (kalau dilepas, putaran yang titik simpannya di ujung
+        // chunk akan `malloc`/`free` satu chunk tiap putaran); chunk di antaranya dilepas.
+        let terbaru = a.chunk;
+        let mut c = *(terbaru as *const usize);
+        while c != t.chunk && c != 0 {
+            let lama = c;
+            c = *(lama as *const usize);
+            free(lama as *mut u8);
+        }
+        if c != t.chunk { return; }
+        *(terbaru as *mut usize) = t.chunk;
+        let awal = terbaru + 16;
+        if racun {
+            if awal < a.kursor { core::ptr::write_bytes(awal as *mut u8, 0xDB, a.kursor - awal); }
+        }
+        a.kursor = awal;
+        a.terakhir = awal;
+    }
+    jrg_arena_gen += 1;
+    jrg_teks_memo_p = core::ptr::null();
+    jrg_teks_memo_l = 0;
+    let c = &mut *core::ptr::addr_of_mut!(CHAR_AT_CURSOR);
+    c.s = None;
+    c.ptr = core::ptr::null();
+}
+
+/// `JRG_ARENA_RACUN=1`: memori yang dipulihkan diisi 0xDB, supaya nilai yang ternyata masih dipakai sesudah titik
+/// pulih tampil sebagai sampah di tes, bukan kebetulan benar.
+fn racun_arena() -> bool {
+    static mut R: u8 = 0;
+    unsafe {
+        if R == 0 {
+            let p = getenv(b"JRG_ARENA_RACUN\0".as_ptr());
+            R = if !p.is_null() && *p == b'1' { 2 } else { 1 };
+        }
+        R == 2
+    }
+}
 
 // ── dict ──────────────────────────────────────────────────────────────
 
@@ -179,12 +251,18 @@ unsafe fn pakai_cadangan() {
     a.kursor = awal;
     a.ujung = awal + (1 << 20);
     a.terakhir = awal;
+    a.chunk = 0;
 }
 
 const PESAN_MEMORI_HABIS: &str = "memori habis — program ini meminta lebih banyak memori daripada yang tersedia\n  \
         bantuan: biner `--emit-llvm` tidak membebaskan salinan lama, jadi menyalin koleksi besar \
         berulang-ulang menghabiskan memori; pakai bentuk yang mengubah di tempat \
         (`a += [x]`, `q = q.push(x)`, `q = q.rest()`), atau jalankan tanpa `--emit-llvm`";
+/// Padanan Inggris yang dicetak saat cadangan pun habis (tanpa alokasi); sama dengan tabel `jrgc` (dijaga tes).
+const PESAN_MEMORI_HABIS_EN: &str = "out of memory — this program asks for more memory than is available\n  \
+        help: an `--emit-llvm` binary does not free old copies, so copying a large collection over and over \
+        uses up memory; use the forms that change in place \
+        (`a += [x]`, `q = q.push(x)`, `q = q.rest()`), or run without `--emit-llvm`";
 
 /// Kalau `ptr..ptr+len` berakhir PERSIS di kursor arena, perpanjang kursornya
 /// sebanyak `tambahan` byte dan kembalikan `true`.
@@ -225,6 +303,8 @@ impl BumpAllocator {
         let perlu = size + align;
         let lebih = if perlu < RUANG_LEBIH_MAKS { perlu } else { RUANG_LEBIH_MAKS };
         let besar = if perlu > UKURAN_CHUNK { perlu + lebih } else { UKURAN_CHUNK };
+        // 16 bita kepala: awal chunk sebelumnya (`Arena::chunk`).
+        let besar = besar + 16;
         let blok = malloc(besar);
         if blok.is_null() {
             // Dilaporkan sekali; kalau melapor pun butuh memori, yang kedua menyerah diam.
@@ -233,10 +313,12 @@ impl BumpAllocator {
             return core::ptr::null_mut();
         }
         let a = &mut *core::ptr::addr_of_mut!(ARENA);
-        let awal = blok as usize;
+        *(blok as *mut usize) = a.chunk;
+        a.chunk = blok as usize;
+        let awal = blok as usize + 16;
         let mulai = (awal + align - 1) & !(align - 1);
         a.kursor = mulai + size;
-        a.ujung = awal + besar;
+        a.ujung = blok as usize + besar;
         a.terakhir = mulai;
         mulai as *mut u8
     }
@@ -281,31 +363,33 @@ unsafe impl GlobalAlloc for BumpAllocator {
     }
 }
 
-#[global_allocator]
+// `jrg_gabung` (`wasm-rt/`): std memegang alokator dan panik di pustaka gabungan wasm.
+#[cfg_attr(not(jrg_gabung), global_allocator)]
 static ALLOCATOR: BumpAllocator = BumpAllocator;
 
 /// Reached only on allocation failure or an internal `unwrap` that JRG
 /// codegen is not supposed to be able to trigger. Prints and exits with
 /// the same code every other JRG panic uses, so behavior stays uniform.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(jrg_gabung)))]
 #[panic_handler]
 fn panic_handler(_info: &core::panic::PanicInfo) -> ! {
     flush_stdout();
     // Cadangannya pun habis saat melapor: kalimatnya ditulis apa adanya, tanpa lokasi.
     if unsafe { CADANGAN_TERPAKAI } {
         write_all(FD_STDERR, b"error: ");
-        write_all(FD_STDERR, PESAN_MEMORI_HABIS.as_bytes());
+        let pesan = if bahasa::inggris() { PESAN_MEMORI_HABIS_EN } else { PESAN_MEMORI_HABIS };
+        write_all(FD_STDERR, pesan.as_bytes());
         write_all(FD_STDERR, b"\n");
         unsafe { exit(PANIC_EXIT_CODE) }
     }
-    write_all(FD_STDERR, b"ada yang gagal saat program jalan\n");
+    write_all(FD_STDERR, bahasa::pilih("ada yang gagal saat program jalan\n", "something failed while the program was running\n").as_bytes());
     unsafe { exit(PANIC_EXIT_CODE) }
 }
 
 /// Never actually called: nothing here unwinds (`panic = "abort"`), but
 /// rustc still emits a reference to the personality routine for a
 /// `no_std` staticlib, and the link fails without a definition.
-#[cfg(not(test))]
+#[cfg(all(not(test), not(jrg_gabung)))]
 #[no_mangle]
 pub extern "C" fn rust_eh_personality() {}
 
@@ -455,54 +539,55 @@ fn stdout_is_line_buffered() -> bool {
     STDOUT_BUFFERING.load(Ordering::Relaxed) == STDOUT_BUFFERING_LINE
 }
 
+/// Penyangga stdout STATIS, bukan `Vec` di arena: `jrg_arena_pulih` tidak boleh bisa melepasnya.
 struct StdoutBuffer {
-    bytes: Vec<u8>,
+    bytes: [u8; STDOUT_BUFFER_CAPACITY],
+    n: usize,
 }
 
 impl StdoutBuffer {
     const fn new() -> Self {
-        Self { bytes: Vec::new() }
+        Self { bytes: [0; STDOUT_BUFFER_CAPACITY], n: 0 }
+    }
+
+    fn tambah(&mut self, bytes: &[u8]) {
+        if self.n + bytes.len() > STDOUT_BUFFER_CAPACITY { self.flush(); }
+        if bytes.len() >= STDOUT_BUFFER_CAPACITY { write_all(FD_STDOUT, bytes); return; }
+        self.bytes[self.n..self.n + bytes.len()].copy_from_slice(bytes);
+        self.n += bytes.len();
     }
 
     fn write_bytes(&mut self, bytes: &[u8]) {
-        self.reserve_once();
-        self.bytes.extend_from_slice(bytes);
-        if self.bytes.len() >= STDOUT_BUFFER_CAPACITY
-            || (stdout_is_line_buffered() && bytes.contains(&b'\n'))
-        {
+        self.tambah(bytes);
+        if self.n >= STDOUT_BUFFER_CAPACITY || (stdout_is_line_buffered() && bytes.contains(&b'\n')) {
             self.flush();
         }
     }
 
     fn write_fmt_args(&mut self, args: fmt::Arguments<'_>) {
-        self.reserve_once();
-        let before = self.bytes.len();
-        let _ = fmt::Write::write_fmt(self, args);
-        if self.bytes.len() >= STDOUT_BUFFER_CAPACITY
-            || (stdout_is_line_buffered() && self.bytes[before..].contains(&b'\n'))
-        {
+        let mut ada_baris = false;
+        let mut tulis = TulisStdout { buf: self, ada_baris: &mut ada_baris };
+        let _ = fmt::Write::write_fmt(&mut tulis, args);
+        if self.n >= STDOUT_BUFFER_CAPACITY || (stdout_is_line_buffered() && ada_baris) {
             self.flush();
         }
     }
 
-    fn reserve_once(&mut self) {
-        if self.bytes.capacity() == 0 {
-            self.bytes.reserve(STDOUT_BUFFER_CAPACITY);
-        }
-    }
-
     fn flush(&mut self) {
-        if self.bytes.is_empty() {
+        if self.n == 0 {
             return;
         }
-        write_all(FD_STDOUT, &self.bytes);
-        self.bytes.clear();
+        write_all(FD_STDOUT, &self.bytes[..self.n]);
+        self.n = 0;
     }
 }
 
-impl fmt::Write for StdoutBuffer {
+struct TulisStdout<'a> { buf: &'a mut StdoutBuffer, ada_baris: &'a mut bool }
+
+impl fmt::Write for TulisStdout<'_> {
     fn write_str(&mut self, s: &str) -> fmt::Result {
-        self.bytes.extend_from_slice(s.as_bytes());
+        if s.as_bytes().contains(&b'\n') { *self.ada_baris = true; }
+        self.buf.tambah(s.as_bytes());
         Ok(())
     }
 }
@@ -582,7 +667,7 @@ pub unsafe extern "C" fn jrg_situs_pasang(isi: *const [u32; 3], n: *const i32, t
 fn bentuk_galat(s: &str, situs: i32) -> String {
     let mut baris = s.lines();
     let mut out = String::from("error: ");
-    out.push_str(baris.next().unwrap_or(""));
+    out.push_str(&bahasa::t(baris.next().unwrap_or("")));
     let mut gutter = 2usize;
     let (isi, n, teks) = unsafe { SITUS };
     if situs > 0 && situs <= n && !isi.is_null() {
@@ -602,9 +687,9 @@ fn bentuk_galat(s: &str, situs: i32) -> String {
         out.push('\n');
         for _ in 0..gutter { out.push(' '); }
         out.push_str("= ");
-        out.push_str(jenis);
+        out.push_str(if jenis == "bantuan" { bahasa::pilih("bantuan", "help") } else { bahasa::pilih("catatan", "note") });
         out.push_str(": ");
-        out.push_str(isi);
+        out.push_str(&bahasa::t(isi));
     }
     out
 }
@@ -643,6 +728,7 @@ fn mati() -> ! {
     let situs = core::mem::replace(&mut p.situs, 0);
     // Goroutine `spawn` yang gagal cuma menghentikan dirinya; stack yang habis tidak bisa.
     if unsafe { !TAK_GUGUR && jrg_ko_gugur(1) != 0 } {
+        let mut s = bahasa::t(&s);
         s.push('\n');
         write_all(FD_STDERR, b"goroutine error: ");
         write_all(FD_STDERR, s.as_bytes());
@@ -1305,7 +1391,7 @@ pub unsafe extern "C" fn jrg_uji_lapor(rc: i32, pp: *const u8, pl: i64, okp: *co
     let uji = &mut *core::ptr::addr_of_mut!(UJI);
     if rc == 0 {
         uji.0 += 1;
-        write_out(&format!("{}\n", borrow_str(okp, okl)), 0);
+        write_out(&format!("{}\n", bahasa::t(borrow_str(okp, okl))), 0);
         return;
     }
     uji.1 += 1;
@@ -1314,7 +1400,41 @@ pub unsafe extern "C" fn jrg_uji_lapor(rc: i32, pp: *const u8, pl: i64, okp: *co
     let sebab = pesan.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
     let b = if situs > 0 && situs <= *n { *baris.add((situs - 1) as usize) } else { 0 };
     let t = if b > 0 { borrow_str(gbp, gbl).replacen('\u{2}', &b.to_string(), 1) } else { borrow_str(gp, gl).to_string() };
-    write_out(&format!("{}\n", t.replacen('\u{1}', sebab, 1)), 0);
+    write_out(&format!("{}\n", bahasa::t(&t.replacen('\u{1}', sebab, 1))), 0);
+}
+
+/// `Galat` milik `tangkap` di IR (`codegen_korutin::daftar_galat`): field urut abjad.
+#[repr(C)]
+pub struct TeksMentah { p: *const u8, n: i64 }
+#[repr(C)]
+pub struct GalatTangkap { baris: i64, berkas: TeksMentah, kolom: i64, pesan: TeksMentah }
+
+/// Isi `Galat` dari galat badan `tangkap`: kalimat pertamanya dalam bahasa pesan, lokasinya dari blok situs yang
+/// dirender `jrgc` (`--> berkas:baris:kolom`), `""`/0/0 kalau tidak ada — aturan `interpreter::tangkap::rekam`.
+#[no_mangle]
+pub unsafe extern "C" fn jrg_tangkap_rekam(p: *const u8, n: i64, out: *mut GalatTangkap) {
+    let situs = core::mem::replace(&mut (*core::ptr::addr_of_mut!(PANIK)).situs, 0);
+    let pesan = borrow_str(p, n);
+    let kalimat = pesan.lines().find(|l| !l.trim().is_empty()).unwrap_or("").trim();
+    let (mut berkas, mut baris, mut kolom) = (String::new(), 0i64, 0i64);
+    let (isi, jml, teks) = SITUS;
+    if situs > 0 && situs <= jml && !isi.is_null() {
+        let [awal, panjang, _] = *isi.add((situs - 1) as usize);
+        let b = core::slice::from_raw_parts(teks.add(awal as usize), panjang as usize);
+        let blok = core::str::from_utf8(b).unwrap_or("");
+        if let Some(i) = blok.find("--> ") {
+            let lok = blok[i + 4..].split(|c: char| c == '\n' || c.is_whitespace()).next().unwrap_or("");
+            let mut bagian = lok.rsplitn(3, ':');
+            if let (Some(k), Some(l), Some(f)) = (bagian.next(), bagian.next(), bagian.next()) {
+                if let (Ok(k), Ok(l)) = (k.parse::<i64>(), l.parse::<i64>()) { berkas = f.to_string(); baris = l; kolom = k; }
+            }
+        }
+    }
+    let o = &mut *out;
+    o.baris = baris;
+    o.kolom = kolom;
+    emit_string(bahasa::t(kalimat), &mut o.pesan.p, &mut o.pesan.n);
+    emit_string(berkas, &mut o.berkas.p, &mut o.berkas.n);
 }
 
 /// Rangkuman (`\u{3}` total, `\u{4}` lulus, `\u{5}` gagal); jawabannya kode keluar `main` buatan.
@@ -1323,7 +1443,7 @@ pub unsafe extern "C" fn jrg_uji_akhir(tp: *const u8, tl: i64) -> i64 {
     let (l, g) = *core::ptr::addr_of!(UJI);
     let t = borrow_str(tp, tl).replacen('\u{3}', &(l + g).to_string(), 1)
         .replacen('\u{4}', &l.to_string(), 1).replacen('\u{5}', &g.to_string(), 1);
-    write_out(&format!("{}\n", t), 0);
+    write_out(&format!("{}\n", bahasa::t(&t)), 0);
     if g > 0 { 1 } else { 0 }
 }
 
@@ -1654,9 +1774,8 @@ fn read_byte() -> Option<u8> {
     }
 }
 
-/// Reads one line from stdin (trailing `\n`/`\r\n` stripped), mirroring
-/// the interpreter's `tok()`. Returns 0 on EOF/error (out-params
-/// untouched), 1 on success.
+/// Satu baris stdin tanpa `\n`/`\r\n`, seperti `tok()` acuan. 0 = EOF (keluaran tidak disentuh), 1 = berhasil,
+/// 2 = bukan UTF-8, 3 = lebih dari 256 MiB tanpa baris baru; kalimat 2 dan 3 disisipkan codegen (Fase AMAN-68).
 #[no_mangle]
 pub extern "C" fn jrg_read_line(out_ptr: *mut *const u8, out_len: *mut i64) -> i32 {
     let mut bytes: Vec<u8> = Vec::new();
@@ -1666,6 +1785,7 @@ pub extern "C" fn jrg_read_line(out_ptr: *mut *const u8, out_len: *mut i64) -> i
         if b == b'\n' {
             break;
         }
+        if bytes.len() >= 256 << 20 { return 3; }
         bytes.push(b);
     }
     if !saw_any {
@@ -1679,7 +1799,7 @@ pub extern "C" fn jrg_read_line(out_ptr: *mut *const u8, out_len: *mut i64) -> i
             unsafe { emit_string(line, out_ptr, out_len) };
             1
         }
-        Err(_) => 0,
+        Err(_) => 2,
     }
 }
 
@@ -2466,6 +2586,9 @@ pub extern "C" fn jrg_acak63() -> i64 {
 mod json_inti;
 // `kutip_inti.rs` juga SALINAN PERSIS `src/kutip_inti.rs`.
 mod kutip_inti;
+// `terjemah_inti.rs` SALINAN PERSIS `src/terjemah/inti.rs`; bahasa galat saat jalan di `bahasa.rs`.
+mod terjemah_inti;
+mod bahasa;
 
 #[cfg(not(test))]
 mod json_llvm {
@@ -2598,3 +2721,9 @@ mod json_llvm {
         }
     }
 }
+
+// Pustaka gabungan wasm (`wasm-rt/`, `jrg_gabung`): jembatan builtin `jrgc` ikut di crate ini, std memegang alokator.
+#[cfg(jrg_gabung)]
+#[path = "../../jembatan/src/lib.rs"]
+#[allow(dead_code, unused_imports, clippy::all)]
+mod jembatan;

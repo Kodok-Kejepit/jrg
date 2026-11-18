@@ -61,7 +61,12 @@ impl Compiler {
             Stmt::Var(vs) => {
                 let nol = vs.ty.as_ref().and_then(|t| crate::parser::nilai_nol(t, vs.span));
                 if let Some(init) = vs.init.as_deref().or(nol.as_ref()) { self.compile_value_expr(init)?; }
-                else { self.chunk.emit(OpCode::Nil); }
+                else if let Some(p) = super::compiler::penanda_belum_isi(vs.ty.as_ref(), vs.span) {
+                    // Bacaan sebelum diisi ditolak (`PeriksaIsi`), seperti interpreter.
+                    super::compiler::catat_belum_isi(&vs.name);
+                    let ci = self.chunk.add_constant(p);
+                    self.chunk.emit_arg(OpCode::Const, ci);
+                } else { self.chunk.emit(OpCode::Nil); }
                 self.define_local(&vs.name);
             }
 

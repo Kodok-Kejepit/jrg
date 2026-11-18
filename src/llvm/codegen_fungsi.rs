@@ -23,6 +23,7 @@ impl Codegen {
         self.finished_blocks.clear();
         self.cur_lines.clear();
         self.entry_allocas.clear();
+        self.memo_teks_lokal = None;
         self.cur_label = "entry".to_string();
         self.terminated = false;
         self.loop_stack.clear();
@@ -60,6 +61,8 @@ impl Codegen {
             _ => std::collections::HashSet::new(),
         };
         let tangkap_lama = std::mem::replace(&mut self.tangkapan, tangkap);
+        let bagi_lama = std::mem::replace(&mut self.calon_bagi, crate::interpreter::capture::calon_bagi(&decl.body));
+        let milik_lama = std::mem::take(&mut self.milik_lokal);
         let ditangkap = match &*decl.body {
             FnBody::Block(b) => crate::interpreter::capture::ditangkap_closure_blok(b),
             _ => std::collections::HashSet::new(),
@@ -211,6 +214,10 @@ impl Codegen {
         if self.is_main_fn {
             self.ensure_extern("declare void @jrg_situs_pasang(ptr, ptr, ptr) nounwind", "jrg_situs_pasang");
             self.emit("call void @jrg_situs_pasang(ptr @jrg_situs_isi, ptr @jrg_situs_n, ptr @jrg_situs_teks)".to_string());
+            self.ensure_extern("declare void @jrg_terjemah_pasang(ptr, i64) nounwind", "jrg_terjemah_pasang");
+            let n = self.fresh("terjemah.n.");
+            self.emit(format!("{} = load i64, ptr @jrg_terjemah_n", n));
+            self.emit(format!("call void @jrg_terjemah_pasang(ptr @jrg_terjemah_teks, i64 {})", n));
         }
 
         if self.is_main_fn && self.options.full_buffered_stdout {
@@ -273,6 +280,8 @@ impl Codegen {
         self.lokal_tumbuh = tumbuh_lama;
         self.tangkapan = tangkap_lama;
         self.ditangkap_closure = ditangkap_lama;
+        self.calon_bagi = bagi_lama;
+        self.milik_lokal = milik_lama;
         self.fn_bersarang = sarang_lama;
         self.ret_ditebak = ditebak_lama;
         self.tipe_argumen = arg_lama;
@@ -289,6 +298,7 @@ impl Codegen {
             let calon = if self.is_main_fn { None }
                 else { super::codegen_lepas::calon_lepas(stmt, &block.stmts[i + 1..], block.tail.as_deref()) };
             if i + 1 == block.stmts.len() && block.tail.is_none() { self.lepas_sebelum_kembali(stmt, &mut lepas); }
+            self.tandai_pop_pindah(&block.stmts, i, block.tail.as_deref());
             self.codegen_stmt(stmt)?;
             if self.terminated { break; }
             self.catat_lepas(calon, &mut lepas);
@@ -735,6 +745,9 @@ impl Codegen {
     pub fn resolve_type_with_subst(&mut self, te: &TypeExpr, subst: &TypeSubst) -> Result<JrgType, String> {
         // Option/Result need lazy instantiation as a side effect.
         match te {
+            // `Galat` dari `tangkap` (`-> Result<int, Galat>`), kecuali program punya struct bernama sama.
+            TypeExpr::Named(nt) if nt.name == crate::interpreter::tangkap::NAMA && nt.args.is_empty()
+                && !self.tables.structs.contains_key(&nt.name) => Ok(self.daftar_galat()),
             TypeExpr::Named(nt) if nt.name == "Option" => {
                 if nt.args.len() != 1 {
                     return Err("Option<T> butuh tepat satu parameter tipe".into());

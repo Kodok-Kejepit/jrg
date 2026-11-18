@@ -11,4 +11,5 @@ pub fn register(vm: &mut Vm) {
     vm.def("wasm::baca_memori_bytes", |a| lewat_hasil(a, crate::ffi::wasm::b_baca_memori_bytes));
     vm.def("wasm::tulis_memori", |a| lewat_hasil(a, crate::ffi::wasm::b_tulis_memori));
     vm.def("wasm::tutup",        |a| lewat_hasil(a, crate::ffi::wasm::b_tutup));
+    vm.def("wasm::batas_langkah", |a| lewat_hasil(a, crate::ffi::wasm::b_batas_langkah));
 }

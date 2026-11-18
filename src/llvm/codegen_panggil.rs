@@ -79,6 +79,12 @@ impl Codegen {
                 }
                 let name = segments.get(1).map(|s| s.as_str()).unwrap_or("");
                 if let Some(r) = self.terap_statis(name, args, expected, span) { return r; }
+                if name == "terap_bernama" {
+                    if let Some(r) = self.terap_bernama_dinamis(args, span) { return r; }
+                }
+                if name == "terap" {
+                    if let Some(r) = self.terap_sebar_dinamis(args, span) { return r; }
+                }
                 if let Some(galat) = Self::celah_turunan(name, span) { return Err(galat); }
                 if let Some(g) = Self::aritas_bawaan(name, args.len(), span) { return Err(g); }
                 if let Some(r) = self.try_builtin_call(name, args, expected, span) { return r; }
@@ -312,12 +318,21 @@ impl Codegen {
                         _ => None,
                     };
                     if let Some(n) = n {
+                        if let Some(r) = self.gabung_json_struct(args, span) { return r; }
                         return Err(crate::llvm::galat::tandai(span, format!(
                             "`json::merge` atas struct `{0}` belum bisa di backend LLVM: hasilnya struct `{0}` yang bisa \
                              membawa field tambahan, dan tata letak struct di sini tetap — ubah dulu jadi dict, \
                              mis. `dict {{ ...p }}`", crate::ruang_tipe::bersih(&n))));
                     }
                 }
+            }
+            // `str::char_at(teks, int)` diturunkan di tempat: lewat lapis, memo jumlah karakternya milik fungsi lapis
+            // yang lahir kosong tiap panggilan, jadi loop `char_at(s, i)` membaca memo global per karakter.
+            if ns == "str" && item == "char_at" && args.len() == 2
+                && self.peek_expr_type(&args[0]) == Some(JrgType::Str) && self.peek_expr_type(&args[1]) == Some(JrgType::I64) {
+                let s = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
+                let i = self.codegen_expr(&args[1], Some(&JrgType::I64))?;
+                return self.char_at_langsung(&s, &i);
             }
             let pertama = args.first().and_then(|a| self.peek_expr_type(a));
             if let Some(kunci) = self.kunci_lapis_menurut(ns, item, pertama.as_ref()) {
@@ -943,6 +958,24 @@ impl Codegen {
         }
 
         if let JrgType::Enum(ename) = &oty {
+            // Method yang tidak dimiliki penurun asli `Option`/`Result`: prelude JRG (`src/opsi.jrg`).
+            let tipe = if self.option_args.contains_key(ename) { Some("Option") }
+                       else if self.result_args.contains_key(ename) { Some("Result") } else { None };
+            if let Some(tipe) = tipe.filter(|t| !crate::interpreter::calon_method_enum(t).contains(&method)) {
+                if let Some(kunci) = self.kunci_lapis(tipe, method) {
+                    let param: Vec<String> = self.tables.functions.get(&kunci)
+                        .map(|f| f.params.iter().skip(1).map(|p| match &p.pattern {
+                            crate::parser::Pattern::Ident { name, .. } => name.clone(), _ => "_".to_string() }).collect())
+                        .unwrap_or_default();
+                    if param.len() != args.len() {
+                        return self.gagal_sesudah_argumen(&crate::opsi::pesan_argumen(method, &param, args.len()), args);
+                    }
+                    let mut semua = Vec::with_capacity(args.len() + 1);
+                    semua.push(self.lokal_sementara(optr.clone(), oty.clone(), span));
+                    semua.extend(args.iter().cloned());
+                    return self.call_named_function(&kunci, &semua, _expected, span);
+                }
+            }
             if let Some(t) = self.option_args.get(ename).cloned() {
                 return self.codegen_option_method(&optr, ename, &t, method, args, span, _expected);
             }

@@ -1,10 +1,16 @@
 
 // korutin.c — konkurensi biner `--emit-llvm`: korutin SATU utas dan channel di atasnya.
 // Tanpa kunci di mana pun; kebuntuan dilaporkan.
-#if defined(__unix__) || defined(__APPLE__)
+#if defined(__unix__) || defined(__APPLE__) || defined(__wasi__)
+#if defined(__wasi__)
+// WebAssembly: pindah stack lewat Asyncify (`korutin_wasm.c`, satu unit terjemahan dengan berkas ini).
+typedef struct { void *sp, *data[2]; char *simpan; int mulai, tidur; } JrgKonteks;
+#else
 #include <sys/mman.h>
 #include <signal.h>
-#if defined(__ANDROID__)
+#endif
+#if defined(__wasi__)
+#elif defined(__ANDROID__)
 // bionic tidak punya swapcontext/makecontext: stack ditukar sendiri (cuma register callee-saved).
 typedef struct { void *sp; } JrgKonteks;
 void jrg_ko_tukar(void **simpan, void *muat);
@@ -99,6 +105,14 @@ static void jrg_ko_antre(JrgKo *k) {
     jrg_ko_siap_ekor = k;
 }
 
+#if defined(__wasi__)
+static void jrg_ko_wasm_tukar(JrgKo *dari, JrgKo *ke);
+static void jrg_wasm_cek_jembatan(void);
+static int jrg_wasm_dalam_jembatan(void);
+static char *jrg_ko_wasm_stack(JrgKo *k);
+static void jrg_ko_wasm_lepas(JrgKo *k);
+#endif
+
 static void jrg_ko_pindah(JrgKo *ke) {
     JrgKo *dari = jrg_ko_kini;
     if (ke == dari) return;
@@ -113,7 +127,10 @@ static void jrg_ko_pindah(JrgKo *ke) {
     jrg_ko_asal = dari;
     __sanitizer_start_switch_fiber(dari == jrg_ko_mayat ? 0 : &palsu, ke->asan_bawah, ke->asan_ukuran);
 #endif
-#if defined(__ANDROID__)
+#if defined(__wasi__)
+    jrg_wasm_cek_jembatan();
+    jrg_ko_wasm_tukar(dari, ke);
+#elif defined(__ANDROID__)
     jrg_ko_tukar(&dari->ctx.sp, ke->ctx.sp);
 #else
     swapcontext(&dari->ctx, &ke->ctx);
@@ -129,9 +146,7 @@ static int jrg_ko_fatal;
 
 static void jrg_ko_buntu(void) {
     static const char pesan[] =
-        "kebuntuan: semua goroutine sedang menunggu channel atau kunci dan tidak ada yang bisa melanjutkan\n"
-        "  catatan: di interpreter dan `--vm` program ini menggantung selamanya; backend "
-        "`--emit-llvm` menjalankan goroutine sebagai korutin satu utas, jadi ia bisa melihatnya";
+        "kebuntuan: semua goroutine sedang menunggu channel atau kunci dan tidak ada yang bisa melanjutkan";
     jrg_ko_fatal = 1;
     jrg_panic((const unsigned char *)pesan, (int64_t)(sizeof pesan - 1));
 }
@@ -202,8 +217,12 @@ static int jrg_ko_baru_masa;
 // `fn(arg)` jadi goroutine baru; ia mulai jalan saat yang sekarang menunggu atau selesai.
 void jrg_ko_spawn(void (*fn)(void *), void *arg) {
     if (jrg_ko_mayat && jrg_ko_mayat != jrg_ko_kini) {
+#if defined(__wasi__)
+        jrg_ko_wasm_lepas(jrg_ko_mayat);
+#else
         munmap(jrg_ko_mayat->stack, JRG_KO_STACK);
         if (jrg_ko_mayat->selamat) munmap(jrg_ko_mayat->selamat, JRG_KO_SELAMAT);
+#endif
         jrg_ko_mayat = 0;
     }
     JrgKo *k = jrg_alloc((int64_t)sizeof(JrgKo), 16);
@@ -212,13 +231,19 @@ void jrg_ko_spawn(void (*fn)(void *), void *arg) {
     k->arg = arg;
     k->masa = jrg_ko_baru_masa;
     jrg_ko_baru_masa = 0;
+#if defined(__wasi__)
+    k->stack = jrg_ko_wasm_stack(k);
+    if (k->stack == 0) {
+#else
     k->stack = mmap(0, JRG_KO_STACK, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (k->stack == MAP_FAILED) {
+#endif
         static const char pesan[] = "spawn: tidak bisa memesan stack untuk goroutine baru (memori habis)";
         jrg_panic((const unsigned char *)pesan, (int64_t)(sizeof pesan - 1));
     }
+#if defined(__wasi__)
+#elif defined(__ANDROID__)
     mprotect(k->stack, 4096, PROT_NONE);
-#if defined(__ANDROID__)
     // Bingkai awal: register nol, alamat kembali `jrg_ko_masuk`, puncaknya rata 16 byte.
     uintptr_t puncak = ((uintptr_t)k->stack + JRG_KO_STACK) & ~(uintptr_t)15;
     void **bingkai = (void **)(puncak - JRG_KO_BINGKAI);
@@ -226,6 +251,7 @@ void jrg_ko_spawn(void (*fn)(void *), void *arg) {
     bingkai[JRG_KO_KEMBALI] = (void *)jrg_ko_masuk;
     k->ctx.sp = bingkai;
 #else
+    mprotect(k->stack, 4096, PROT_NONE);
     getcontext(&k->ctx);
     k->ctx.uc_stack.ss_sp = k->stack;
     k->ctx.uc_stack.ss_size = JRG_KO_STACK;
@@ -284,6 +310,10 @@ int jrg_ko_di_stack(uintptr_t alamat) {
 // Dari penangan sinyal stack habis: lanjutkan `fn` di stack baru milik korutin ini, supaya
 // `defer`-nya bisa jalan. Jawab 0 kalau stack penyelamatnya sendiri yang habis.
 int jrg_ko_selamatkan(void (*fn)(void)) {
+#if defined(__wasi__)
+    (void)fn;
+    return 0;
+#else
     JrgKo *k = jrg_ko_kini;
     if (k->selamat) return 0;
     char *st = mmap(0, JRG_KO_SELAMAT, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
@@ -314,6 +344,7 @@ int jrg_ko_selamatkan(void (*fn)(void)) {
     setcontext(&ctx);
 #endif
     return 0;
+#endif
 }
 
 // ── channel ──
@@ -557,6 +588,19 @@ int32_t jrg_masa_coba(JrgChan *c, void *out, int64_t mikro, const char *nama, in
 // Fungsi milik program yang dipanggil balik dari `jrgc`: jalan sebagai badan tugas, dan kalau gagal
 // galatnya DIKEMBALIKAN (-1, kalimatnya di `pesan`), tidak menghentikan proses.
 int32_t jrg_masa_lindung(void (*jalan)(void *), void *env, const char **pesan, int64_t *n) {
+#if defined(__wasi__)
+    // Dari dalam jembatan (`--emit-wasm`) tidak boleh berganti korutin: jalan di sini, galatnya menghentikan program.
+    if (jrg_wasm_dalam_jembatan()) {
+        JrgChan *c = jrg_chan_new(1, 0);
+        c->sekali = 2;
+        void **paket = jrg_alloc(24, 8);
+        paket[0] = env;
+        paket[1] = c;
+        paket[2] = NULL;
+        jalan(paket);
+        return 0;
+    }
+#endif
     JrgChan *c = jrg_masa_baru(jalan, env, NULL, 0, 1);
     char nol[8];
     jrg_chan_recv(c, nol, 0);
@@ -564,6 +608,16 @@ int32_t jrg_masa_lindung(void (*jalan)(void *), void *env, const char **pesan, i
     *pesan = c->gagal;
     *n = c->gagal_n;
     return -1;
+}
+
+// `tangkap(f)`: hasil tugasnya ke `out` (1), atau galatnya direkam ke `galat` lewat runtime (0) — tidak melempar.
+void jrg_tangkap_rekam(const char *pesan, int64_t n, void *galat);
+int32_t jrg_tangkap_ambil(JrgChan *c, void *out, void *galat) {
+    jrg_chan_recv(c, out, c->esize);
+    c->diambil = 1;
+    if (!c->gagal) return 1;
+    jrg_tangkap_rekam(c->gagal, c->gagal_n, galat);
+    return 0;
 }
 
 int32_t jrg_masa_selesai(JrgChan *c) {

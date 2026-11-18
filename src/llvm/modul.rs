@@ -63,7 +63,8 @@ pub fn muat(utama: &ParsedFile, jalur: &[PathBuf]) -> Result<Vec<UnitLlvm>, Stri
 }
 
 fn unit_lapis() -> Result<UnitLlvm, String> {
-    let sumber = include_str!("lapis.jrg").to_string();
+    // Method `Option`/`Result` milik prelude (`src/opsi.jrg`) ikut unit ini: `kunci_lapis("Option", m)`.
+    let sumber = format!("{}\n{}\n", include_str!("lapis.jrg"), crate::opsi::badan());
     let file_id = crate::diag::register_module_source(NAMA_LAPIS.to_string(), sumber.clone());
     let sf = SourceFile { id: file_id, name: NAMA_LAPIS.to_string(), src: sumber };
     let tokens = lex(&sf).map_err(|e| format!("lapis.jrg: {}", e.msg))?;

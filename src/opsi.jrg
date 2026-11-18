@@ -1,0 +1,171 @@
+// src/opsi.jrg — method `Option`/`Result` yang ditulis dalam JRG, satu definisi untuk tiga mesin.
+// `o.m(..)` atas `Option`/`Result` yang tidak punya method bawaan `m` dicari di sini sebagai
+// `Option_m`/`Result_m`; kalimat gagalnya menyebut method yang ditulis pemakai.
+package opsi
+
+fn _fungsi<F>(metode: string, ke: int, f: F) {
+    let t = typeof(f)
+    if t != "function" && t != "closure" && t != "native_fn" && !str::starts_with(t, "enum_ctor:") {
+        panik("method `" + metode + "` butuh fungsi sebagai argumen ke-" + str(ke) + ", dapat `" + t + "`")
+    }
+}
+
+// ── Option ──────────────────────────────────────────────────────────────────
+
+pub fn Option_unwrap_or_else<T>(o: Option<T>, f: fn() -> T) -> T {
+    _fungsi("unwrap_or_else", 1, f)
+    match o { Some(v) => v, None => f() }
+}
+
+pub fn Option_or<T>(o: Option<T>, lain: Option<T>) -> Option<T> {
+    match o { Some(v) => Some(v), None => lain }
+}
+
+pub fn Option_or_else<T>(o: Option<T>, f: fn() -> Option<T>) -> Option<T> {
+    _fungsi("or_else", 1, f)
+    match o { Some(v) => Some(v), None => f() }
+}
+
+pub fn Option_and<T, U>(o: Option<T>, lain: Option<U>) -> Option<U> {
+    match o { Some(_) => lain, None => None }
+}
+
+pub fn Option_xor<T>(o: Option<T>, lain: Option<T>) -> Option<T> {
+    match o {
+        Some(v) => match lain { Some(_) => None, None => Some(v) },
+        None => lain,
+    }
+}
+
+pub fn Option_ok_or<T, E>(o: Option<T>, galat: E) -> Result<T, E> {
+    match o { Some(v) => Ok(v), None => Err(galat) }
+}
+
+pub fn Option_ok_or_else<T, E>(o: Option<T>, f: fn() -> E) -> Result<T, E> {
+    _fungsi("ok_or_else", 1, f)
+    match o { Some(v) => Ok(v), None => Err(f()) }
+}
+
+pub fn Option_filter<T, B>(o: Option<T>, p: fn(T) -> B) -> Option<T> {
+    _fungsi("filter", 1, p)
+    match o { Some(v) => if p(v) { Some(v) } else { None }, None => None }
+}
+
+// Isinya harus `Option` juga: `Some(1).flatten()` gagal (lengan tidak cocok), bukan menjawab `1`.
+pub fn Option_flatten<T>(o: Option<Option<T>>) -> Option<T> {
+    match o { Some(isi) => match isi { Some(v) => Some(v), None => None }, None => None }
+}
+
+pub fn Option_zip<T, U>(o: Option<T>, lain: Option<U>) -> Option<(T, U)> {
+    match o {
+        Some(a) => match lain { Some(b) => Some((a, b)), None => None },
+        None => None,
+    }
+}
+
+pub fn Option_map_or<T, U>(o: Option<T>, bawaan: U, f: fn(T) -> U) -> U {
+    _fungsi("map_or", 2, f)
+    match o { Some(v) => f(v), None => bawaan }
+}
+
+pub fn Option_map_or_else<T, U>(o: Option<T>, saat_none: fn() -> U, f: fn(T) -> U) -> U {
+    _fungsi("map_or_else", 1, saat_none)
+    _fungsi("map_or_else", 2, f)
+    match o { Some(v) => f(v), None => saat_none() }
+}
+
+pub fn Option_is_some_and<T, B>(o: Option<T>, p: fn(T) -> B) -> bool {
+    _fungsi("is_some_and", 1, p)
+    match o { Some(v) => if p(v) { true } else { false }, None => false }
+}
+
+pub fn Option_is_none_or<T, B>(o: Option<T>, p: fn(T) -> B) -> bool {
+    _fungsi("is_none_or", 1, p)
+    match o { Some(v) => if p(v) { true } else { false }, None => true }
+}
+
+pub fn Option_inspect<T, U>(o: Option<T>, f: fn(T) -> U) -> Option<T> {
+    _fungsi("inspect", 1, f)
+    match o { Some(v) => { f(v); Some(v) }, None => None }
+}
+
+pub fn Option_contains<T, U>(o: Option<T>, nilai: U) -> bool {
+    match o { Some(v) => v == nilai, None => false }
+}
+
+pub fn Option_transpose<T, E>(o: Option<Result<T, E>>) -> Result<Option<T>, E> {
+    match o {
+        Some(r) => match r { Ok(v) => Ok(Some(v)), Err(e) => Err(e) },
+        None => Ok(None),
+    }
+}
+
+// ── Result ──────────────────────────────────────────────────────────────────
+
+pub fn Result_unwrap_or_else<T, E>(r: Result<T, E>, f: fn(E) -> T) -> T {
+    _fungsi("unwrap_or_else", 1, f)
+    match r { Ok(v) => v, Err(e) => f(e) }
+}
+
+pub fn Result_or<T, E, F>(r: Result<T, E>, lain: Result<T, F>) -> Result<T, F> {
+    match r { Ok(v) => Ok(v), Err(_) => lain }
+}
+
+pub fn Result_or_else<T, E, F>(r: Result<T, E>, f: fn(E) -> Result<T, F>) -> Result<T, F> {
+    _fungsi("or_else", 1, f)
+    match r { Ok(v) => Ok(v), Err(e) => f(e) }
+}
+
+pub fn Result_and<T, U, E>(r: Result<T, E>, lain: Result<U, E>) -> Result<U, E> {
+    match r { Ok(_) => lain, Err(e) => Err(e) }
+}
+
+pub fn Result_map_or<T, E, U>(r: Result<T, E>, bawaan: U, f: fn(T) -> U) -> U {
+    _fungsi("map_or", 2, f)
+    match r { Ok(v) => f(v), Err(_) => bawaan }
+}
+
+pub fn Result_map_or_else<T, E, U>(r: Result<T, E>, saat_err: fn(E) -> U, f: fn(T) -> U) -> U {
+    _fungsi("map_or_else", 1, saat_err)
+    _fungsi("map_or_else", 2, f)
+    match r { Ok(v) => f(v), Err(e) => saat_err(e) }
+}
+
+pub fn Result_is_ok_and<T, E, B>(r: Result<T, E>, p: fn(T) -> B) -> bool {
+    _fungsi("is_ok_and", 1, p)
+    match r { Ok(v) => if p(v) { true } else { false }, Err(_) => false }
+}
+
+pub fn Result_is_err_and<T, E, B>(r: Result<T, E>, p: fn(E) -> B) -> bool {
+    _fungsi("is_err_and", 1, p)
+    match r { Ok(_) => false, Err(e) => if p(e) { true } else { false } }
+}
+
+pub fn Result_inspect<T, E, U>(r: Result<T, E>, f: fn(T) -> U) -> Result<T, E> {
+    _fungsi("inspect", 1, f)
+    match r { Ok(v) => { f(v); Ok(v) }, Err(e) => Err(e) }
+}
+
+pub fn Result_inspect_err<T, E, U>(r: Result<T, E>, f: fn(E) -> U) -> Result<T, E> {
+    _fungsi("inspect_err", 1, f)
+    match r { Ok(v) => Ok(v), Err(e) => { f(e); Err(e) } }
+}
+
+pub fn Result_expect_err<T, E>(r: Result<T, E>, pesan: string) -> E {
+    match r { Ok(_) => panik(pesan), Err(e) => e }
+}
+
+pub fn Result_flatten<T, E>(r: Result<Result<T, E>, E>) -> Result<T, E> {
+    match r { Ok(isi) => match isi { Ok(v) => Ok(v), Err(e) => Err(e) }, Err(e) => Err(e) }
+}
+
+pub fn Result_contains<T, E, U>(r: Result<T, E>, nilai: U) -> bool {
+    match r { Ok(v) => v == nilai, Err(_) => false }
+}
+
+pub fn Result_transpose<T, E>(r: Result<Option<T>, E>) -> Option<Result<T, E>> {
+    match r {
+        Ok(o) => match o { Some(v) => Some(Ok(v)), None => None },
+        Err(e) => Some(Err(e)),
+    }
+}

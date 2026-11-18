@@ -108,7 +108,25 @@ pub fn main() {{
 "#, name = name)
 }
 
+/// Nama proyek masuk ke `jrgm.toml` dan `package uji_<nama>` apa adanya: tanda kutip atau baris baru dulu merusak
+/// manifesnya (atau menyisipkan bagian lain), dan `.`/`..` jadi folder yang sudah ada (Fase AMAN-62).
+pub(crate) fn periksa_nama_baru(name: &str) -> Result<(), String> {
+    let akhir = name.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    let sah = !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b"_-./".contains(&b))
+        && !akhir.is_empty() && akhir != "." && akhir != ".." && !akhir.starts_with('-');
+    if !sah {
+        return Err(format!("jrgm: nama proyek {:?} tidak sah — pakai huruf, angka, `_` dan `-` (boleh diawali \
+            jalur folder, mis. `../alat/hitung`)", name));
+    }
+    // Folder yang sudah ada tidak ditimpa: `src/main.jrg` pemakai dulu diganti templat tanpa suara.
+    if std::path::Path::new(name).exists() {
+        return Err(format!("jrgm: `{}` sudah ada — pilih nama lain, atau pindahkan isinya dulu", name));
+    }
+    Ok(())
+}
+
 pub(crate) fn cmd_new(name: &str, kind: &str) -> Result<(), String> {
+    periksa_nama_baru(name)?;
     let root = PathBuf::from(name);
     std::fs::create_dir_all(root.join("src"))
         .map_err(|e| format!("tidak bisa buat direktori project: {}", crate::host::galat_io(&e)))?;
@@ -119,8 +137,13 @@ pub(crate) fn cmd_new(name: &str, kind: &str) -> Result<(), String> {
              `lib` (pustaka), `web` (server HTTP yang langsung jalan), `android` (aplikasi HP)", kind));
     }
     let entry = if kind == "lib" { "src/lib.jrg" } else { "src/main.jrg" };
+    // Kerangka ikut bahasa pesan: dalam bahasa Inggris komentar, nama dan teksnya juga Inggris.
+    let en = crate::terjemah::aktif() == crate::terjemah::Bahasa::En;
+    use super::rangka_en as en_;
 
-    let entry_content = if kind == "web" {
+    let entry_content = if en {
+        match kind { "web" => en_::web(name), "android" => en_::android(name), "lib" => en_::lib(name), _ => en_::bin(name) }
+    } else if kind == "web" {
         rangka_web(name)
     } else if kind == "android" {
         rangka_android(name)
@@ -162,7 +185,7 @@ pub fn main() {{
     std::fs::write(root.join(entry), entry_content)
         .map_err(|e| format!("tidak bisa tulis entry file: {}", crate::host::galat_io(&e)))?;
 
-    let manifest = format!(
+    let manifest = if en { en_::manifes_umum(name, entry) } else { format!(
         "[package]\nname        = \"{name}\"\nversion     = \"0.1.0\"\n\
          edition     = \"jrg2025\"\nentry       = \"{entry}\"\n\n\
          # Dependensi: direktori lokal, atau repositori git (dikunci di jrgm.lock):\n\
@@ -175,8 +198,10 @@ pub fn main() {{
          # tangkap (mis. py::exec(\"import ...\")) atau supaya eksplisit.\n\
          # [python]\n\
          # packages = [\"requests\", \"numpy\"]\n"
-    );
-    let manifest = if kind == "web" {
+    ) };
+    let manifest = if kind == "web" && en {
+        format!("{manifest}{}", en_::MANIFES_WEB)
+    } else if kind == "web" {
         format!("{manifest}\n\
                  # Jadikan aplikasi Android: `jrgm apk`. Halaman ini tampil di WebView, dan program ini\n\
                  # jalan di dalam HP sebagai pelayannya (jrgc ikut di dalam APK).\n\
@@ -186,7 +211,7 @@ pub fn main() {{
     } else { manifest };
     let manifest = if kind == "android" {
         let paket = crate::llvm::apk::nama_paket(name);
-        format!("{manifest}\n\
+        if en { format!("{manifest}{}", en_::manifes_android(name, &paket)) } else { format!("{manifest}\n\
                  # Identitas APK untuk `jrgm apk` dan `jrgm run --android`.\n\
                  [android]\n\
                  nama      = \"{name}\"\n\
@@ -203,7 +228,7 @@ pub fn main() {{
                  # libhitung = [\"native/hitung.c\"]\n\
                  # [android.pustaka_rust]\n\
                  # librumus = \"rust/rumus\"      # crate dengan crate-type = [\"cdylib\"]\n\
-                 # Kunci rilis: `jrgm kunci` sekali, lalu `jrgm apk --rilis`.\n")
+                 # Kunci rilis: `jrgm kunci` sekali, lalu `jrgm apk --rilis`.\n") }
     } else { manifest };
     std::fs::write(root.join("jrgm.toml"), manifest)
         .map_err(|e| format!("tidak bisa tulis jrgm.toml: {}", crate::host::galat_io(&e)))?;
@@ -217,7 +242,7 @@ pub fn main() {{
     // dan konvensinya terlihat tanpa perlu dicari di dokumentasi.
     std::fs::create_dir_all(root.join("tests"))
         .map_err(|e| format!("tidak bisa buat direktori tests: {}", crate::host::galat_io(&e)))?;
-    let contoh_uji = format!(
+    let contoh_uji = if en { en_::uji(name) } else { format!(
         "// Test untuk `{name}`. Dijalankan dengan `jrgm test`.\n\
          //\n\
          // Sebuah fungsi dianggap test kalau namanya diawali `test_` atau\n\
@@ -234,10 +259,10 @@ pub fn main() {{
          //         testing::cek_sama(\"tambah\", 1 + 1, 2)\n\
          //         assert_eq(testing::hitungan().1, 0)\n\
          //     }}\n"
-    );
+    ) };
     std::fs::write(root.join("tests").join("dasar.jrg"), contoh_uji)
         .map_err(|e| format!("tidak bisa tulis contoh test: {}", crate::host::galat_io(&e)))?;
 
-    eprintln!("Created `{}` ({}) package", name, kind);
+    crate::ecetak_t!("Created `{}` ({}) package", name, kind);
     Ok(())
 }

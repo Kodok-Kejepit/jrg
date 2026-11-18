@@ -434,14 +434,14 @@ pub enum Bacaan {
 }
 
 /// Baca satu tombol, menunggu paling lama `ms` milidetik.
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
 pub fn baca_tombol_tunggu(_: u64) -> Bacaan {
     // Di peramban tidak ada terminal, dan `Instant::now()` di sana panik.
     Bacaan::Habis
 }
 
 /// Baca satu tombol, menunggu paling lama `ms` milidetik.
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(not(all(target_arch = "wasm32", target_os = "unknown")))]
 pub fn baca_tombol_tunggu(ms: u64) -> Bacaan {
     let batas = std::time::Instant::now() + std::time::Duration::from_millis(ms);
     let terminal = interaktif();

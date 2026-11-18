@@ -45,7 +45,9 @@ fn blok(map: &mut SourceMap, lo: u32, hi: u32, berkas: u32) -> (String, usize) {
     map.ensure_module(berkas);
     let d = Diagnostic::error("\u{1}").with_span(Span::new(BytePos(lo), BytePos(hi), berkas)).with_help("\u{2}");
     let t = d.render_dengan_nada(map, Nada::Sopan);
-    let (Some(a), Some(k)) = (t.find('\u{1}'), t.find("= bantuan: \u{2}")) else { return (String::new(), 0) };
+    // Labelnya ikut bahasa pesan (`= help:` dalam bahasa Inggris).
+    let label = format!("= {} \u{2}", crate::terjemah::pilih("bantuan:", "help:"));
+    let (Some(a), Some(k)) = (t.find('\u{1}'), t.find(&label)) else { return (String::new(), 0) };
     let Some(awal_baris) = t[..k].rfind('\n') else { return (String::new(), 0) };
     // Tanpa lokasi perendernya tidak menulis `-->`: blok kosong, bukan lokasi karangan.
     let isi = &t[a + '\u{1}'.len_utf8()..awal_baris];

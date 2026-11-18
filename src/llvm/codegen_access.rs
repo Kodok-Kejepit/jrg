@@ -1079,8 +1079,14 @@ impl Codegen {
                 | Expr::Literal(crate::parser::LitKind::RawStr(t), _) => Some(t.clone()),
                 _ => None,
             };
+            // Tipe statis kunci cuma PETUNJUK: `d["a"] = <tipe lain>` menimpa nilainya dengan kotak bertag lain
+            // tanpa mengubah tipe variabel. Membuka skalar tanpa memeriksa tag membocorkan pointer/byte mentah
+            // (AGI-20261118-02), jadi lewat `buka_terperiksa` — cocok = nilainya, beda = gagal keras bernama tipe asli.
             return match tertulis.and_then(|t| tabel.iter().find(|(n, _)| *n == t).cloned()) {
-                Some((_, ty)) => self.buka_any(&hasil, &ty, span),
+                Some((_, ty)) => match self.buka_terperiksa(&hasil, &ty) {
+                    Some(v) => Ok(v),
+                    None => self.buka_any(&hasil, &ty, span),
+                },
                 None => Ok(hasil),
             };
         }
@@ -1128,6 +1134,46 @@ impl Codegen {
     /// Jumlah karakter teks `(sptr, slen)`: memo runtime dibaca langsung di IR, runtime dipanggil cuma kalau
     /// memonya teks lain. Teks ASCII ⇔ jumlah karakter = panjang bita.
     pub(crate) fn jumlah_karakter(&mut self, sptr: &str, slen: &str) -> String {
+        // Memo lokal fungsi dulu: di loop `char_at(s, i)` memo global dibaca dan dibandingkan ulang tiap karakter,
+        // karena jalur lambatnya memanggil runtime yang bisa mengubahnya (`string_ops`); yang lokal jadi register.
+        // Aman dengan alasan memo global: teks tidak diubah di tempat dan arena tidak memakai ulang alamat.
+        let ada = |m: &(String, String, String), baris: &[String]| baris.iter().any(|l| l.starts_with(&format!("  {} =", m.0)));
+        let (lp, ll, ln) = match self.memo_teks_lokal.clone() {
+            Some(m) if ada(&m, &self.entry_allocas) => m,
+            _ => {
+                let m = (self.alloca_raw("tmlp.", "ptr", None), self.alloca_raw("tmll.", "i64", None), self.alloca_raw("tmln.", "i64", None));
+                self.entry_allocas.push(format!("  store ptr null, ptr {}", m.0));
+                self.entry_allocas.push(format!("  store i64 -1, ptr {}", m.1));
+                self.memo_teks_lokal = Some(m.clone());
+                m
+            }
+        };
+        let (xp, xl, xn) = (self.fresh("tlp."), self.fresh("tll."), self.fresh("tln."));
+        self.emit(format!("{} = load ptr, ptr {}", xp, lp));
+        self.emit(format!("{} = load i64, ptr {}", xl, ll));
+        self.emit(format!("{} = load i64, ptr {}", xn, ln));
+        let (d1, d2, dsama) = (self.fresh("tlc."), self.fresh("tlc."), self.fresh("tlc."));
+        self.emit(format!("{} = icmp eq ptr {}, {}", d1, xp, sptr));
+        self.emit(format!("{} = icmp eq i64 {}, {}", d2, xl, slen));
+        self.emit(format!("{} = and i1 {}, {}", dsama, d1, d2));
+        let (lkena, lmeleset, lusai) = (self.fresh_label("tl.kena."), self.fresh_label("tl.meleset."), self.fresh_label("tl.usai."));
+        self.terminate(format!("br i1 {}, label %{}, label %{}", dsama, lkena, lmeleset));
+        self.start_block(lkena.clone());
+        self.terminate(format!("br label %{}", lusai));
+        self.start_block(lmeleset);
+        let n_global = self.jumlah_karakter_global(sptr, slen);
+        self.emit(format!("store ptr {}, ptr {}", sptr, lp));
+        self.emit(format!("store i64 {}, ptr {}", slen, ll));
+        self.emit(format!("store i64 {}, ptr {}", n_global, ln));
+        let asal = self.cur_label.clone();
+        self.terminate(format!("br label %{}", lusai));
+        self.start_block(lusai);
+        let n = self.fresh("tljk.");
+        self.emit(format!("{} = phi i64 [ {}, %{} ], [ {}, %{} ]", n, xn, lkena, n_global, asal));
+        n
+    }
+
+    fn jumlah_karakter_global(&mut self, sptr: &str, slen: &str) -> String {
         self.ensure_extern("declare i64 @jrg_str_char_count(ptr, i64)", "jrg_str_char_count");
         self.ensure_extern("@jrg_teks_memo_p = external global ptr\n@jrg_teks_memo_l = external global i64\n\
             @jrg_teks_memo_n = external global i64", "global.teks_memo");
@@ -1151,6 +1197,30 @@ impl Codegen {
         let n = self.fresh("tmjk.");
         self.emit(format!("{} = phi i64 [ {}, %{} ], [ {}, %{} ]", n, mn, kena, n1, meleset));
         n
+    }
+
+    /// `str::char_at(s, i)` dengan kalimat gagal milik lapis (`str_char_at`), lalu jalur `s[i]`.
+    pub(crate) fn char_at_langsung(&mut self, sv: &Val, iv: &Val) -> Result<Val, String> {
+        let (sptr, slen) = self.split_str(sv);
+        let n = self.jumlah_karakter(&sptr, &slen);
+        let (neg, tambah, ix) = (self.fresh("cang."), self.fresh("caplus."), self.fresh("caix."));
+        self.emit(format!("{} = icmp slt i64 {}, 0", neg, iv.text));
+        self.emit(format!("{} = add i64 {}, {}", tambah, iv.text, n));
+        self.emit(format!("{} = select i1 {}, i64 {}, i64 {}", ix, neg, tambah, iv.text));
+        let (c1, c2, luar) = (self.fresh("calo."), self.fresh("cahi."), self.fresh("caluar."));
+        self.emit(format!("{} = icmp slt i64 {}, 0", c1, ix));
+        self.emit(format!("{} = icmp sge i64 {}, {}", c2, ix, n));
+        self.emit(format!("{} = or i1 {}, {}", luar, c1, c2));
+        let (gagal, lanjut) = (self.fresh_label("ca.gagal."), self.fresh_label("ca.lanjut."));
+        self.terminate(format!("br i1 {}, label %{}, label %{}, !prof !0", luar, gagal, lanjut));
+        self.start_block(gagal);
+        self.ensure_extern("declare void @jrg_panik_pola(ptr, i64, i64, i64) cold nounwind noreturn", "jrg_panik_pola");
+        let pola = self.intern_string("str::char_at: index \u{1} di luar batas (panjang \u{2})");
+        let (pp, pl) = self.split_str(&pola);
+        self.emit(format!("call void @jrg_panik_pola(ptr {}, i64 {}, i64 {}, i64 {})", pp, pl, iv.text, n));
+        self.terminate("unreachable".to_string());
+        self.start_block(lanjut);
+        self.karakter_string(sv, &Val { text: ix, ty: JrgType::I64 })
     }
 
     /// `s[i]` — karakter ke-`i` sebuah string, sebagai `rune`.
@@ -1348,6 +1418,10 @@ impl Codegen {
                      elemen tuple boleh bertipe berbeda, jadi tipe hasil `t[a:b]` bergantung pada batasnya")),
             }
         };
+        // Batas dari variabel: tiap pasangan sah dipilih saat jalan, hasilnya nilai bertag (seperti `t[i]`).
+        if (konstan(lo.0).is_err() || konstan(hi.0).is_err()) && n <= 16 {
+            return self.potong_tuple_dinamis(ptr, oty, lo.1, hi.1, span);
+        }
         let (lo_k, hi_k) = (konstan(lo.0)?, konstan(hi.0)?);
         let mut pos = [0usize, n];
         for (j, (sisi, k)) in [("awal", lo_k), ("akhir", hi_k)].into_iter().enumerate() {
@@ -1363,21 +1437,54 @@ impl Codegen {
             self.tempat_tiruan_sesudah(&g::potongan_terbalik(pos[0], pos[1]), span)?;
             return Ok(Val::unit());
         }
-        // Tuple tanpa elemen: `{ }`, tampil `()`, `typeof` `tuple` — seperti acuan (dulu ditolak).
-        if pos[0] == pos[1] {
-            return Ok(Val { text: "zeroinitializer".into(), ty: JrgType::Tuple(Vec::new()) });
-        }
+        // Tuple tanpa elemen: `{ }`, tampil `()`, `typeof` `tuple` — seperti acuan (dulu ditolak), lewat `sub_tuple`.
         let asal = self.load_place(ptr, oty);
-        let hasil_ty = JrgType::Tuple(elems[pos[0]..pos[1]].to_vec());
+        Ok(self.sub_tuple(&asal, oty, pos[0], pos[1]))
+    }
+
+    /// Elemen `a..b` tuple `asal` (bertipe `oty`) sebagai tuple baru.
+    fn sub_tuple(&mut self, asal: &Val, oty: &JrgType, a: usize, b: usize) -> Val {
+        let JrgType::Tuple(elems) = oty else { unreachable!() };
+        if a == b { return Val { text: "zeroinitializer".into(), ty: JrgType::Tuple(Vec::new()) }; }
+        let hasil_ty = JrgType::Tuple(elems[a..b].to_vec());
         let mut agg = "undef".to_string();
-        for (j, i) in (pos[0]..pos[1]).enumerate() {
+        for (j, i) in (a..b).enumerate() {
             let e = self.fresh("tpot.");
             self.emit(format!("{} = extractvalue {} {}, {}", e, oty.llvm_ty(), asal.text, i));
             let r = self.fresh("tpot.");
             self.emit(format!("{} = insertvalue {} {}, {} {}, {}", r, hasil_ty.llvm_ty(), agg, elems[i].llvm_ty(), e, j));
             agg = r;
         }
-        Ok(Val { text: agg, ty: hasil_ty })
+        Val { text: agg, ty: hasil_ty }
+    }
+
+    /// `t[a:b]` dengan batas dari variabel: batasnya diperiksa dengan kalimat acuan, lalu pasangan
+    /// `(a, b)` dipilih lewat satu `switch` atas `a * (n + 1) + b`; tiap lengan mengotakkan potongannya.
+    fn potong_tuple_dinamis(&mut self, ptr: &str, oty: &JrgType, lo: Option<Val>, hi: Option<Val>, span: Span) -> Result<Val, String> {
+        let JrgType::Tuple(elems) = oty else { unreachable!() };
+        let n = elems.len();
+        let panjang = Val { text: n.to_string(), ty: JrgType::I64 };
+        let Some((a, b)) = self.batas_potongan_dicek(lo, hi, &panjang, span)? else { return Ok(Val::unit()) };
+        let asal = self.load_place(ptr, oty);
+        let kunci = self.fresh("tpd.");
+        self.emit(format!("{} = mul i64 {}, {}", kunci, a.text, n + 1));
+        let kunci2 = self.fresh("tpd.");
+        self.emit(format!("{} = add i64 {}, {}", kunci2, kunci, b.text));
+        let hasil = self.alloca_typed("tpd.", &JrgType::Any);
+        let usai = self.fresh_label("tpd.usai.");
+        let mut lengan = Vec::new();
+        for x in 0..=n { for y in x..=n { lengan.push((x, y, self.fresh_label("tpd.l."))); } }
+        let kasus: Vec<String> = lengan.iter().map(|(x, y, l)| format!("i64 {}, label %{}", x * (n + 1) + y, l)).collect();
+        self.terminate(format!("switch i64 {}, label %{} [ {} ]", kunci2, usai, kasus.join(" ")));
+        for (x, y, l) in lengan {
+            self.start_block(l);
+            let v = self.sub_tuple(&asal, oty, x, y);
+            let k = self.kotak_any(&v, span)?;
+            self.emit(format!("store %JrgAny {}, ptr {}", k.text, hasil));
+            self.terminate(format!("br label %{}", usai));
+        }
+        self.start_block(usai);
+        Ok(self.load_place(&hasil, &JrgType::Any))
     }
 
     /// `s[lo:hi]` — potongan string, per KARAKTER.

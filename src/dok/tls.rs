@@ -121,6 +121,11 @@ impl Tls {
             if ssl.is_null() { (s.ctx_free)(ctx); return Err(format!("TLS: {}", galat_terakhir(s))); }
             let t = Tls { ctx, ssl, _tcp: tcp };
             (s.set_fd)(ssl, fd);
+            // TLS 1.0/1.1 sudah usang (RFC 8996); OpenSSL 1.1 tanpa konfigurasi sistem masih menerimanya.
+            // `SSL_set_min_proto_version` = `SSL_ctrl(.., SSL_CTRL_SET_MIN_PROTO_VERSION, TLS1_2_VERSION, ..)`.
+            if (s.ctrl)(ssl, 123, 0x0303, std::ptr::null_mut()) != 1 {
+                return Err(format!("TLS ke {}: versi minimum TLS 1.2 tidak bisa dipasang", host));
+            }
             (s.ctrl)(ssl, 55, 0, nama.as_ptr() as P);
             // Tanpa nama host yang terpasang, sertifikat sah milik host LAIN pun diterima.
             if (s.set1_host)(ssl, nama.as_ptr()) != 1 {

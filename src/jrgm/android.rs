@@ -64,7 +64,7 @@ pub(crate) fn opsi_dari_manifes(m: &Manifest, abi: Option<&str>) -> Result<OpsiA
         Some(t) => Some(t.parse::<u32>().map_err(|_| format!("`target_sdk = {}` di [android] bukan bilangan", t))?),
     };
     if target_sdk.map_or(false, |t| t < 33) {
-        eprintln!("[jrgm] peringatan: `target_sdk = {}` — Play Store menolak APK di bawah 33; \
+        crate::ecetak_t!("[jrgm] peringatan: `target_sdk = {}` — Play Store menolak APK di bawah 33; \
                    cocok untuk rilis di luar Play (F-Droid, GitHub)", target_sdk.unwrap_or(0));
     }
     Ok(OpsiApk {
@@ -168,7 +168,7 @@ pub(crate) fn bangun_apk(akar: &Path, m: &Manifest, opsi: &OpsiApk, tujuan: &Pat
     tambah_path_dependensi(akar, &mut jalur)?;
     jalur.dedup();
     let ir = crate::llvm::generate_ir_dgn_jalur(&ast,
-        crate::llvm::codegen::CodegenOptions { fast_math: false, full_buffered_stdout: false }, &jalur)
+        crate::llvm::codegen::CodegenOptions { fast_math: false, full_buffered_stdout: false, ptr32: false }, &jalur)
         .map_err(|errs| {
             let g: Vec<_> = errs.iter().map(|e| crate::llvm::galat::GalatLlvm::dari_pesan(e)).collect();
             crate::diag::laporkan_llvm(&mut peta, &g);
@@ -195,7 +195,7 @@ pub(crate) fn cmd_apk(abi: Option<&str>, keluaran: Option<&Path>, rilis: bool, a
         "{}{}.{}", m.name, if rilis { "-rilis" } else { "" }, if opsi.aab { "aab" } else { "apk" })));
     let hasil = match bangun_apk(&akar, &m, &opsi, &tujuan, verbose) {
         Err(e) if super::siapkan::galat_perkakas(&e) => {
-            eprintln!("{}", e);
+            crate::ecetak_t!("{}", e);
             let o = super::siapkan::Opsi { ya: false, target_sdk: opsi.aplikasi.target_sdk, sdk: None, tanpa_ndk: false };
             if !super::siapkan::tanya("Perkakas Android belum lengkap. Mau dibantu dipasangkan sekarang (`jrgm siapkan android`)?", false) {
                 return Err("perkakas Android belum ada\n  bantuan: `jrgm siapkan android` memasangnya".into());
@@ -205,7 +205,7 @@ pub(crate) fn cmd_apk(abi: Option<&str>, keluaran: Option<&Path>, rilis: bool, a
         }
         h => h?,
     };
-    eprintln!("[jrgm] {}{}: {} ({})", if opsi.aab { "AAB" } else { "APK" }, if rilis { " rilis" } else { "" },
+    crate::ecetak_t!("[jrgm] {}{}: {} ({})", if opsi.aab { "AAB" } else { "APK" }, if rilis { " rilis" } else { "" },
               hasil.display(), opsi.abi.join(", "));
     Ok(())
 }
@@ -226,7 +226,7 @@ pub(crate) fn cmd_kunci() -> Result<(), String> {
         .status().map_err(|e| format!("gagal menjalankan keytool (butuh Java): {}", crate::host::galat_io(&e)))?;
     if !st.success() { return Err("keytool tidak membuat kuncinya".into()); }
     if m.android.kunci.is_none() { tulis_kunci_ke_manifes(&akar, &alias)?; }
-    eprintln!("[jrgm] kunci rilis: {} (alias `{}`)\n  \
+    crate::ecetak_t!("[jrgm] kunci rilis: {} (alias `{}`)\n  \
                simpan salinannya dan sandinya: tanpa keduanya aplikasi ini tidak bisa diperbarui\n  \
                bangun: jrgm apk --rilis (sandi lewat JRG_KUNCI_SANDI, atau ditanyakan)", kunci.display(), alias);
     Ok(())
@@ -295,14 +295,14 @@ pub(crate) fn cmd_run_android(verbose: bool) -> Result<(), String> {
     let tujuan = tujuan_bawaan(&akar, &m);
     bangun_apk(&akar, &m, &opsi, &tujuan, verbose)?;
     let paket = opsi.aplikasi.paket.clone().unwrap_or_else(|| apk::nama_paket(&m.name));
-    eprintln!("[jrgm] memasang {} ({}) ...", paket, abi);
+    crate::ecetak_t!("[jrgm] memasang {} ({}) ...", paket, abi);
     // Cuma untuk pengguna yang sedang aktif: profil lain (mis. Secure Folder) tidak disentuh.
     let t = tujuan.to_string_lossy().to_string();
     adb_keluaran(&adb, &["install", "-r", "--user", "current", &t])?;
     let _ = adb_keluaran(&adb, &["logcat", "-c"]);
     let aktivitas = if opsi.aplikasi.entri.is_some() { "jrg.apk.Aktivitas" } else { "android.app.NativeActivity" };
     adb_keluaran(&adb, &["shell", "am", "start", "-n", &format!("{}/{}", paket, aktivitas)])?;
-    eprintln!("[jrgm] jalan di perangkat; keluarannya di bawah (tutup aplikasinya atau Ctrl-C untuk berhenti)");
+    crate::ecetak_t!("[jrgm] jalan di perangkat; keluarannya di bawah (tutup aplikasinya atau Ctrl-C untuk berhenti)");
     let mut log = Command::new(&adb).args(["logcat", "-v", "raw", "-s", "jrg:I"])
         .stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
         .map_err(|e| format!("gagal membaca logcat: {}", crate::host::galat_io(&e)))?;
@@ -328,6 +328,6 @@ pub(crate) fn cmd_run_android(verbose: bool) -> Result<(), String> {
     if !pernah_hidup {
         return Err(format!("aplikasi `{}` tidak terlihat jalan dalam 15 detik\n  bantuan: lihat `adb logcat` untuk sebabnya", paket));
     }
-    eprintln!("[jrgm] aplikasi ditutup");
+    crate::ecetak_t!("[jrgm] aplikasi ditutup");
     Ok(())
 }

@@ -130,7 +130,8 @@ impl Parser {
             None
         };
         let where_clause = self.parse_where_clause()?;
-        let body = if self.eat(&TokenKind::Eq) {
+        let keluarga_luar = std::mem::replace(&mut self.keluarga, Keluarga::dari_anotasi(ret_type.as_ref()));
+        let body = (|| -> Result<FnBody, ParseError> { Ok(if self.eat(&TokenKind::Eq) {
             let e = self.parse_expr()?;
             self.expect_semi_or_closer()?;
             FnBody::Expr(Box::new(e))
@@ -140,7 +141,9 @@ impl Parser {
             FnBody::Abstrak
         } else {
             FnBody::Block(self.parse_block()?)
-        };
+        }) })();
+        self.keluarga = keluarga_luar;
+        let body = body?;
         let (params, body) = bongkar_pola_parameter(params, body);
         Ok(FnDecl { vis, is_async, name, generics, params, ret_type, where_clause, body: body.into(),
                     span: self.merge_span(lo) })

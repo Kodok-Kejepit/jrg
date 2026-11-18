@@ -52,6 +52,24 @@ fn langkah_broadcast(shape: &[usize], target: &[usize]) -> Vec<usize> {
     langkah
 }
 
+/// Indeks rata ke dalam `shape` untuk tiap posisi di `target` (urut baris), lewat `langkah_broadcast`.
+fn peta_broadcast(shape: &[usize], target: &[usize], total: usize) -> Vec<usize> {
+    let l = langkah_broadcast(shape, target);
+    let mut koord = vec![0usize; target.len()];
+    let (mut i, mut out) = (0usize, Vec::with_capacity(total));
+    for _ in 0..total {
+        out.push(i);
+        for s in (0..target.len()).rev() {
+            koord[s] += 1;
+            i += l[s];
+            if koord[s] < target[s] { break; }
+            i -= l[s] * target[s];
+            koord[s] = 0;
+        }
+    }
+    out
+}
+
 /// Jalankan `f` untuk tiap posisi di `target`, memberikan indeks rata ke
 /// dalam `a` dan `b`.
 fn per_elemen_broadcast(
@@ -420,7 +438,9 @@ pub fn unari(a: &Nd, op: Unari) -> Hasil<Nd> {
 fn balik_sumbu_luar(a: &Nd) -> Hasil<Nd> {
     if a.shape.is_empty() { return Ok(a.clone()); }
     let n = a.shape[0];
-    let blok: usize = a.shape[1..].iter().product::<usize>().max(1);
+    // Sumbu dalam berukuran 0: tidak ada isi untuk dibalik (dulu `.max(1)` memotong buffer kosong).
+    let blok: usize = a.shape[1..].iter().product();
+    if blok == 0 { return Ok(a.clone()); }
     macro_rules! balik {
         ($v:expr, $bikin:expr) => {{
             let mut out = Vec::with_capacity($v.len());
@@ -478,24 +498,17 @@ pub fn pilih(k: &Nd, a: &Nd, b: &Nd) -> Hasil<Nd> {
         .map_err(|e| format!("wokwok::pilih: {}", e))?;
     let total = total_broadcast(&shape, "wokwok::pilih")?;
     let kb = bool_data(k);
-    let ambil = |nd: &Nd, i: usize| -> usize {
-        if nd.size() == 1 { 0 } else { i.min(nd.size() - 1) }
-    };
-    // Jalur umum saja: `pilih` jarang jadi titik panas, dan menyalakan
-    // tiga jalur cepat untuk tiga operand berarti delapan kombinasi yang
-    // semuanya harus diuji.
-    let idx_k = |i: usize| if kb.len() == 1 { 0 } else { i };
+    // Indeks tiap operand lewat langkah broadcast yang sama dengan operator biner. Dulu indeks datar `i`
+    // dijepit: kondisi `[2, 1]` lawan `[2, 2]` panik, dan cabang terbaca dari posisi yang salah (AGI-20261118-09).
+    let (ik, ia, ib) = (peta_broadcast(&k.shape, &shape, total), peta_broadcast(&a.shape, &shape, total),
+        peta_broadcast(&b.shape, &shape, total));
     if matches!((&a.buf, &b.buf), (Buf::I64(_), Buf::I64(_))) {
         let (x, y) = (i64_data(a), i64_data(b));
-        let out: Vec<i64> = (0..total)
-            .map(|i| if kb[idx_k(i)] { x[ambil(a, i)] } else { y[ambil(b, i)] })
-            .collect();
+        let out: Vec<i64> = (0..total).map(|i| if kb[ik[i]] { x[ia[i]] } else { y[ib[i]] }).collect();
         return Nd::baru(Buf::I64(out), shape);
     }
     let (x, y) = (a.f64_data(), b.f64_data());
-    let out: Vec<f64> = (0..total)
-        .map(|i| if kb[idx_k(i)] { x[ambil(a, i)] } else { y[ambil(b, i)] })
-        .collect();
+    let out: Vec<f64> = (0..total).map(|i| if kb[ik[i]] { x[ia[i]] } else { y[ib[i]] }).collect();
     Nd::baru(Buf::F64(out), shape)
 }
 
@@ -526,5 +539,18 @@ mod uji_broadcast {
         assert!(super::total_broadcast(&[100000, 100000], "uji").unwrap_err().contains("minta 10000000000 elemen"));
         assert_eq!(super::total_broadcast(&[5000, 5000], "uji").unwrap(), 25_000_000);
         assert_eq!(super::total_broadcast(&[], "uji").unwrap(), 1);
+    }
+
+    /// AGI-20261118-09: `where` membaca tiap operand lewat langkah broadcast; `reverse` atas sumbu dalam berukuran 0.
+    #[test]
+    fn pilih_broadcast_dan_balik_kosong() {
+        use super::super::{Buf, Nd};
+        let k = Nd::baru(Buf::Bool(vec![true, false]), vec![2, 1]).unwrap();
+        let a = Nd::baru(Buf::I64(vec![1, 2, 3, 4]), vec![2, 2]).unwrap();
+        let b = Nd::baru(Buf::I64(vec![10, 20]), vec![2]).unwrap();
+        let h = super::pilih(&k, &a, &b).unwrap();
+        assert_eq!((h.shape.clone(), super::i64_data(&h)), (vec![2, 2], vec![1, 2, 10, 20]));
+        let nol = Nd::baru(Buf::F64(vec![]), vec![2, 0]).unwrap();
+        assert_eq!(super::balik_sumbu_luar(&nol).unwrap().shape, vec![2, 0]);
     }
 }

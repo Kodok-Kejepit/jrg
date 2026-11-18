@@ -65,6 +65,7 @@ impl Interpreter {
             DokSessionEncode  => crate::dok::web::session_encode(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             DokSessionDecode  => crate::dok::web::session_decode(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             DokPasswordHash   => crate::dok::web::password_hash(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
+            DokPasswordNeedsRehash => crate::dok::web::password_needs_rehash(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             DokPasswordVerify => crate::dok::web::password_verify(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             DokRender         => crate::dok::web::render(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),
             DokRenderFile     => crate::dok::web::render_file(args).map_err(|e| Signal::RuntimeError(RuntimeError::new(e))),

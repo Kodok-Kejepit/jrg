@@ -324,6 +324,25 @@ pub fn password_verify(args: &[Value]) -> Result<Value, String> {
     Ok(Value::Bool(sama_waktu_tetap(&hitung, &harusnya)))
 }
 
+/// `dok::password_needs_rehash(hash, putaran?)` → bool: putaran tersimpan lain dari `putaran` (bawaan
+/// `PUTARAN_BAWAAN`), seperti `password_needs_rehash` PHP. Hash 210 000 putaran dari 0.4 jadi `true`, jadi aplikasi
+/// meringkas ulang sesudah `password_verify` berhasil; hash yang tidak terbaca juga `true` (ia tidak bisa dicocokkan).
+pub fn password_needs_rehash(args: &[Value]) -> Result<Value, String> {
+    let simpan = teks_arg(args.get(0), "dok::password_needs_rehash", "hash-nya")?;
+    let sasaran = match args.get(1) {
+        Some(Value::Int(n)) if *n >= 1_000 && *n <= 10_000_000 => *n as u32,
+        Some(Value::Int(n)) => return Err(format!(
+            "dok::password_needs_rehash: putaran {} di luar 1000..10000000, batas yang sama dengan `dok::password_hash`", n)),
+        Some(lain) => return Err(format!(
+            "dok::password_needs_rehash: argumen ke-2 (putaran) harus bilangan bulat, dapat `{}`", lain.type_name())),
+        None => PUTARAN_BAWAAN,
+    };
+    let bagian: Vec<&str> = simpan.split('$').collect();
+    let tersimpan = (bagian.len() == 5 && bagian[0] == "pbkdf2" && bagian[1] == "sha256")
+        .then(|| bagian[2].parse::<u32>().ok()).flatten();
+    Ok(Value::Bool(tersimpan != Some(sasaran)))
+}
+
 /// Umur token CSRF bawaan: 12 jam.
 const UMUR_CSRF: i128 = 43_200;
 /// Jam yang maju sedikit dari jam penanda tangan tidak membuat token jadi tidak sah.

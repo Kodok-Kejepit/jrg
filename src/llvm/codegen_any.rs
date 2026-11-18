@@ -31,7 +31,7 @@ pub fn tag_untuk(t: &JrgType) -> Option<i32> {
         JrgType::Slice(_) | JrgType::Array(_, _) => TAG_SLICE,
         JrgType::Dict(_) => TAG_DICT,
         JrgType::Struct(_) | JrgType::Enum(_) | JrgType::Fn(..) | JrgType::Chan(_) | JrgType::Masa(..) | JrgType::Sinkron(_) => TAG_BURAM,
-        JrgType::Tuple(ts) if !ts.is_empty() => TAG_BURAM,
+        JrgType::Tuple(_) => TAG_BURAM,
         t if t.is_float() => TAG_FLOAT,
         t if t.is_int() => TAG_INT,
         _ => return None,
@@ -441,7 +441,11 @@ impl Codegen {
             kepala.push_str(&format!(" i32 {}, label %b{}", TAG_BURAM | ((i as i32 + 1) << 8), i + 1));
             badan.push_str(&format!("b{0}:\n  %r{0} = call i8 @sama.buram.{0}(ptr %a, ptr %b)\n  ret i8 %r{0}\n", i + 1));
         }
-        // `@jrg_buram_aritas(kata)`: jumlah elemen kalau tipenya tuple, 0 kalau bukan.
+        format!("{} ]\n{}lain:\n  ret i8 0\n}}\n", kepala, badan)
+    }
+
+    /// `@jrg_buram_aritas(kata)`: jumlah elemen kalau tipenya tuple (juga 0), -1 kalau bukan.
+    pub(crate) fn definisi_aritas_buram(&self) -> String {
         let mut aritas = String::from("define internal i32 @jrg_buram_aritas(i32 %w) {\nentry:\n  switch i32 %w, label %lain [");
         let mut ba = String::new();
         for (i, t) in self.tipe_buram.iter().enumerate() {
@@ -450,7 +454,7 @@ impl Codegen {
                 ba.push_str(&format!("b{}:\n  ret i32 {}\n", i + 1, ts.len()));
             }
         }
-        format!("{} ]\n{}lain:\n  ret i8 0\n}}\n{} ]\n{}lain:\n  ret i32 0\n}}\n", kepala, badan, aritas, ba)
+        format!("{} ]\n{}lain:\n  ret i32 -1\n}}\n", aritas, ba)
     }
 
     /// `@jrg_tampil_buram(kata, ptr)` dan `@jrg_typeof_buram(kata)`: pemilih per nomor tipe.

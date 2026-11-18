@@ -100,7 +100,7 @@ pub struct ImporLambat {
     pub pola_lokal: FuncId, pub payload_lokal: FuncId, pub payload_angka: FuncId, pub pola_pilih: FuncId, pub buka_lokal: FuncId, pub field_lokal: FuncId, pub field_banyak: FuncId, pub metode_tukar: FuncId, pub metode_lokal: FuncId, pub karakter_lokal: FuncId, pub konteks_mentah: FuncId, pub masuk_ringan: FuncId, pub keluar_ringan: FuncId, pub karakter: FuncId, pub bangun: FuncId, pub baca_pecahan: FuncId, pub jenis_sama: FuncId, pub panjang: FuncId, pub panjang_lokal: FuncId,
     pub payload_jenis_sama: FuncId, pub payload_panjang: FuncId, pub keluar_ringan_angka: FuncId, pub teks_bulat: FuncId,
     pub tambah_nilai: FuncId, pub keluar_ringan_nilai: FuncId, pub ubah_baca: FuncId, pub ubah_tulis: FuncId, pub ubah_tulis_lokal: FuncId, pub ubah_siap: FuncId,
-    pub iter_ada: FuncId, pub maju: FuncId, pub langkah_cabang: FuncId, pub sebar: FuncId,
+    pub iter_ada: FuncId, pub maju: FuncId, pub langkah_cabang: FuncId, pub sebar: FuncId, pub wujud_varian: FuncId,
     pub pindah: FuncId, pub muat_global: FuncId, pub simpan_global: FuncId, pub indeks: FuncId, pub field: FuncId,
     pub masuk: FuncId, pub keluar: FuncId, pub salin: FuncId, pub tukar: FuncId, pub cek_metode: FuncId,
     pub bawaan: FuncId, pub biner: FuncId, pub muat_upval: FuncId, pub simpan_upval: FuncId,
@@ -198,6 +198,9 @@ pub const BUKA_SUDAH: i64 = 1 << 30;
 pub const GAGAL_SPEK: i64 = 1 << 29;
 /// Bit `ip` deopt: puncak stack masih milik VM (hasil instruksi sebelumnya yang spekulasinya gagal).
 pub const PUNCAK_VM: i64 = 1 << 28;
+/// Bit `ip` deopt: bingkai callee yang disisipkan JIR (`jir::Keadaan::induk`); wilayahnya di atas posisi fungsi di
+/// stack pemanggil, dan nilai milik VM-nya sudah di sana (`deopt::pulihkan`).
+pub const SISIP: i64 = 1 << 27;
 
 /// Blok saat ini menjadi keluar deopt: nilai stack `jenis` dicatat untuk dilanjutkan VM di `ip`.
 /// `LoadLocal`/`AmbilLokal` di `ip` diikuti `Dup; GetMethod(Cara::Metode); Swap` tanpa sasaran lompat:
@@ -288,7 +291,7 @@ fn cse_aman(op: OpCode, cara: &Cara) -> bool {
 /// Lokal `a` mati sesudah `LoadLocal a` di `ip`: di jalur lurus berikutnya (lompat tanpa syarat diikuti) ia
 /// ditimpa, di-`Pop` atau fungsinya kembali sebelum dibaca. Cuma opcode yang efek stack-nya pasti; lainnya,
 /// cabang bersyarat, atau salinan maya atas `a` = dianggap hidup. Sel tangkapan aman: `ambil` menyalin isinya.
-fn mati_sesudah(f: &VmFunction, r: &Rencana, ip: usize, a: usize) -> bool {
+pub(super) fn mati_sesudah(f: &VmFunction, r: &Rencana, ip: usize, a: usize) -> bool {
     use OpCode::*;
     let kode = &f.chunk.code;
     let mut j = ip + 1;
@@ -321,7 +324,7 @@ fn mati_sesudah(f: &VmFunction, r: &Rencana, ip: usize, a: usize) -> bool {
 /// Rantai lengan `match` atas satu lokal: kepala tiap lengan `LoadLocal a; CekEnum d; JumpFalse x` (digabung,
 /// tanpa sasaran lompat lain di antaranya) dan lengan berikutnya di ujung `Jump` tanpa syarat dari `x`, tiap
 /// titiknya berpendahulu tunggal. Hasil: ip kepala -> (nomor rantai, urutan); daftar ip kepala per rantai.
-fn rantai_pola(f: &VmFunction, r: &Rencana) -> (std::collections::HashMap<usize, (usize, usize)>, Vec<Vec<usize>>) {
+pub(super) fn rantai_pola(f: &VmFunction, r: &Rencana) -> (std::collections::HashMap<usize, (usize, usize)>, Vec<Vec<usize>>) {
     use OpCode::*;
     let kode = &f.chunk.code;
     let n = kode.len();
@@ -375,7 +378,7 @@ fn lanjut_jika(b: &mut FunctionBuilder, benar: Value, lambat: Block) {
 
 /// Tembolok penyimpanan larik lokal di satu wilayah (`ok`, penunjuk data, panjang; `true` = sudah ditetapkan
 /// sebelumnya di wilayah ini). `ok` 0 dari jalur lambat situs mana pun yang menyentuhnya.
-type TemboLarik = (Variable, Variable, Variable, bool);
+pub(super) type TemboLarik = (Variable, Variable, Variable, bool);
 
 /// Alamat elemen `a[i]` atas lokal `rel` lewat tata letak yang ditemukan (aturan `norm_indeks`); tiap pemeriksaan
 /// yang gagal lompat ke `lambat`. Cuma penyimpanan milik tunggal (hitungan kuat 1, lemah mentah 1) — yang tidak
@@ -427,7 +430,7 @@ fn elemen_sebaris(
 }
 
 /// Tembolok penyimpanan lokal `a` di wilayah ini: yang sudah ada (`true`), atau tiga variabel baru.
-fn tembolok_larik(b: &mut FunctionBuilder, larik_tb: &mut Vec<(usize, Variable, Variable, Variable)>, a: usize) -> TemboLarik {
+pub(super) fn tembolok_larik(b: &mut FunctionBuilder, larik_tb: &mut Vec<(usize, Variable, Variable, Variable)>, a: usize) -> TemboLarik {
     if let Some(&(_, ok, d, n)) = larik_tb.iter().find(|(l, ..)| *l == a) { return (ok, d, n, true); }
     let (ok, d, n) = (b.declare_var(types::I64), b.declare_var(types::I64), b.declare_var(types::I64));
     larik_tb.push((a, ok, d, n));
@@ -435,7 +438,7 @@ fn tembolok_larik(b: &mut FunctionBuilder, larik_tb: &mut Vec<(usize, Variable, 
 }
 
 /// Jalur lambat sebuah situs: penyimpanannya tidak lagi pasti untuk akses berikutnya di wilayah ini.
-fn larik_tak_pasti(b: &mut FunctionBuilder, (ok, d, n, _): TemboLarik) {
+pub(super) fn larik_tak_pasti(b: &mut FunctionBuilder, (ok, d, n, _): TemboLarik) {
     let nol = b.ins().iconst(types::I64, 0);
     b.def_var(ok, nol);
     b.def_var(d, nol);
@@ -475,7 +478,7 @@ fn periksa_larik(
 
 /// `a[i]` sebaris (`elemen_sebaris`): bit `i64` elemennya kalau jenisnya yang dispekulasikan, selain itu `lambat`.
 #[allow(clippy::too_many_arguments)]
-fn baca_sebaris(
+pub(super) fn baca_sebaris(
     b: &mut FunctionBuilder, tl: &super::tata_letak::TataLetak, vm_p: Value, basis: Value, rel: usize, i: Value,
     pecahan: bool, lambat: Block, tb: Option<TemboLarik>,
 ) -> Value {
@@ -501,7 +504,7 @@ fn baca_sebaris(
 /// `a[i] = v` sebaris untuk `v` bulat (1), bool (2) atau pecahan (5): elemen lama harus `Nil`/`Bool`/`Int`/`Float`
 /// (tidak memegang apa pun yang perlu dilepas), lalu tag dan isinya ditimpa di tempat; selain itu `lambat`.
 #[allow(clippy::too_many_arguments)]
-fn tulis_sebaris(
+pub(super) fn tulis_sebaris(
     b: &mut FunctionBuilder, tl: &super::tata_letak::TataLetak, vm_p: Value, basis: Value, rel: usize, i: Value,
     v: Value, kode: i64, lambat: Block, tb: Option<TemboLarik>,
 ) {
@@ -891,7 +894,7 @@ fn rumus_baca(
 
 /// Simpul rumus yang dipakai dihitung sekali, berurutan (operandnya selalu simpul sebelumnya); nilai field
 /// yang berubah ke penyangga `wb` (bit pecahan), argumen ke-`j` dari `arg`; hasil rumus nilai sebagai bit pecahan.
-fn rumus_hitung(
+pub(super) fn rumus_hitung(
     b: &mut FunctionBuilder, rm: &super::layak::Rumus, wb: StackSlot, ptr: Type,
     arg: impl Fn(&mut FunctionBuilder, usize) -> Value,
 ) -> Option<Value> {
@@ -1907,7 +1910,8 @@ pub fn turunkan(
             Cara::Sebar => {
                 // 1 = `Err`/`None`: fungsinya kembali dengan nilai itu (masuk dari VM), selain itu VM yang menjalankannya.
                 let p = i64c(&mut b, t as i64 - 1);
-                let c = b.ins().call(f_sebar, &[p]);
+                let pk = i64c(&mut b, (t as i64 - 1) | (ins.arg as i64) << 32);
+                let c = b.ins().call(f_sebar, &[pk]);
                 let c = b.inst_results(c)[0];
                 if r.kembali == super::layak::KEMBALI_SKALAR && !r.ada_defer {
                     let (pulang, terus) = (b.create_block(), b.create_block());

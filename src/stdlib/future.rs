@@ -7,45 +7,22 @@ use crate::vm::channel::VmChannel;
 use std::sync::{Arc, Mutex};
 use crate::sinkron::{self, Pegangan};
 use crate::vm::value::VmValue::{Int, Sinkron};
-use std::sync::atomic::{AtomicI64, Ordering};
 use std::collections::HashMap;
+
+/// Badannya HARUS berbeda per nama: VM mengenali bawaan dari alamat fungsinya (`info_native`), dan dua closure yang
+/// identik dilipat kompilator jadi satu alamat (Task terbaca Future).
+fn tak_tercapai(nama: &str) -> String {
+    format!("bug di jrgc: badan {} dipanggil tanpa dicegat NativeKhusus::Tugas", nama)
+}
 
 pub fn register(vm: &mut Vm) {
     use VmValue::*;
 
     // ── Future ────────────────────────────────────────────────────────────
 
-    vm.def("Future::new", |a| {
-        if a.is_empty() {
-            return Err("Future::new(fn, args...) butuh minimal 1 arg".to_string());
-        }
-        let fn_val = a[0].clone();
-        let args   = a[1..].to_vec();
-
-        // Buat channel kapasitas 1 untuk menampung hasil
-        let ch = VmChannel::new(1);
-
-        // Clone untuk goroutine
-        let ch_clone = ch.clone();
-        let globals  = HashMap::new(); // goroutine dapat globals dari caller
-
-        // Spawn OS thread untuk eksekusi fn
-        std::thread::spawn(move || {
-            let mut vm = crate::vm::vm::Vm::new();
-            for (k, v) in globals { vm.globals.insert(k, v); }
-            // Kegagalan IKUT dibawa, tidak ditelan jadi `nil`.
-            let result = match vm.call_value_immediate(fn_val, args) {
-                Ok(v) => v,
-                Err(e) => VmValue::str(format!("Future gagal: {}", e.msg)),
-            };
-            let _ = ch_clone.send(result);
-        });
-
-        let mut map = HashMap::new();
-        map.insert("_ch".to_string(),      buram(ch));
-        map.insert("done".to_string(),     Bool(false));
-        Ok(VmValue::struktur("Future", map))
-    });
+    // `Future::new` dan `Task::spawn` dicegat `NativeKhusus::Tugas` di tiap pintu (`vm::tampil::mulai_tugas_vm`), jadi
+    // badannya tidak pernah jalan; registrasinya cuma memberi nama dan aritasnya.
+    vm.def("Future::new", |_| Err(tak_tercapai("Future::new")));
 
     vm.def("future::await", |a| {
         let (c, serah) = kanal_tunggal(a.first(), "future::await")?;
@@ -55,7 +32,7 @@ pub fn register(vm: &mut Vm) {
         if !klaim(&serah) {
             return Err(crate::interpreter::tugas::pesan_sudah_diserahkan("future::await"));
         }
-        let val = c.recv().map_err(|e| format!("future::await: {}", e))?.unwrap_or(Nil);
+        let val = c.recv().map_err(|e| crate::interpreter::tugas::sebut_siapa("future::await", e))?.unwrap_or(Nil);
         cek_gagal_vm(val)
     });
 
@@ -132,7 +109,7 @@ pub fn register(vm: &mut Vm) {
                 return Err(crate::interpreter::tugas::pesan_sudah_diserahkan(
                     &format!("future::all: elemen ke-{}", i)));
             }
-            let v = c.recv().map_err(|e| format!("future::all: {}", e))?.unwrap_or(Nil);
+            let v = c.recv().map_err(|e| crate::interpreter::tugas::sebut_siapa("future::all", e))?.unwrap_or(Nil);
             hasil.push(cek_gagal_vm(v)?);
         }
         Ok(Array(Arc::new(Mutex::new(hasil))))
@@ -205,35 +182,7 @@ pub fn register(vm: &mut Vm) {
 
     // ── Task ─────────────────────────────────────────────────────────────
 
-    static TASK_ID: AtomicI64 = AtomicI64::new(1);
-
-    vm.def("Task::spawn", |a| {
-        if a.is_empty() {
-            return Err("Task::spawn(fn, args...) butuh minimal 1 arg".to_string());
-        }
-        let fn_val = a[0].clone();
-        let args   = a[1..].to_vec();
-        let id     = TASK_ID.fetch_add(1, Ordering::SeqCst);
-
-        // Done channel: kapasitas 1, dikirim nil saat selesai
-        let done_ch = VmChannel::new(1);
-        let done_clone = done_ch.clone();
-
-        std::thread::spawn(move || {
-            let mut vm = crate::vm::vm::Vm::new();
-            // Hasilnya DIKIRIM, bukan dibuang.
-            let hasil = match vm.call_value_immediate(fn_val, args) {
-                Ok(v) => v,
-                Err(e) => VmValue::str(format!("task gagal: {}", e.msg)),
-            };
-            let _ = done_clone.send(hasil);
-        });
-
-        let mut map = HashMap::new();
-        map.insert("_done".to_string(),    buram(done_ch));
-        map.insert("id".to_string(),       Int(id as i128));
-        Ok(VmValue::struktur("Task", map))
-    });
+    vm.def("Task::spawn", |_| Err(tak_tercapai("Task::spawn")));
 
     vm.def("task::join", |a| {
         // Nilai yang diterima DIKEMBALIKAN (versi lama menunggu lalu membuangnya), dan
@@ -242,7 +191,7 @@ pub fn register(vm: &mut Vm) {
         if !klaim(&serah) {
             return Err(crate::interpreter::tugas::pesan_sudah_diserahkan("task::join"));
         }
-        cek_gagal_vm(c.recv().ok().flatten().unwrap_or(Nil))
+        cek_gagal_vm(c.recv().map_err(|e| crate::interpreter::tugas::sebut_siapa("task::join", e))?.unwrap_or(Nil))
     });
 
     // Ditolak apa pun argumennya, seperti interpreter: menyebut bentuk `(t: Task)` untuk

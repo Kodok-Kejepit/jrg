@@ -13,7 +13,7 @@ use super::dependensi::tambah_path_dependensi;
 
 /// Eksekusi satu file .jrg: Lex → Parse → VM/Interpret (+ optional profiler)
 pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool, emit_bc: bool) -> Result<(), String> {
-    if prof { crate::profiler::init(true); eprintln!("[jrgm] profiler aktif\n"); }
+    if prof { crate::profiler::init(true); crate::ecetak_t!("[jrgm] profiler aktif\n"); }
 
     let src = std::fs::read_to_string(path)
         .map_err(|e| format!("tidak bisa baca `{}`: {}", path.display(), crate::host::galat_io(&e)))?;
@@ -22,16 +22,16 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
     // caret di kolom yang benar — galat lex dan parse juga, sama dengan `jrgc`.
     let mut source_map = crate::diag::SourceMap::with_file(sf.clone());
 
-    if verbose { eprintln!("[jrgm] lexing: {}", path.display()); }
+    if verbose { crate::ecetak_t!("[jrgm] lexing: {}", path.display()); }
     let tokens = crate::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
-    if verbose { eprintln!("[jrgm] {} token(s) diproduksi", tokens.len()); }
+    if verbose { crate::ecetak_t!("[jrgm] {} token(s) diproduksi", tokens.len()); }
 
     let (ast, parse_errors) = parse(tokens, false);
     if !parse_errors.is_empty() {
         crate::pipa::laporkan_galat_parse(&parse_errors, false, &source_map);
         return Err(String::new());
     }
-    if verbose { eprintln!("[jrgm] {} items — memulai {}...",
+    if verbose { crate::ecetak_t!("[jrgm] {} items — memulai {}...",
         ast.items.len(), if use_vm { "Bytecode VM" } else { "interpreter" }); }
 
     let source_dir = path.parent().map(|p| p.to_path_buf())
@@ -49,7 +49,7 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
         let result = crate::vm::run_file_with_paths(&ast, search_paths.clone(), emit_bc, prof);
         crate::jit::laporan::cetak_bila_diminta();
         if prof { crate::profiler::report(); }
-        if verbose { eprintln!("[jrgm] selesai (VM)"); }
+        if verbose { crate::ecetak_t!("[jrgm] selesai (VM)"); }
         return match result {
             Ok(()) => { crate::host::keluar_kode_main(); Ok(()) }
             Err(e) => {
@@ -74,7 +74,7 @@ pub(crate) fn run_jrg_file(path: &Path, verbose: bool, prof: bool, use_vm: bool,
             Err(String::new())
         }
     };
-    if verbose { eprintln!("[jrgm] selesai"); }
+    if verbose { crate::ecetak_t!("[jrgm] selesai"); }
     result
 }
 
@@ -85,7 +85,7 @@ pub(crate) fn check_jrg_file(path: &Path, verbose: bool) -> Result<(), String> {
 
     let sf = SourceFile { id: 0, name: path.display().to_string(), src };
 
-    if verbose { eprintln!("[jrgm] lexing: {}", path.display()); }
+    if verbose { crate::ecetak_t!("[jrgm] lexing: {}", path.display()); }
 
     let source_map = crate::diag::SourceMap::with_file(sf.clone());
     let tokens = crate::pipa::lex_dilaporkan(&sf, &source_map).ok_or_else(String::new)?;
@@ -93,9 +93,9 @@ pub(crate) fn check_jrg_file(path: &Path, verbose: bool) -> Result<(), String> {
 
     if parse_errors.is_empty() {
         if verbose {
-            eprintln!("[jrgm] syntax OK ({} items)", ast.items.len());
+            crate::ecetak_t!("[jrgm] syntax OK ({} items)", ast.items.len());
         } else {
-            eprintln!("[jrgm] syntax OK: {}", path.display());
+            crate::ecetak_t!("[jrgm] syntax OK: {}", path.display());
         }
         Ok(())
     } else {

@@ -4,6 +4,7 @@
 extern crate alloc;
 pub mod antrean;
 pub mod sinkron;
+pub mod opsi;
 pub mod ruang_tipe;
 pub mod hash_cepat;
 pub mod json_inti;
@@ -28,6 +29,17 @@ pub mod jit;
 
 /// Backend ketiga: lowering AST ke LLVM IR, lalu native lewat `clang`.
 pub mod llvm;
+pub mod wasm;
+
+/// Bahasa pesan JRG (Indonesia/Inggris) dan penerjemah pesan di pintu keluar.
+pub mod terjemah;
+
+/// `println!` dalam bahasa pesan yang berlaku (lihat `terjemah`).
+#[macro_export]
+macro_rules! cetak_t { ($($a:tt)*) => { println!("{}", $crate::terjemah::t(&format!($($a)*))) } }
+/// `eprintln!` dalam bahasa pesan yang berlaku.
+#[macro_export]
+macro_rules! ecetak_t { ($($a:tt)*) => { eprintln!("{}", $crate::terjemah::t(&format!($($a)*))) } }
 
 pub mod fmt;
 pub mod uji;

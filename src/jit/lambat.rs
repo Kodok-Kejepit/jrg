@@ -884,9 +884,12 @@ pub extern "C" fn biner(ip: i64, jenis: *const Jenis, t: i64, nilai: *const i64)
 /// `Propagate` (`?`) atas posisi `p`: 0 = `Ok`/`Some`, posisinya jadi payload; 1 = `Err`/`None`, tidak
 /// disentuh (fungsinya kembali dengan nilai itu); 2 = bukan `Result`/`Option` (VM yang melapor).
 pub extern "C" fn sebar(p: i64) -> i32 {
+    // 32 bit atas: keluarga kembalian yang ditulis fungsinya (arg `Propagate`); `?` lintas keluarga = VM yang melapor.
+    let (pos, keluarga) = ((p & 0xffff_ffff) as usize, (p >> 32) as u32);
     let (vm, basis) = konteks();
-    let v = sediakan(vm, basis, p as usize);
+    let v = sediakan(vm, basis, pos);
     match Vm::tagged_parts(v) {
+        Some((_, var, _)) if crate::vm::sebar_lintas_keluarga(keluarga, &var) => 2,
         Some((ty, var, isi)) if ty == "Result" || ty == "Option" => match var.as_str() {
             "Ok" | "Some" => { *v = isi.unwrap_or(VmValue::Nil); 0 }
             "Err" | "None" => 1,
@@ -1010,6 +1013,13 @@ impl SitusPola {
             crate::vm::value::Label::Enum { nama, .. } if *nama as *const _ as usize != self.nama))
     }
 
+    /// `tolak` + `cocok` atas varian `nama` yang diketahui saat kompilasi (bayangan varian JIR), tanpa nilai:
+    /// hasilnya cuma bergantung pada nama varian dan jumlah isi payload-nya (`cocok_enum_bagian`).
+    pub fn cocok_statis(&self, nama: &'static crate::vm::value::NamaVarian, payload: Option<usize>) -> Result<bool, String> {
+        if self.nama != 0 && nama as *const _ as usize != self.nama { return Ok(false); }
+        crate::vm::cocok_enum_bagian(unsafe { &*self.desc }, &nama.tipe, &nama.varian, payload.map(|n| move || n))
+    }
+
     #[inline(always)]
     fn cocok(&self, v: &VmValue) -> Result<bool, String> {
         use std::sync::atomic::Ordering::{Acquire, Relaxed, Release};
@@ -1064,6 +1074,50 @@ impl RantaiPola {
     pub fn bocor(situs: Vec<&'static SitusPola>) -> &'static RantaiPola {
         Box::leak(Box::new(RantaiPola { situs: situs.into_boxed_slice() }))
     }
+}
+
+impl RantaiPola {
+    /// Jawaban `pola_pilih` atas varian yang diketahui saat kompilasi; `None` = ada lengan yang galat (VM yang melapor).
+    pub fn pilih_statis(&self, nama: &'static crate::vm::value::NamaVarian, payload: Option<usize>) -> Option<usize> {
+        for (k, situs) in self.situs.iter().enumerate() {
+            match situs.cocok_statis(nama, payload) {
+                Ok(true) => return Some(k),
+                Ok(false) => {}
+                Err(_) => return None,
+            }
+        }
+        Some(self.situs.len())
+    }
+}
+
+/// Tabel varian satu fungsi JIR (bayangan varian, JIR-3b): penanda = indeks. `konst` = alamat konstanta chunk varian
+/// tanpa payload (disalin, bukan dibangun ulang), 0 kalau tidak ada. Ditambah saat kompilasi, dibaca saat jalan.
+/// Entri: nama, jumlah isi payload, konstanta, dan bit slot payload yang pecahan (`apung`).
+pub struct TabelVarian(pub std::sync::RwLock<Vec<(&'static crate::vm::value::NamaVarian, Option<usize>, usize, u64)>>);
+
+/// Varian berbayangan di posisi `pos` yang isi stack VM-nya basi (penanda `tag` di bit `basi`) ditulis dari
+/// penanda dan payload-nya (`isi`, bit `pecahan` = isi pecahan; bit 63 = cuma payload tuple-nya); penanda lain =
+/// isinya sudah benar.
+pub extern "C" fn wujud_varian(pos: i64, tabel: *const TabelVarian, tag: i64, basi: i64, pecahan: i64, isi: *const i64) {
+    if (basi as u64 >> tag) & 1 == 0 { return; }
+    let (nama, payload, konst, apung) = unsafe { &*tabel }.0.read().unwrap_or_else(|p| p.into_inner())[tag as usize];
+    // Jenis tiap isi milik variannya (tabel); `pecahan` cuma membawa bit 63 (payload tuple saja).
+    let _ = pecahan & !(1 << 63);
+    let skalar = |k: usize| {
+        let b = unsafe { *isi.add(k) };
+        if (apung >> k) & 1 == 1 { VmValue::Float(f64::from_bits(b as u64)) } else { VmValue::Int(b as i128) }
+    };
+    let v = if pecahan < 0 {
+        VmValue::tuple((0..payload.unwrap_or(0)).map(skalar).collect())
+    } else if konst != 0 { unsafe { &*(konst as *const VmValue) }.clone() } else {
+        VmValue::varian_nama(nama, match payload {
+            None => None,
+            Some(1) => Some(skalar(0)),
+            Some(n) => Some(VmValue::tuple((0..n).map(skalar).collect())),
+        })
+    };
+    let (vm, basis) = konteks();
+    *sediakan(vm, basis, pos as usize) = v;
 }
 
 /// Rantai lengan atas lokal `slot`: indeks lengan pertama yang cocok, banyaknya lengan kalau tidak ada,

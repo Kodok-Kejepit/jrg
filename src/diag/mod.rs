@@ -21,9 +21,9 @@ impl Severity {
     fn label(self) -> &'static str {
         match self {
             Severity::Error => "error",
-            Severity::Warning => "peringatan",
-            Severity::Note => "catatan",
-            Severity::Help => "bantuan",
+            Severity::Warning => crate::terjemah::pilih("peringatan", "warning"),
+            Severity::Note => crate::terjemah::pilih("catatan", "note"),
+            Severity::Help => crate::terjemah::pilih("bantuan", "help"),
         }
     }
 }
@@ -47,6 +47,21 @@ pub fn register_module_source(name: String, src: String) -> u32 {
     let id = daftar.len() as u32 + 1;
     daftar.push(SourceFile { id, name, src });
     id
+}
+
+/// Berkas utama (id 0), dipasang `pipa::lex_dilaporkan`: `lokasi` membutuhkannya saat program berjalan.
+static BERKAS_UTAMA: std::sync::Mutex<Option<SourceFile>> = std::sync::Mutex::new(None);
+
+pub fn daftarkan_utama(sf: &SourceFile) {
+    if sf.id == 0 { *BERKAS_UTAMA.lock().unwrap_or_else(|p| p.into_inner()) = Some(sf.clone()); }
+}
+
+/// `(berkas, baris, kolom)` sebuah `Span` saat program berjalan (`tangkap`), kalau sumbernya diketahui.
+pub fn lokasi(span: Span) -> Option<(String, usize, usize)> {
+    let sf = if span.file_id == 0 { BERKAS_UTAMA.lock().unwrap_or_else(|p| p.into_inner()).clone()? }
+             else { sumber_modul(span.file_id)? };
+    let peta = SourceMap::with_file(sf);
+    peta.locate(span).map(|l| (l.file_name.to_string(), l.line_no, l.col))
 }
 
 /// Salinan sumber modul ber-`id`, kalau pernah didaftarkan.
@@ -255,6 +270,7 @@ pub fn nada() -> Nada {
 // Sisanya dipecah ke empat berkas; `pub use` menjaga jalur `diag::X`
 // tetap persis seperti sebelum dipecah.
 mod nada;
+mod nada_en;
 mod render;
 mod kode;
 pub use kode::codes;

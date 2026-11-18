@@ -1,6 +1,34 @@
 // Tabel bersama `tests/llvm_parity.rs` dan `tests/jit_parity.rs`; disisipkan lewat `include!`.
 
 const GAGAL_SAAT_JALAN: &[(&str, &str, &str, &str)] = &[
+    // K5: kalimat acuan milik fungsi di balik nilai fungsi, saat jalan.
+    ("argumen bernama asing lewat parameter bernilai fungsi",
+     "package main\nfn pakai(g) { return g(a: 10, b: 2) }\npub fn main() {\n wok(\"mulai\")\n wok(pakai(|x, y| x))\n}",
+     "mulai", "tidak ada parameter bernama `a` — yang ada: x, y"),
+    ("argumen bernama kurang lewat var",
+     "package main\npub fn main() {\n var f = |a, b| a + b\n wok(\"mulai\")\n wok(f(a: 1))\n}",
+     "mulai", "parameter `b` (posisi 2) wajib diisi"),
+    ("spread kurang lewat var",
+     "package main\npub fn main() {\n var f = |a, b| a + b\n var v = [1]\n wok(\"mulai\")\n wok(f(...v))\n}",
+     "mulai", "parameter `b` (posisi 2) wajib diisi"),
+    ("spread kebanyakan lewat parameter",
+     "package main\nfn sebar(g, v) { return g(...v) }\nfn dua(a, b) { return a + b }\npub fn main() {\n wok(\"mulai\")\n wok(sebar(dua, [1, 2, 3]))\n}",
+     "mulai", "3"),
+    ("argumen bernama ke konstruktor sebagai nilai",
+     "package main\nenum E { A(int) }\npub fn main() {\n var f = E::A\n wok(\"mulai\")\n wok(f(x: 1))\n}",
+     "mulai", "`enum_ctor:E::A` tidak menyimpan nama parameternya"),
+    ("spread kurang ke method sebagai nilai",
+     "package main\nstruct T { v: int }\nimpl T { fn m(self, k) { return self.v + k } }\npub fn main() {\n var f = T::m\n var v = [T { v: 1 }]\n wok(\"mulai\")\n wok(f(...v))\n}",
+     "mulai", "fungsi `T::m`: parameter `k` (posisi 2) wajib diisi"),
+    // K4: batas tuple dari variabel di luar jangkauan atau terbalik — kalimat acuan, saat jalan.
+    ("potong tuple: batas variabel di luar jangkauan", "package main\npub fn main() {\n let t = (1, 2)\n var i = 5\n wok(\"mulai\")\n wok(t[i:])\n}",
+     "mulai", "di luar"),
+    ("potong tuple: batas variabel terbalik", "package main\npub fn main() {\n let t = (1, 2, 3)\n var i = 2\n var j = 1\n wok(\"mulai\")\n wok(t[i:j])\n}",
+     "mulai", "terbalik"),
+    // `match` bulat lewat `switch` tanpa `_`: nilai di luar semua lengan gagal dengan kalimat acuan.
+    ("match bulat lewat switch tanpa lengan cocok",
+     "package main\nfn f(v: int) -> string { match v { 0 => \"nol\", 1..=2 => \"kecil\" } }\npub fn main() {\n wok(f(1))\n wok(f(7))\n}",
+     "kecil", "tidak ada"),
     // #1011: kanal tertutup ditolak di semua lengan `select` sebelum mencoba, juga di LLVM.
     ("select: lengan kedua tertutup ditolak walau lengan pertama siap",
      "let t = make_chan(int, 1)\nt.close()\nlet d = make_chan(int, 1)\nd <- 1\nwok(\"sebelum\")\nselect {\n    case x := <-d: { wok(\"tak boleh\", x) }\n    case y := <-t: { wok(\"tak boleh juga\", y) }\n}\n",
@@ -1052,4 +1080,17 @@ pub fn main() {
         "sebelum",
         "`Ptr` adalah handle buatan pustaka — field `id` tidak bisa ditulis",
     ),
+    // `tangkap` (surat 11.30): `panik(g)` melempar ulang dengan tempat asalnya; salah pakai TIDAK ditangkap.
+    ("tangkap: panik(g) melempar ulang dengan lokasi asal",
+     "package main\nfn f() -> int {\n    let a = [1]\n    return a[3]\n}\npub fn main() {\n    match tangkap(|| f()) { Err(g) => { wok(\"sebelum\")\n        panik(g) }, Ok(_) => {} }\n}\n",
+     "sebelum",
+     ":4:12, lalu dilempar lagi lewat `panik`"),
+    ("tangkap: bukan fungsi",
+     "package main\npub fn main() {\n    wok(\"sebelum\")\n    let r = tangkap(5)\n    wok(r)\n}\n",
+     "sebelum",
+     "tangkap butuh fungsi tanpa argumen, dapat `int`"),
+    ("tangkap: fungsi yang butuh argumen",
+     "package main\npub fn main() {\n    wok(\"sebelum\")\n    let r = tangkap(|x| x)\n    wok(r)\n}\n",
+     "sebelum",
+     "tangkap butuh fungsi tanpa argumen, dapat fungsi yang butuh 1 argumen"),
 ];

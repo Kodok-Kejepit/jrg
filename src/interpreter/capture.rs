@@ -81,6 +81,29 @@ pub fn blok_menulis(b: &Block, nama: &str) -> bool {
     out.contains(&format!("{}{}", PENANDA_TULIS, nama))
 }
 
+/// Awalan penanda "nama ini diikat dari, atau ke, nama lain apa adanya" (`let b = a`, `b = a`).
+const PENANDA_BAGI: &str = "\u{0}bagi:";
+
+/// Nama yang bisa berbagi penyangga di backend LLVM karena diikat langsung dari nama lain
+/// (`let b = a`, `var b = a`, `b := a`, `b = a`), dua-duanya, di kedalaman mana pun.
+pub fn calon_bagi(b: &FnBody) -> HashSet<String> {
+    let mut out = HashSet::new();
+    walk_fn_body(b, &mut out);
+    out.into_iter().filter_map(|n| n.strip_prefix(PENANDA_BAGI).map(str::to_string)).collect()
+}
+
+fn tandai_bagi(kiri: &str, kanan: &Expr, out: &mut HashSet<String>) {
+    let isi: Vec<&Expr> = match kanan {
+        Expr::Ident(..) => vec![kanan],
+        Expr::Array { elems, .. } | Expr::Tuple { elems, .. } => elems.iter().collect(),
+        _ => return,
+    };
+    let nama: Vec<&str> = isi.iter().filter_map(|e| if let Expr::Ident(n, _) = e { Some(n.as_str()) } else { None }).collect();
+    if nama.is_empty() { return; }
+    out.insert(format!("{}{}", PENANDA_BAGI, kiri));
+    for n in nama { out.insert(format!("{}{}", PENANDA_BAGI, n)); }
+}
+
 fn akar_sasaran(e: &Expr) -> Option<&str> {
     match e {
         Expr::Ident(n, _) => Some(n.as_str()),
@@ -313,8 +336,11 @@ fn walk_fn_body(b: &FnBody, out: &mut HashSet<String>) {
 
 fn walk_stmt(s: &Stmt, out: &mut HashSet<String>) {
     match s {
-        Stmt::Let(l) => walk_expr(&l.init, out),
-        Stmt::Var(v) => { if let Some(x) = &v.init { walk_expr(x, out); } }
+        Stmt::Let(l) => {
+            if let crate::parser::Pattern::Ident { name, .. } = &l.pattern { tandai_bagi(name, &l.init, out); }
+            walk_expr(&l.init, out)
+        }
+        Stmt::Var(v) => { if let Some(x) = &v.init { tandai_bagi(&v.name, x, out); walk_expr(x, out); } }
         Stmt::Const(c) => walk_expr(&c.value, out),
         Stmt::Expr(e) => walk_expr(e, out),
         Stmt::Assign(a) => {
@@ -323,8 +349,14 @@ fn walk_stmt(s: &Stmt, out: &mut HashSet<String>) {
                 walk_expr(t, out);
             }
             for v in &a.values { walk_expr(v, out); }
+            if let ([Expr::Ident(t, _)], [v], crate::parser::AssignOp::Eq) = (a.targets.as_slice(), a.values.as_slice(), &a.op) {
+                tandai_bagi(t, v, out);
+            }
         }
-        Stmt::ShortDecl(d) => { for v in &d.values { walk_expr(v, out); } }
+        Stmt::ShortDecl(d) => {
+            if let ([t], [v]) = (d.names.as_slice(), d.values.as_slice()) { tandai_bagi(t, v, out); }
+            for v in &d.values { walk_expr(v, out); }
+        }
         Stmt::If(i) => walk_if(i, out),
         Stmt::For(f) => match f {
             ForStmt::Classic { init, cond, post, body, .. } => {

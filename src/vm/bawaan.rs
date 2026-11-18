@@ -345,9 +345,15 @@ impl Vm {
             Ok(Nil)
         });
         // Satu-satunya cara kode JRG melempar galat sendiri.
+        self.def("tangkap", |_a| Err("tangkap: dicegat di situs pemanggilan".to_string()));
         self.def("panik", |a| {
             Err(match a.first() {
                 None => "panik() tanpa alasan — sebutkan apa yang salah".to_string(),
+                Some(g) if g.nama_struct() == Some(crate::interpreter::tangkap::NAMA) => {
+                    let teks = |k: &str| match crate::vm::baca_field(g, k) { Ok(VmValue::Str(s)) => s.to_string(), _ => String::new() };
+                    let bulat = |k: &str| match crate::vm::baca_field(g, k) { Ok(VmValue::Int(n)) => n, _ => 0 };
+                    crate::interpreter::tangkap::pesan_lempar_ulang(&teks("pesan"), &teks("berkas"), bulat("baris"), bulat("kolom"))
+                }
                 Some(v) => format!("{}", v),
             })
         });

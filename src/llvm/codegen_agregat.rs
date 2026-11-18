@@ -846,7 +846,7 @@ impl Codegen {
             let en = self.instantiate_result(&JrgType::Any, &JrgType::Any);
             self.buka_any(&v, &JrgType::Enum(en), span)?
         } else { v };
-        let ename = match &v.ty { JrgType::Enum(n) => n.clone(), other => return Err(format!("[{}:{}] `?` hanya berlaku pada Option/Result, dapat `{}`", span.lo.0, span.hi.0, other.display_name())) };
+        let ename = match &v.ty { JrgType::Enum(n) => n.clone(), other => return Err(format!("[{}:{}] {}", span.lo.0, span.hi.0, crate::interpreter::pesan_sebar_bukan_hasil(&other.nama_typeof()))) };
         let place = self.spill_to_place(&v);
         let tagptr = self.fresh("qtag.");
         self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 0", tagptr, v.ty.llvm_ty(), place));
@@ -874,7 +874,7 @@ impl Codegen {
                     let n = self.build_enum_unit_variant(&ren, "None")?;
                     Some(self.kotak_any(&n, span)?)
                 }
-                _ => return Err(format!("[{}:{}] `?` pada Option butuh fungsi ini mengembalikan `Option<..>` juga", span.lo.0, span.hi.0)),
+                _ => return Err(format!("[{}:{}] {}", span.lo.0, span.hi.0, crate::interpreter::pesan_sebar_keluarga("Option"))),
             };
             match noneval {
                 Some(n) => self.emit_return(&n, &ret_ty),
@@ -927,7 +927,7 @@ impl Codegen {
                     let k = self.kotak_any(&new_err, span)?;
                     self.emit_return(&k, &ret_ty);
                 }
-                _ => return Err(format!("[{}:{}] `?` pada Result butuh fungsi ini mengembalikan `Result<..>` juga", span.lo.0, span.hi.0)),
+                _ => return Err(format!("[{}:{}] {}", span.lo.0, span.hi.0, crate::interpreter::pesan_sebar_keluarga("Result"))),
             }
 
             self.start_block(ok_lbl);
@@ -938,7 +938,7 @@ impl Codegen {
             self.emit(format!("{} = getelementptr {}, ptr {}, i32 0, i32 0", ofp, ok_payload_struct, blobptr_ok));
             Ok(self.load_place(&ofp, &t))
         } else {
-            Err(format!("[{}:{}] `?` hanya berlaku pada Option/Result", span.lo.0, span.hi.0))
+            Err(format!("[{}:{}] {}", span.lo.0, span.hi.0, crate::interpreter::pesan_sebar_bukan_hasil(&v.ty.nama_typeof())))
         }
     }
 

@@ -6,6 +6,10 @@ impl Parser {
     // ── Pattern parsing ───────────────────────────────────────────────────
 
     pub(crate) fn parse_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.dengan_sarang(Self::parse_pattern_dalam)
+    }
+
+    fn parse_pattern_dalam(&mut self) -> Result<Pattern, ParseError> {
         let lo = self.span_lo();
         if self.at_exact(&TokenKind::LBrace) {
             return Err(self.error(concat!(
@@ -37,6 +41,10 @@ impl Parser {
     }
 
     pub(crate) fn parse_single_pattern(&mut self) -> Result<Pattern, ParseError> {
+        self.dengan_sarang(Self::parse_single_pattern_dalam)
+    }
+
+    fn parse_single_pattern_dalam(&mut self) -> Result<Pattern, ParseError> {
         let lo = self.span_lo();
         match &self.current().kind {
             // `self` as pattern (receiver parameter)

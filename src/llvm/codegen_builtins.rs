@@ -103,6 +103,7 @@ impl Codegen {
             "Atomic::new" | "Mutex::new" | "atomic::get" | "atomic::set" | "atomic::add" | "atomic::sub" | "atomic::cas"
             | "mutex::lock" | "mutex::unlock" | "mutex::with_lock" => self.panggil_sinkron(name, args, span),
             "Future::new" => self.masa_baru(args, false, span),
+            "tangkap" if args.len() == 1 => self.tangkap(&args[0], span),
             "Task::spawn" => self.masa_baru(args, true, span),
             _ if (name.starts_with("future::") || name.starts_with("task::")) && self.nama_masa(name, args.len()) =>
                 return self.coba_builtin_masa(name, args, span),
@@ -617,7 +618,16 @@ impl Codegen {
         self.emit(format!("store i64 0, ptr {}", outl));
         let okr = self.fresh("tokok.");
         self.emit(format!("{} = call i32 @jrg_read_line(ptr {}, ptr {})", okr, outp, outl));
-        let _ = okr;
+        // Masukan bukan UTF-8 dulu diam-diam jadi teks kosong di sini, sementara acuannya gagal (Fase AMAN-68).
+        for (kode, pesan) in [(2, crate::host::PESAN_MASUKAN_BUKAN_UTF8.to_string()), (3, crate::host::pesan_baris_kepanjangan())] {
+            let c = self.fresh("tokc.");
+            self.emit(format!("{} = icmp eq i32 {}, {}", c, okr, kode));
+            let (gagal, lanjut) = (self.fresh_label("tok_gagal."), self.fresh_label("tok_lanjut."));
+            self.terminate(format!("br i1 {}, label %{}, label %{}", c, gagal, lanjut));
+            self.start_block(gagal);
+            self.panik(&format!("tok: {}", pesan));
+            self.start_block(lanjut);
+        }
         self.join_str(&outp, &outl)
     }
 
@@ -653,14 +663,25 @@ impl Codegen {
             }
             // Nilai bertag: panjangnya dibaca menurut tagnya; yang tak berpanjang gagal saat jalan.
             JrgType::Any => {
-                use super::codegen_any::{TAG_DICT, TAG_SLICE, TAG_STR};
+                use super::codegen_any::{TAG_BURAM, TAG_DICT, TAG_SLICE, TAG_STR};
                 let tag = self.tag_any(v);
                 let hasil = self.alloca_raw("lenany.", "i64", Some(8));
                 let (l_str, l_agr, l_tolak, l_gab) = (self.fresh_label("lenany.str."),
                     self.fresh_label("lenany.agr."), self.fresh_label("lenany.tolak."), self.fresh_label("lenany.gab."));
+                let l_bur = self.fresh_label("lenany.bur.");
                 self.terminate(format!(
-                    "switch i32 {}, label %{} [ i32 {}, label %{} i32 {}, label %{} i32 {}, label %{} ]",
-                    tag.text, l_tolak, TAG_STR, l_str, TAG_SLICE, l_agr, TAG_DICT, l_agr));
+                    "switch i32 {}, label %{} [ i32 {}, label %{} i32 {}, label %{} i32 {}, label %{} i32 {}, label %{} ]",
+                    tag.text, l_tolak, TAG_STR, l_str, TAG_SLICE, l_agr, TAG_DICT, l_agr, TAG_BURAM, l_bur));
+                // Tipe buram: tuple menjawab jumlah elemennya dari nomor tipenya, yang lain ditolak.
+                self.start_block(l_bur);
+                let (w, _) = self.bagian_buram(v);
+                self.pakai_aritas_buram = true;
+                let (ar, tup, ar64) = (self.fresh("lenanyar."), self.fresh("lenanyt."), self.fresh("lenanyar."));
+                self.emit(format!("{} = call i32 @jrg_buram_aritas(i32 {})", ar, w));
+                self.emit(format!("{} = icmp sge i32 {}, 0", tup, ar));
+                self.emit(format!("{} = sext i32 {} to i64", ar64, ar));
+                self.emit(format!("store i64 {}, ptr {}", ar64, hasil));
+                self.terminate(format!("br i1 {}, label %{}, label %{}", tup, l_gab, l_tolak));
                 self.start_block(l_str);
                 let s = self.buka_any(v, &JrgType::Str, span)?;
                 let n = self.panjang_koleksi(&s, span)?;
@@ -809,6 +830,21 @@ impl Codegen {
             return Err(super::galat::tandai(span, format!("`panik` butuh 1 argumen, dapat {}", args.len())));
         }
         let m = self.codegen_expr(&args[0], Some(&JrgType::Str))?;
+        // `panik(g)` atas `Galat` dari `tangkap`: dilempar ulang dengan kalimat `tangkap::pesan_lempar_ulang`.
+        if m.ty == JrgType::Struct(crate::interpreter::tangkap::NAMA.to_string()) {
+            use crate::interpreter::tangkap::{CATATAN_AWAL, CATATAN_AKHIR};
+            let tempat = self.spill_to_place(&m);
+            let g = self.lokal_sementara(tempat, m.ty.clone(), span);
+            let teks = |s: &str| Expr::Literal(LitKind::Str(s.to_string()), span);
+            let f = |n: &str| Expr::Field { obj: Box::new(g.clone()), field: n.to_string(), span };
+            let s = |e: Expr| Expr::Call { func: Box::new(Expr::PathExpr { segments: vec![String::new(), "str".to_string()], span }), args: vec![e], span };
+            let tambah = |a: Expr, b: Expr| Expr::Binary { op: BinaryOp::Add, lhs: Box::new(a), rhs: Box::new(b), span };
+            let catatan = [teks(CATATAN_AWAL), f("berkas"), teks(":"), s(f("baris")), teks(":"), s(f("kolom")), teks(CATATAN_AKHIR)]
+                .into_iter().fold(f("pesan"), tambah);
+            let ada = Expr::Binary { op: BinaryOp::Gt, lhs: Box::new(f("baris")), rhs: Box::new(Expr::Literal(LitKind::Int(0), span)), span };
+            let pesan = Expr::Ternary { cond: Box::new(ada), then: Box::new(catatan), else_: Box::new(f("pesan")), span };
+            return self.builtin_panik(&[pesan], span);
+        }
         let m = if m.ty != JrgType::Str { self.val_to_str(&m)? } else { m };
         self.ensure_extern("declare void @jrg_panic(ptr, i64) cold nounwind noreturn", "jrg_panic");
         let (mp, ml) = self.split_str(&m);
@@ -1609,8 +1645,11 @@ impl Codegen {
         }
         if item == "join" && args.len() == 2 {
             return Some((|| {
+                // Harapan `[]string` cuma untuk `[]` kosong: dulu ia memaksa `[1, 2]` jadi teks dan menolaknya sebelum
+                // sampai ke jalur lapis di bawah (`str::join([1, 2], "-")` jalan di acuan).
                 let harap = JrgType::Slice(Box::new(JrgType::Str));
-                let a = self.codegen_expr(&args[0], Some(&harap))?;
+                let kosong = matches!(&args[0], Expr::Array { elems, .. } if elems.is_empty());
+                let a = self.codegen_expr(&args[0], kosong.then_some(&harap))?;
                 // Nilai bertag: tagnya harus array (diperiksa saat jalan), elemennya ditampilkan lapis.
                 let a = match a.ty {
                     JrgType::Any => self.buka_terperiksa(&a, &JrgType::Slice(Box::new(JrgType::Any))).unwrap_or(a),

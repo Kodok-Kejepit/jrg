@@ -142,7 +142,8 @@ impl Codegen {
     fn pesan_opsi_tak_punya(tipe: &str, method: &str) -> Option<String> {
         let calon = crate::interpreter::calon_method_enum(tipe);
         if calon.contains(&method) { return None; }
-        let saran = crate::diag::saran_nama_terdekat(method, calon.iter().copied());
+        let prelude = crate::opsi::method_milik(tipe);
+        let saran = crate::diag::saran_nama_terdekat(method, calon.iter().copied().chain(prelude.iter().map(|s| s.as_str())));
         Some(crate::interpreter::pesan_method_tak_ada(&format!("enum:{}", tipe), method, "", saran.as_deref()))
     }
 

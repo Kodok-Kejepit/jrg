@@ -22,12 +22,13 @@ pub mod vm;
 // membuat `vm.rs` bisa tinggal jadi rangkanya saja.
 mod jalankan;
 #[cfg(all(feature = "jit", not(target_arch = "wasm32")))]
-pub(crate) use jalankan::{cocok_enum, larik_milik_tunggal};
+pub(crate) use jalankan::{cocok_enum, cocok_enum_bagian, larik_milik_tunggal, sebar_lintas_keluarga};
 mod panggil;
 pub(crate) mod info_native;
 mod akses;
 pub(crate) mod hof;
 mod op;
+mod opsi;
 pub(crate) mod bawaan;
 
 pub use compiler::{compile, CompileError};
@@ -97,6 +98,8 @@ fn jalankan_berkas(
     emit_bc: bool,
     profiling: bool,
 ) -> Result<(), VmError> {
+    // Thread ini yang menjalankan `main`: kebuntuan dilaporkan dari sini (`antrean::buntu`).
+    crate::antrean::buntu::aktifkan();
     let mut vm = Vm::new();
     if profiling { vm.enable_profiling(); }
     let (impor, file) = &Pemuat::new(emit_bc).muat_utama(&mut vm, file, &search_paths)?;
@@ -105,8 +108,10 @@ fn jalankan_berkas(
     let hasil = vm.run(chunk);
     // Goroutine ditunggu hanya kalau program utama berhasil, sama dengan
     // `Interpreter::run_file`: yang gagal langsung melapor dan berhenti.
-    if hasil.is_ok() { crate::vm::channel::join_all_goroutines(); }
-    hasil
+    match hasil {
+        Ok(()) => crate::vm::channel::join_all_goroutines().map_err(VmError::new),
+        e => e,
+    }
 }
 
 /// Jalankan berkas ini lewat VM dalam **mode uji**.

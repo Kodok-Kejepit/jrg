@@ -180,6 +180,8 @@ impl Interpreter {
             Expr::Literal(lit, _) => Ok(self.eval_lit(lit)),
 
             Expr::Ident(name, _) => match env.get(name) {
+                Some(Value::Enum { type_name, variant, .. }) if type_name == crate::interpreter::TIPE_BELUM_DIISI =>
+                    runtime_err!("{}", crate::interpreter::pesan_dibaca_sebelum_diisi(name, &variant)),
                 Some(v) => Ok(v),
                 None if self.belum_diisi.contains(name) => {
                     runtime_err!("{}", crate::interpreter::pesan_belum_diisi(name))
@@ -417,8 +419,16 @@ impl Interpreter {
 
             Expr::Await { expr, .. } => self.eval_expr(expr, env),
 
-            Expr::Propagate { expr, .. } => {
+            Expr::Propagate { expr, keluarga, .. } => {
                 let v = self.eval_expr(expr, env)?;
+                if let Value::Enum { type_name, variant, .. } = &v {
+                    let lain = match keluarga {
+                        crate::parser::Keluarga::Option => variant == "Err",
+                        crate::parser::Keluarga::Result => variant == "None",
+                        crate::parser::Keluarga::Bebas => false,
+                    };
+                    if lain { return runtime_err!("{}", crate::interpreter::pesan_sebar_keluarga(type_name)); }
+                }
                 match &v {
                     Value::Enum { variant, payload, .. } if variant == "Ok" || variant == "Some" => {
                         Ok(payload.as_deref().cloned().unwrap_or(Value::Unit))
@@ -429,9 +439,7 @@ impl Interpreter {
                     Value::Enum { variant, .. } if variant == "Err" || variant == "None" || variant == "Error" => {
                         Err(Signal::Return(v.clone()))
                     }
-                    other => runtime_err!(
-                        "operator `?` hanya berlaku untuk Result/Option, dapat: {}", other
-                    ),
+                    other => runtime_err!("{}", crate::interpreter::pesan_sebar_bukan_hasil(&other.type_name())),
                 }
             }
 

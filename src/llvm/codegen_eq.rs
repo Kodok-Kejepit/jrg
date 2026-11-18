@@ -429,7 +429,7 @@ impl Codegen {
                 self.emit(format!("{} = call i32 @jrg_buram_aritas(i32 {})", la, lw));
                 self.emit(format!("{} = call i32 @jrg_buram_aritas(i32 {})", ra, rw));
                 self.emit(format!("{} = icmp eq i32 {}, {}", sp, la, ra));
-                self.emit(format!("{} = icmp ne i32 {}, 0", ad, la));
+                self.emit(format!("{} = icmp sgt i32 {}, 0", ad, la));
                 self.emit(format!("{} = and i1 {}, {}", dua, sp, ad));
                 let (l_tup, l_lain) = (self.fresh_label("anyeq.tup."), self.fresh_label("anyeq.lain."));
                 self.terminate(format!("br i1 {}, label %{}, label %{}, !prof !0", dua, l_tup, l_lain));

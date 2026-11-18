@@ -19,7 +19,18 @@ impl Vm {
             // Jumlah argumen yang DITULIS diperiksa di sini karena sesudah `Call` ia
             // sudah bercampur dengan penerima — dan tanpa ini `(2.5).sqrt(1)` dijawab …
             let nanti = argc == crate::vm::opcode::ARGC_NANTI as usize;
-            let v = match self.get_method(&obj, name, sp) {
+            let dapat = match self.get_method(&obj, name, sp) {
+                // Method `Option`/`Result` yang bukan bawaan: prelude `<opsi>` (`crate::opsi`).
+                Err(e) => {
+                    let name = name.clone();
+                    let ditulis = (argc != crate::vm::opcode::ARGC_NANTI as usize).then_some(argc);
+                    match self.fungsi_opsi(&obj, &name, ditulis, sp) { Some(r) => r, None => Err(e) }
+                }
+                ok => ok,
+            };
+            let fr = self.frames.last().ok_or_else(|| VmError::new("no active frame"))?;
+            let name = &fr.func.chunk.names[(arg & 0x00FF_FFFF) as usize];
+            let v = match dapat {
                 Ok(v) => {
                     if nanti {
                         let slot = self.stack.len().saturating_sub(1);

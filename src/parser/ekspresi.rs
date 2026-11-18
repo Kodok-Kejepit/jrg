@@ -200,7 +200,7 @@ impl Parser {
                 // `?` sekarang SELALU propagasi error — tidak ada lagi yang perlu dibedakan.
                 TokenKind::Question => {
                     self.advance();
-                    Expr::Propagate { expr: Box::new(lhs), span: self.merge_span(lo) }
+                    Expr::Propagate { expr: Box::new(lhs), keluarga: self.keluarga, span: self.merge_span(lo) }
                 }
                 TokenKind::Dot => {
                     self.advance();
@@ -431,17 +431,21 @@ impl Parser {
                 }
                 self.expect(&TokenKind::RParen)?;
                 // optional return type annotation: `-> Type`
+                let mut anotasi = None;
                 if self.at_exact(&TokenKind::Arrow) {
                     self.advance();
-                    let _ = self.parse_type();
+                    anotasi = self.parse_type().ok();
                 }
-                let body = Box::new(if self.at_exact(&TokenKind::LBrace) {
+                let keluarga_luar = std::mem::replace(&mut self.keluarga, Keluarga::dari_anotasi(anotasi.as_ref()));
+                let body = (|| -> Result<Box<Expr>, ParseError> { Ok(Box::new(if self.at_exact(&TokenKind::LBrace) {
                     Expr::Block(self.parse_block()?)
                 } else {
                     // `=>` (FatArrow) then expression
                     if self.at_exact(&TokenKind::FatArrow) { self.advance(); }
                     self.parse_expr_with_bp(0)?
-                });
+                })) })();
+                self.keluarga = keluarga_luar;
+                let body = body?;
                 Ok(Expr::Closure { params, is_move: false, ret: None, body: body.into(), span: self.merge_span(lo) })
             }
             // Rust-style closure: |params| expr  or  move |params| expr
@@ -621,6 +625,30 @@ impl Parser {
                 _ => PESAN_KURANG.to_string(),
             });
         }
+        // `a === b` / `a !== b` (JS): `==`/`!=` sudah dimakan operator, `=` ketiga tak punya tempat.
+        if matches!(self.current().kind, TokenKind::Eq) && menempel_mundur(1) {
+            match kb(1) {
+                Some(TokenKind::EqEq) => return Some(concat!(
+                    "`===` bukan bentuk JRG — di sini `==` sudah membandingkan nilai DAN tipe sekaligus ",
+                    "(`1 == 1.0` itu `false`), jadi tulis `==`").to_string()),
+                Some(TokenKind::BangEq) => return Some(
+                    "`!==` bukan bentuk JRG — tulis `!=`; perbandingan JRG sudah ketat soal tipe".to_string()),
+                _ => {}
+            }
+        }
+        // `c ? a : b` gaya C: `?` sudah dibaca sebagai penerus galat, lalu `:` tidak punya tempat.
+        if matches!(self.current().kind, TokenKind::Colon) {
+            let mut i = self.pos;
+            while let Some(j) = i.checked_sub(1) {
+                match &self.tokens[j].kind {
+                    TokenKind::Question => return Some(concat!(
+                        "ternary di JRG ditulis `syarat $ a : b` — `?` di JRG cuma berarti meneruskan ",
+                        "galat (`f()?`)").to_string()),
+                    TokenKind::Semi | TokenKind::LBrace | TokenKind::RBrace => break,
+                    _ => i = j,
+                }
+            }
+        }
         // `i++`: `+` pertama sudah dimakan operator biner.
         if matches!(self.current().kind, TokenKind::Plus)
             && matches!(kb(1), Some(TokenKind::Plus))
@@ -757,11 +785,14 @@ impl Parser {
         };
         // `|x| -> int { … }` — sejajar dengan `fn f(x) -> int`.
         let ret = if self.eat(&TokenKind::Arrow) { Some(self.parse_type()?) } else { None };
-        let body = Box::new(if self.at_exact(&TokenKind::LBrace) {
+        let keluarga_luar = std::mem::replace(&mut self.keluarga, Keluarga::dari_anotasi(ret.as_ref()));
+        let body = (|| -> Result<Box<Expr>, ParseError> { Ok(Box::new(if self.at_exact(&TokenKind::LBrace) {
             Expr::Block(self.parse_block()?)
         } else {
             self.parse_expr()?
-        });
+        })) })();
+        self.keluarga = keluarga_luar;
+        let body = body?;
         let (params, body) = bongkar_pola_closure(params, body);
         Ok(Expr::Closure { params, is_move, ret, body: body.into(), span: self.merge_span(lo) })
     }

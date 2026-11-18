@@ -622,8 +622,12 @@ pub fn canvas_baru(args: &[crate::interpreter::Value]) -> Result<CanvasHandle, S
                         crate::host::galat_baris(&format!("kanvas `{}` tampil di {}", judul, w.alamat));
                         g.web = Some(w);
                     }
-                    #[cfg(target_arch = "wasm32")]
+                    #[cfg(all(target_arch = "wasm32", target_os = "unknown"))]
                     return Err("Canvas::new: mode `\"web\"` tidak tersedia di peramban".to_string());
+                    // WASI preview1 tidak bisa membuka soket pendengar.
+                    #[cfg(all(target_arch = "wasm32", not(target_os = "unknown")))]
+                    return Err("Canvas::new: mode `\"web\"` tidak tersedia di WASI, karena ia tidak bisa membuka soket; \
+                                pakai mode `\"png\"`".to_string());
                 }
                 "png" => g.png_berkas = Some(nama_berkas_png(&judul)),
                 _ => {}
